@@ -1,0 +1,143 @@
+"""Tests for signals/leadership.py — pure computation functions only."""
+import pytest
+import numpy as np
+import pandas as pd
+
+from signals.leadership import _rs_line, _slope, rank_universe, a_grade, StockRank
+
+
+def _make_close(prices: list[float], start: str = "2024-01-01") -> pd.Series:
+    idx = pd.date_range(start, periods=len(prices), freq="B")
+    return pd.Series(prices, index=idx, dtype=float)
+
+
+def _make_df(prices: list[float]) -> pd.DataFrame:
+    idx = pd.date_range("2024-01-01", periods=len(prices), freq="B")
+    return pd.DataFrame({"close": prices, "open": prices, "high": prices, "low": prices}, index=idx)
+
+
+def _bench(n: int = 200, base: float = 100.0) -> pd.DataFrame:
+    prices = [base] * n
+    return _make_df(prices)
+
+
+class TestRsLine:
+    def test_flat_stock_over_flat_bench_is_constant(self):
+        stock = _make_close([100.0] * 50)
+        bench = _make_close([100.0] * 50)
+        rs = _rs_line(stock, bench)
+        assert np.allclose(rs.values, 1.0, atol=1e-6)
+
+    def test_outperforming_stock_has_rising_rs(self):
+        stock = _make_close(list(range(100, 150)))
+        bench = _make_close([100.0] * 50)
+        rs = _rs_line(stock, bench)
+        assert rs.iloc[-1] > rs.iloc[0]
+
+    def test_underperforming_stock_has_falling_rs(self):
+        stock = _make_close(list(range(149, 99, -1)))
+        bench = _make_close([100.0] * 50)
+        rs = _rs_line(stock, bench)
+        assert rs.iloc[-1] < rs.iloc[0]
+
+
+class TestSlope:
+    def test_rising_series_positive_slope(self):
+        s = pd.Series(range(50), dtype=float)
+        assert _slope(s) > 0
+
+    def test_falling_series_negative_slope(self):
+        s = pd.Series(range(50, 0, -1), dtype=float)
+        assert _slope(s) < 0
+
+    def test_flat_series_near_zero(self):
+        s = pd.Series([1.0] * 50)
+        assert abs(_slope(s)) < 1e-6
+
+    def test_insufficient_length_returns_zero(self):
+        s = pd.Series([1.0, 2.0, 3.0])
+        assert _slope(s, n=20) == 0.0
+
+
+class TestRankUniverse:
+    def _universe(self, n_stocks: int = 5, n_rows: int = 100, trend: float = 0.5) -> dict:
+        result = {}
+        for i in range(n_stocks):
+            prices = [100.0 + i * 5 + j * trend for j in range(n_rows)]
+            result[f"STOCK{i}"] = _make_df(prices)
+        return result
+
+    def test_returns_stock_rank_list(self):
+        stocks = self._universe()
+        bench = _bench()
+        ranks = rank_universe(stocks, bench)
+        assert isinstance(ranks, list)
+        assert all(isinstance(r, StockRank) for r in ranks)
+
+    def test_quintiles_in_range(self):
+        stocks = self._universe(5)
+        bench = _bench()
+        ranks = rank_universe(stocks, bench)
+        for r in ranks:
+            assert 1 <= r.quintile <= 5
+
+    def test_skips_short_series(self):
+        stocks = {"SHORT": _make_df([100.0] * 30)}
+        bench = _bench()
+        ranks = rank_universe(stocks, bench)
+        assert ranks == []
+
+    def test_empty_universe_returns_empty(self):
+        ranks = rank_universe({}, _bench())
+        assert ranks == []
+
+    def test_above_50dma_flag(self):
+        # Rising stock: should be above 50dma
+        prices = list(range(100, 201))
+        df = _make_df(prices)
+        bench = _bench(n=200)
+        ranks = rank_universe({"RISING": df}, bench)
+        if ranks:
+            assert ranks[0].above_50dma is True
+
+
+class TestAGrade:
+    def _make_ranks(self) -> list[StockRank]:
+        return [
+            StockRank("BEST1", rs_slope_20d=10.0, pct_vs_50dma=5.0, quintile=5, above_50dma=True),
+            StockRank("BEST2", rs_slope_20d=8.0, pct_vs_50dma=3.0, quintile=5, above_50dma=True),
+            StockRank("MID", rs_slope_20d=1.0, pct_vs_50dma=0.5, quintile=3, above_50dma=True),
+            StockRank("WORST1", rs_slope_20d=-8.0, pct_vs_50dma=-4.0, quintile=1, above_50dma=False),
+            StockRank("WORST2", rs_slope_20d=-10.0, pct_vs_50dma=-5.0, quintile=1, above_50dma=False),
+        ]
+
+    def test_leaders_are_quintile_5_above_50dma(self):
+        longs, _ = a_grade(self._make_ranks())
+        assert all(r.quintile == 5 and r.above_50dma for r in longs)
+
+    def test_laggards_are_quintile_1_below_50dma(self):
+        _, shorts = a_grade(self._make_ranks())
+        assert all(r.quintile == 1 and not r.above_50dma for r in shorts)
+
+    def test_leaders_sorted_descending_by_rs(self):
+        longs, _ = a_grade(self._make_ranks())
+        slopes = [r.rs_slope_20d for r in longs]
+        assert slopes == sorted(slopes, reverse=True)
+
+    def test_laggards_sorted_ascending_by_rs(self):
+        _, shorts = a_grade(self._make_ranks())
+        slopes = [r.rs_slope_20d for r in shorts]
+        assert slopes == sorted(slopes)
+
+    def test_top_n_respected(self):
+        ranks = [
+            StockRank(f"S{i}", rs_slope_20d=float(i), pct_vs_50dma=1.0, quintile=5, above_50dma=True)
+            for i in range(20)
+        ]
+        longs, _ = a_grade(ranks, top_n=5)
+        assert len(longs) <= 5
+
+    def test_empty_returns_empty_lists(self):
+        longs, shorts = a_grade([])
+        assert longs == []
+        assert shorts == []

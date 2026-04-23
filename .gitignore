@@ -1,0 +1,10 @@
+.venv/
+.venv312/
+.pytest_cache/
+__pycache__/
+*.pyc
+.env
+data/trades.json
+data/logs/
+*.log
+.claude/

@@ -1,0 +1,92 @@
+account:
+  capital: 7000000
+  currency: INR
+
+risk:
+  per_trade_pct: 0.0075
+  concurrent_open_pct: 0.03
+  daily_stop_pct: 0.02
+  monthly_stop_pct: 0.06
+  margin_util_cap: 0.60
+  correlation_max: 0.70
+
+targets:
+  monthly_net_pct: 0.05
+  weekly_net_pct: 0.0125
+
+indices:
+  - NIFTY
+  - BANKNIFTY
+
+sectors:
+  - NIFTY IT
+  - NIFTY BANK
+  - NIFTY AUTO
+  - NIFTY PHARMA
+  - NIFTY FMCG
+  - NIFTY METAL
+  - NIFTY ENERGY
+  - NIFTY REALTY
+  - NIFTY INFRA
+  - NIFTY PSE
+  - NIFTY PVT BANK
+
+universe_source: fno200          # fno200 | fo_sample
+intraday_top_n: 30
+
+universe_fo_sample:
+  - RELIANCE
+  - HDFCBANK
+  - ICICIBANK
+  - INFY
+  - TCS
+  - LT
+  - SBIN
+  - AXISBANK
+  - KOTAKBANK
+  - ITC
+  - HINDUNILVR
+  - BHARTIARTL
+  - MARUTI
+  - M&M
+  - SUNPHARMA
+  - BAJFINANCE
+  - ASIANPAINT
+  - TITAN
+  - ADANIENT
+
+schedule_ist:
+  morning_dashboard: "08:45"
+  entry_window_open: "09:20"
+  midday_check: "12:30"
+  eod_review: "15:20"
+
+broker:
+  provider: kite          # kite | dhan | fyers
+  api_key: "${BROKER_API_KEY}"
+  api_secret: "${BROKER_API_SECRET}"
+  access_token: "${BROKER_ACCESS_TOKEN}"
+
+alerts:
+  telegram_bot_token: "${TELEGRAM_BOT_TOKEN}"
+  telegram_chat_id: "${TELEGRAM_CHAT_ID}"
+
+paths:
+  journal_db: "./data/journal.sqlite"
+  cache_dir: "./data/cache"
+
+options:
+  enabled: true
+  underlyings: [NIFTY, BANKNIFTY]
+  lot_size: {NIFTY: 75, BANKNIFTY: 30, FINNIFTY: 65}
+  strike_step: {NIFTY: 50, BANKNIFTY: 100}
+  expiry_preference: weekly          # weekly | monthly
+  max_risk_per_structure_pct: 0.0075
+  max_concurrent_structures: 4
+  iv_history_db: ./data/iv_history.sqlite
+  # Per user choice - initial structures
+  enabled_structures:
+    - BULL_CALL_SPREAD
+    - BEAR_PUT_SPREAD
+    - LONG_STRADDLE
+    - SHORT_STRANGLE_WINGED     # short strangle + protective wings (defined risk)
