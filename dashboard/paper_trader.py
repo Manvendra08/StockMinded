@@ -18,7 +18,18 @@ import yfinance as yf
 import pandas as pd
 
 DATA_FILE = Path(__file__).parent / "paper_trades.json"
-TRADE_CAPITAL = 500_000  # Rs per trade
+IST = timezone(timedelta(hours=5, minutes=30))
+DEFAULT_SETTINGS = {
+    "capital_per_trade": 500000.0,
+    "sl_pct": 2.0,
+    "tgt_pct": 4.0,
+    "trail_sl": False,
+    "min_confidence": "HIGH",
+    "regime_filter": True,
+    "telegram_bot_token": "",
+    "telegram_chat_id": ""
+}
+
 LOCK = threading.Lock()
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -70,9 +81,40 @@ def _load_db() -> dict:
         "option_trades": [],
         "daily_summaries": [],
         "strategy_notes": [],
+        "settings": DEFAULT_SETTINGS.copy(),
         "cumulative_pnl": 0.0,
         "version": 1,
     }
+
+
+def get_settings() -> dict:
+    """Return current paper trader settings."""
+    db = _load_db()
+    settings = DEFAULT_SETTINGS.copy()
+    settings.update(db.get("settings", {}))
+    return settings
+
+
+def save_settings(new_settings: dict) -> dict:
+    """Update and persist paper trader settings."""
+    db = _load_db()
+    if "settings" not in db:
+        db["settings"] = DEFAULT_SETTINGS.copy()
+
+    # Update only valid keys
+    for k, v in new_settings.items():
+        if k in DEFAULT_SETTINGS:
+            # Type casting/validation
+            if k in ("capital_per_trade", "sl_pct", "tgt_pct"):
+                db["settings"][k] = float(v)
+            elif k in ("trail_sl", "regime_filter"):
+                db["settings"][k] = bool(v)
+            else:
+                db["settings"][k] = str(v)
+
+    _save_db(db)
+    return db["settings"]
+
 
 
 def _save_db(db: dict) -> None:
@@ -159,15 +201,15 @@ def enter_trade(alert: dict) -> dict:
     if entry_price is None:
         return {"error": f"Could not fetch LTP for {symbol}"}
 
-    # Calculate position sizing
-    # For simplicity: allocate TRADE_CAPITAL per trade
-    qty = int(TRADE_CAPITAL / entry_price) if entry_price > 0 else 0
-    if qty == 0:
-        return {"error": f"Price too high for Rs {TRADE_CAPITAL:,} allocation"}
+    settings = get_settings()
+    capital_per_trade = settings["capital_per_trade"]
+    sl_pct = settings["sl_pct"]
+    tgt_pct = settings["tgt_pct"]
 
-    # Parse SL / target from alert text or compute defaults
-    sl_pct = 2.0  # default 2% SL
-    tgt_pct = 4.0  # default 4% target (2:1 R:R)
+    # Calculate position sizing
+    qty = int(capital_per_trade / entry_price) if entry_price > 0 else 0
+    if qty == 0:
+        return {"error": f"Price too high for Rs {capital_per_trade:,.0f} allocation"}
 
     if direction == "LONG":
         sl_price = round(entry_price * (1 - sl_pct / 100), 2)
@@ -175,6 +217,7 @@ def enter_trade(alert: dict) -> dict:
     else:
         sl_price = round(entry_price * (1 + sl_pct / 100), 2)
         tgt_price = round(entry_price * (1 - tgt_pct / 100), 2)
+
 
     trade = {
         "id": _next_id(db),
@@ -473,17 +516,31 @@ def auto_enter_from_alerts(alerts: list[dict]) -> list[dict]:
     # Block symbols already traded today (open OR closed)
     today_symbols = {t["symbol"] for t in db["trades"] if t.get("entry_date") == today_str}
 
+    settings = get_settings()
+    min_conf = settings["min_confidence"]
+    conf_levels = {"LOW": 1, "MEDIUM": 2, "HIGH": 3}
+    min_val = conf_levels.get(min_conf, 3)
+
     entered = []
     for alert in alerts:
         sym = alert.get("symbol", "")
-        conf = alert.get("confidence", "")
-
-        # Only auto-enter HIGH confidence
-        if conf != "HIGH":
+        conf = alert.get("confidence", "MEDIUM")
+        
+        # Stricter confidence filter from settings
+        if conf_levels.get(conf, 2) < min_val:
             continue
+            
+        # Regime filter if enabled
+        if settings.get("regime_filter"):
+            # Simple heuristic: if regime is RANGE and it's a trend signal, skip? 
+            # For now, we trust the alert generator already respects regime, 
+            # but this is a placeholder for engine-level filtering.
+            pass
+
         # Skip if already traded today
         if sym in today_symbols:
             continue
+
 
         result = enter_trade(alert)
         if "error" not in result:
@@ -523,8 +580,11 @@ def generate_eod_summary(target_date: str | None = None) -> dict:
     breakeven = [t for t in closed_today if (t.get("pnl") or 0) == 0]
     resolved = [t for t in closed_today if (t.get("pnl") or 0) != 0]
 
+    settings = get_settings()
+    capital_per_trade = settings["capital_per_trade"]
     total_pnl = sum(t.get("pnl", 0) or 0 for t in closed_today)
-    total_pnl_pct = (total_pnl / (TRADE_CAPITAL * max(total_trades, 1))) * 100
+    total_pnl_pct = (total_pnl / (capital_per_trade * max(total_trades, 1))) * 100
+
 
     # Categorize by exit reason
     sl_hits = [t for t in closed_today if t.get("exit_reason") == "SL_HIT"]
@@ -559,7 +619,8 @@ def generate_eod_summary(target_date: str | None = None) -> dict:
         "trades": closed_today,
         "analysis": analysis,
         "corrections": corrections,
-        "capital_per_trade": TRADE_CAPITAL,
+        "capital_per_trade": capital_per_trade,
+
     }
 
     # Update cumulative
@@ -720,13 +781,25 @@ def _generate_corrections(today_trades: list[dict], history: list[dict]) -> list
 #  MAINTENANCE
 # ═══════════════════════════════════════════════════════════════
 
-def cleanup_db(from_date: str | None = None, to_date: str | None = None, purge_churn: bool = True) -> dict:
+def cleanup_db(from_date: str | None = None, to_date: str | None = None, purge_churn: bool = False, full_reset: bool = False) -> dict:
     """Clean up trade database based on criteria.
+    - full_reset: Clears ALL trades and summaries.
     - purge_churn: Removes trades with 0 P&L (spam entries).
     - from_date/to_date: Removes ALL trades in this range (inclusive).
     """
     db = _load_db()
+    
+    if full_reset:
+        db["trades"] = []
+        db["option_trades"] = []
+        db["daily_summaries"] = []
+        db["strategy_notes"] = []
+        db["cumulative_pnl"] = 0.0
+        _save_db(db)
+        return {"status": "success", "message": "Database fully reset"}
+
     original_count = len(db["trades"])
+
     keep_trades = []
     removed_count = 0
 
@@ -846,6 +919,26 @@ def get_stats() -> dict:
         "avg_loser": round(sum(t["pnl"] for t in losers) / max(len(losers), 1), 2),
         "best_trade": max(all_closed, key=lambda t: t.get("pnl", 0) or 0) if all_closed else None,
         "worst_trade": min(all_closed, key=lambda t: t.get("pnl", 0) or 0) if all_closed else None,
-        "capital_per_trade": TRADE_CAPITAL,
+        "capital_per_trade": get_settings()["capital_per_trade"],
         "strategy_corrections": len(db.get("strategy_notes", [])),
     }
+
+
+def export_trades_to_csv() -> str:
+    """Return trade history as a CSV string."""
+    db = _load_db()
+    trades = db.get("trades", [])
+    if not trades:
+        return "No trades found"
+
+    df = pd.DataFrame(trades)
+    # Reorder columns for readability
+    cols = [
+        "id", "symbol", "direction", "status", "entry_price", "exit_price",
+        "qty", "capital_deployed", "pnl", "pnl_pct", "exit_reason",
+        "entry_time", "exit_time", "confidence"
+    ]
+    # Filter only available columns
+    available_cols = [c for c in cols if c in df.columns]
+    return df[available_cols].to_csv(index=False)
+

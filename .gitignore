@@ -8,3 +8,9 @@ data/trades.json
 data/logs/
 *.log
 .claude/
+data/cache/
+dashboard/paper_trades.json
+.gemini/
+.roo/
+.cursor/
+.planning/

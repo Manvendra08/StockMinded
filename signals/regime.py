@@ -63,9 +63,18 @@ def _trend_score(close: pd.Series) -> int:
     e200 = _ema(close, 200).iloc[-1]
     px = close.iloc[-1]
     score = 0
+    # Price vs EMAs
     score += 1 if px > e20 else -1
+    score += 1 if px > e50 else -1
+    score += 1 if px > e200 else -1
+    # EMA alignment
     score += 1 if e20 > e50 else -1
     score += 1 if e50 > e200 else -1
+    # EMA slopes (using last 5 days)
+    e20_slope = 1 if len(close) > 5 and _ema(close, 20).iloc[-1] > _ema(close, 20).iloc[-5] else -1
+    e50_slope = 1 if len(close) > 5 and _ema(close, 50).iloc[-1] > _ema(close, 50).iloc[-5] else -1
+    score += e20_slope
+    score += e50_slope
     return int(score)
 
 

@@ -50,19 +50,30 @@ def rank_universe(stock_data: dict[str, pd.DataFrame], bench_df: pd.DataFrame) -
 
     if not ranks:
         return []
-    slopes = np.array([r.rs_slope_20d for r in ranks])
-    qs = np.quantile(slopes, [0.2, 0.4, 0.6, 0.8])
+    
+    # Explicit threshold scoring for Q (1-5). Use symmetric downside bands
+    # so short table also gets full intermediate grades.
     for r in ranks:
-        if r.rs_slope_20d <= qs[0]:
-            r.quintile = 1
-        elif r.rs_slope_20d <= qs[1]:
-            r.quintile = 2
-        elif r.rs_slope_20d <= qs[2]:
-            r.quintile = 3
-        elif r.rs_slope_20d <= qs[3]:
-            r.quintile = 4
-        else:
+        slope = r.rs_slope_20d
+        vs_dma = r.pct_vs_50dma
+        if slope > 100 and vs_dma > 20:
             r.quintile = 5
+        elif slope > 60 and vs_dma > 10:
+            r.quintile = 4
+        elif slope > 30 and vs_dma > 5:
+            r.quintile = 3
+        elif slope > 10 or vs_dma > 2:
+            r.quintile = 2
+        elif slope < -100 and vs_dma < -20:
+            r.quintile = 5
+        elif slope < -60 and vs_dma < -10:
+            r.quintile = 4
+        elif slope < -30 and vs_dma < -5:
+            r.quintile = 3
+        elif slope < -10 or vs_dma < -2:
+            r.quintile = 2
+        else:
+            r.quintile = 1
     return ranks
 
 
@@ -72,13 +83,13 @@ def a_grade(ranks: list[StockRank], inflow_sectors: list[str] | None = None,
 
     If sector_map is not provided, returns raw quintile extremes.
     """
-    leaders = [r for r in ranks if r.quintile == 5 and r.above_50dma and r.rs_slope_20d > 0]
+    leaders = [r for r in ranks if r.quintile >= 2 and r.above_50dma and r.rs_slope_20d > 0]
     if not leaders:
-        leaders = [r for r in ranks if r.quintile == 5]
+        leaders = [r for r in ranks if r.rs_slope_20d > 0]
 
-    laggards = [r for r in ranks if r.quintile == 1 and not r.above_50dma and r.rs_slope_20d < 0]
+    laggards = [r for r in ranks if r.quintile >= 2 and not r.above_50dma and r.rs_slope_20d < 0]
     if not laggards:
-        laggards = [r for r in ranks if r.quintile == 1]
+        laggards = [r for r in ranks if r.rs_slope_20d < 0]
 
     if sector_map and inflow_sectors:
         inflow_set = set(inflow_sectors)

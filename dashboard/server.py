@@ -53,6 +53,7 @@ def _market_status_now() -> dict:
         "ts": ist_now.strftime("%Y-%m-%d %H:%M:%S IST"),
         "market_open": market_open,
         "market_status": "OPEN" if market_open else ("WEEKEND" if not is_weekday else "CLOSED"),
+        "session_date": ist_now.strftime("%Y-%m-%d"),
     }
 
 
@@ -69,8 +70,21 @@ def _run_engine() -> dict:
     universe = load_universe(cfg)
     sectors = cfg["sectors"]
 
-    stock_data = feed.universe_ohlc(universe, period="6mo")
-    sector_data = feed.sector_ohlc(sectors, period="6mo")
+    source_errors = []
+    
+    # Fetch stock data with error tracking
+    try:
+        stock_data = feed.universe_ohlc(universe, period="6mo")
+    except Exception as e:
+        stock_data = {}
+        source_errors.append(f"Stock feed failed: {e}")
+        
+    # Fetch sector data with error tracking
+    try:
+        sector_data = feed.sector_ohlc(sectors, period="6mo")
+    except Exception as e:
+        sector_data = {}
+        source_errors.append(f"Sector feed failed: {e}")
 
     regime_snap = regime_mod.classify("NIFTY", stock_universe_data=stock_data)
     flow_snap = flows_mod.snapshot(sector_data, index_symbol="NIFTY")
@@ -83,13 +97,23 @@ def _run_engine() -> dict:
     structure = sm.plan_for(regime_snap.regime)
 
     # NIFTY close for header
-    nifty_df = feed.ohlc_cached("NIFTY", period="1mo")
+    try:
+        nifty_df = feed.ohlc_cached("NIFTY", period="1mo")
+    except Exception as e:
+        nifty_df = pd.DataFrame()
+        source_errors.append(f"Nifty feed failed: {e}")
+        
     nifty_close = float(nifty_df["close"].iloc[-1]) if not nifty_df.empty else 0
     nifty_prev = float(nifty_df["close"].iloc[-2]) if len(nifty_df) >= 2 else nifty_close
     nifty_chg_pct = round(100 * (nifty_close - nifty_prev) / nifty_prev, 2) if nifty_prev else 0
 
     # BankNifty
-    bn_df = feed.ohlc_cached("BANKNIFTY", period="1mo")
+    try:
+        bn_df = feed.ohlc_cached("BANKNIFTY", period="1mo")
+    except Exception as e:
+        bn_df = pd.DataFrame()
+        source_errors.append(f"BankNifty feed failed: {e}")
+        
     bn_close = float(bn_df["close"].iloc[-1]) if not bn_df.empty else 0
     bn_prev = float(bn_df["close"].iloc[-2]) if len(bn_df) >= 2 else bn_close
     bn_chg_pct = round(100 * (bn_close - bn_prev) / bn_prev, 2) if bn_prev else 0
@@ -98,11 +122,45 @@ def _run_engine() -> dict:
     risk_cfg = cfg.get("risk", {})
     account_cfg = cfg.get("account", {})
 
+    # Compute data freshness based on cache file ages
+    import time
+    cache_dir = Path("data/cache/ohlc")
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    max_age_secs = 0
+    checked = 0
+    if cache_dir.exists():
+        for t in universe[:10]:  # Spot check first 10 tickers
+            p = cache_dir / f"{t}_{today_str}.pkl"
+            if p.exists():
+                age = time.time() - p.stat().st_mtime
+                if age > max_age_secs:
+                    max_age_secs = age
+                checked += 1
+                
+    freshness_status = "LIVE" if max_age_secs < 900 else ("STALE" if max_age_secs < 3600 else "OLD")
+    data_freshness = {
+        "status": freshness_status,
+        "max_age_minutes": round(max_age_secs / 60, 1),
+        "cache_files_checked": checked
+    }
+
     status = _market_status_now()
+    last_trading_date = None
+    if not nifty_df.empty:
+        try:
+            last_idx = nifty_df.index[-1]
+            last_trading_date = last_idx.strftime("%Y-%m-%d") if hasattr(last_idx, "strftime") else str(last_idx)[:10]
+        except Exception:
+            last_trading_date = None
+
     result = {
         "ts": status["ts"],
         "market_open": status["market_open"],
         "market_status": status["market_status"],
+        "session_date": status.get("session_date"),
+        "last_trading_date": last_trading_date,
+        "data_freshness": data_freshness,
+        "source_errors": source_errors,
         "nifty": {"close": round(nifty_close, 2), "change_pct": nifty_chg_pct},
         "banknifty": {"close": round(bn_close, 2), "change_pct": bn_chg_pct},
         "regime": {
@@ -122,18 +180,22 @@ def _run_engine() -> dict:
             "pcr_vol": flow_snap.pcr_vol,
             "max_pain": flow_snap.max_pain,
             "bias": flow_snap.smart_money_bias,
+            "pcr_stale": flow_snap.pcr_stale,
+            "mp_stale": flow_snap.mp_stale,
+            "pcr_updated_at": flow_snap.pcr_updated_at,
+            "mp_updated_at": flow_snap.mp_updated_at,
         },
         "leaders": [
-            {"symbol": r.symbol, "rs_slope": r.rs_slope_20d, "pct_vs_50dma": r.pct_vs_50dma, "quintile": r.quintile}
+            {"symbol": r.symbol, "rs_slope": max(-150.0, min(150.0, r.rs_slope_20d)), "pct_vs_50dma": r.pct_vs_50dma, "quintile": r.quintile}
             for r in longs[:6]
         ],
         "laggards": [
-            {"symbol": r.symbol, "rs_slope": r.rs_slope_20d, "pct_vs_50dma": r.pct_vs_50dma, "quintile": r.quintile}
+            {"symbol": r.symbol, "rs_slope": max(-150.0, min(150.0, r.rs_slope_20d)), "pct_vs_50dma": r.pct_vs_50dma, "quintile": r.quintile}
             for r in shorts[:6]
         ],
         "all_ranks": [
-            {"symbol": r.symbol, "rs_slope": r.rs_slope_20d, "pct_vs_50dma": r.pct_vs_50dma, "quintile": r.quintile, "above_50dma": r.above_50dma}
-            for r in sorted(ranks, key=lambda x: x.rs_slope_20d, reverse=True)
+            {"symbol": r.symbol, "rs_slope": max(-150.0, min(150.0, r.rs_slope_20d)), "pct_vs_50dma": r.pct_vs_50dma, "quintile": r.quintile, "above_50dma": r.above_50dma}
+            for r in sorted(ranks, key=lambda x: (-x.quintile, -x.rs_slope_20d))
         ],
         "sector_rs": flow_snap.top_inflow_sectors + flow_snap.top_outflow_sectors,
         "structure": {
@@ -422,6 +484,13 @@ def api_intraday():
         instruments = [f"{s}.NS" if not s.startswith("^") and "." not in s else s for s in top_syms]
         import yfinance as yf
         tickers = yf.Tickers(" ".join(instruments))
+        
+        # Fetch enough daily history for 20D average volume calculation
+        try:
+            hist_df = yf.download(" ".join(instruments), period="3mo", interval="1d", progress=False, group_by='ticker', auto_adjust=False)
+        except Exception:
+            hist_df = pd.DataFrame()
+            
         rows = []
         for sym, raw in zip(top_syms, instruments):
             try:
@@ -431,25 +500,55 @@ def api_intraday():
                 high  = round(float(info.day_high),   2) if hasattr(info, "day_high")   and info.day_high   else None
                 low   = round(float(info.day_low),    2) if hasattr(info, "day_low")    and info.day_low    else None
                 prev  = round(float(info.previous_close), 2) if hasattr(info, "previous_close") and info.previous_close else None
-                vol   = int(info.three_month_average_volume or 0)
+                avg_vol = int(info.three_month_average_volume or 0)
                 chg_pct = round(100 * (ltp - prev) / prev, 2) if ltp and prev else None
+                
+                # Calculate today's volume and relative volume
+                today_vol = 0
+                rel_vol = None
+                if not hist_df.empty and raw in hist_df.columns.get_level_values(0):
+                    try:
+                        sym_hist = hist_df[raw]
+                        if not sym_hist.empty and 'Volume' in sym_hist:
+                            volumes = sym_hist['Volume'].dropna()
+                            if not volumes.empty:
+                                today_vol = int(volumes.iloc[-1])
+                                hist_20 = volumes.iloc[:-1].tail(20)
+                                avg_20d = float(hist_20.mean()) if len(hist_20) >= 5 else float(avg_vol)
+                                if avg_20d > 0:
+                                    rel_vol = round(today_vol / avg_20d, 2)
+                    except Exception:
+                        pass
+                        
                 rows.append({"symbol": sym, "ltp": ltp, "open": open_, "high": high,
-                             "low": low, "prev_close": prev, "chg_pct": chg_pct, "vol": vol})
+                             "low": low, "prev_close": prev, "chg_pct": chg_pct, 
+                             "vol": avg_vol, "today_vol": today_vol, "rel_vol": rel_vol})
             except Exception:
                 rows.append({"symbol": sym, "ltp": None, "open": None, "high": None,
-                             "low": None, "prev_close": None, "chg_pct": None, "vol": None})
+                             "low": None, "prev_close": None, "chg_pct": None, "vol": None, "today_vol": 0, "rel_vol": None})
 
-        # Nifty intraday candles (5m, last trading day)
+        # Nifty intraday candles (dynamic timeframe)
+        tf = request.args.get("tf", "5m")
+        tf_map = {
+            "5m": {"interval": "5m", "period": "1d"},
+            "15m": {"interval": "15m", "period": "5d"},
+            "1h": {"interval": "60m", "period": "5d"},
+            "1d": {"interval": "1d", "period": "3mo"},
+            "1w": {"interval": "1wk", "period": "1y"},
+            "1mo": {"interval": "1mo", "period": "2y"},
+        }
+        tf_cfg = tf_map.get(tf, tf_map["5m"])
+        
         candles = []
         try:
-            nifty_intra = yf.download("^NSEI", period="1d", interval="5m", progress=False, auto_adjust=True)
+            nifty_intra = yf.download("^NSEI", period=tf_cfg["period"], interval=tf_cfg["interval"], progress=False, auto_adjust=True)
             if not nifty_intra.empty:
                 # Flatten MultiIndex columns from newer yfinance
                 if isinstance(nifty_intra.columns, __import__('pandas').MultiIndex):
                     nifty_intra.columns = [c[0] if isinstance(c, tuple) else c for c in nifty_intra.columns]
                 for ts, row in nifty_intra.iterrows():
                     candles.append({
-                        "t": ts.strftime("%H:%M"),
+                        "t": ts.strftime("%H:%M" if tf in ["5m", "15m", "1h"] else "%d-%m"),
                         "o": round(float(row["Open"]),  2),
                         "h": round(float(row["High"]),  2),
                         "l": round(float(row["Low"]),   2),
@@ -463,6 +562,7 @@ def api_intraday():
             "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S IST"),
             "watchlist": rows,
             "nifty_candles": candles,
+            "timeframe": tf,
         })
     except Exception as e:
         traceback.print_exc()
@@ -504,10 +604,14 @@ def api_send_alerts():
 @app.route("/api/test-telegram")
 def api_test_telegram():
     try:
+        # Prioritize settings from paper_trades.json
+        p_settings = pt.get_settings()
         cfg = load_config()
-        token = cfg.get("alerts", {}).get("telegram_bot_token", "")
-        chat_id = cfg.get("alerts", {}).get("telegram_chat_id")
+
+        token = p_settings.get("telegram_bot_token") or cfg.get("alerts", {}).get("telegram_bot_token", "")
+        chat_id = p_settings.get("telegram_chat_id") or cfg.get("alerts", {}).get("telegram_chat_id")
         alerter = Alerter(token, chat_id)
+
         
         # We need to peek into ops/alerts.py for the status
         import ops.alerts as alerts_mod
@@ -679,17 +783,52 @@ def api_options_structures():
 
 
 
+@app.route("/api/paper/settings", methods=["GET", "POST"])
+def api_paper_settings():
+    """Get or update paper trader settings."""
+    try:
+        if request.method == "POST":
+            new_settings = request.json
+            if not new_settings:
+                return jsonify({"error": "Missing settings in request"}), 400
+            settings = pt.save_settings(new_settings)
+            return jsonify(settings)
+        else:
+            return jsonify(pt.get_settings())
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/paper/export")
+def api_paper_export():
+    """Download trade history as CSV."""
+    try:
+        csv_data = pt.export_trades_to_csv()
+        from flask import Response
+        return Response(
+            csv_data,
+            mimetype="text/csv",
+            headers={"Content-disposition": f"attachment; filename=paper_trades_{date.today().isoformat()}.csv"}
+        )
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/paper/cleanup", methods=["POST"])
+
 def api_paper_cleanup():
     """Clean up DB with filters."""
     try:
         data = request.json or {}
         from_date = data.get("from_date")
         to_date = data.get("to_date")
-        purge_churn = data.get("purge_churn", True)
+        full_reset = data.get("full_reset", False)
 
-        result = pt.cleanup_db(from_date, to_date, purge_churn)
+        result = pt.cleanup_db(from_date, to_date, purge_churn, full_reset)
         return jsonify(result)
+
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500

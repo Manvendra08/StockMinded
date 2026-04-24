@@ -7,6 +7,7 @@
 <meta name="description" content="StockMinded paper trading system with automated entry, exit tracking, and strategy analysis">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/lucide@latest"></script>
 <style>
 :root {
   --bg-primary: #0a0e17;
@@ -199,7 +200,8 @@ body::before {
 .stat-label { font-size:0.68rem; text-transform:uppercase; letter-spacing:1.4px; color:var(--text-muted); font-weight:600; }
 .stat-value { font-family:var(--mono); font-size:1.6rem; font-weight:700; margin-top:8px; line-height:1; }
 .stat-sub { font-size:0.72rem; color:var(--text-secondary); margin-top:6px; }
-.stat-icon { font-size:1.5rem; position:absolute; top:16px; right:16px; opacity:0.2; }
+.stat-icon { width: 24px; height: 24px; opacity: 0.3; position:absolute; top:16px; right:16px; }
+.stat-icon svg { width: 100%; height: 100%; stroke-width: 1.5; }
 
 /* ── SECTION LAYOUT ── */
 .section { margin-bottom:32px; }
@@ -404,14 +406,131 @@ body::before {
 .tab-pane { display:none; }
 .tab-pane.active { display:block; }
 
+/* ── STICKY COLUMNS (TRADE HISTORY) ── */
+#tab-history .tbl-wrap { overflow-x: auto; }
+#tab-history .tbl th:nth-child(1), #tab-history .tbl td:nth-child(1) {
+  position: sticky; left: 0; z-index: 3; background: var(--bg-card); min-width: 85px;
+}
+#tab-history .tbl th:nth-child(2), #tab-history .tbl td:nth-child(2) {
+  position: sticky; left: 85px; z-index: 3; background: var(--bg-card); min-width: 110px; border-right: 2px solid var(--glass-border);
+}
+#tab-history .tbl thead th:nth-child(1), #tab-history .tbl thead th:nth-child(2) { z-index: 4; background: var(--bg-card); }
+
 /* ── RESPONSIVE ── */
 @media(max-width:900px){.stat-grid{grid-template-columns:1fr 1fr;}}
 @media(max-width:600px){.stat-grid{grid-template-columns:1fr;}.header{flex-direction:column;align-items:flex-start;}}
+
+/* ── INDEX BAR ───────────────────────────────────────────────── */
+.index-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 10px 24px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--glass-border);
+  position: sticky;
+  top: 0;
+  z-index: 1000;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.index-chip {
+  background: var(--glass);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-xs);
+  padding: 6px 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  transition: all var(--transition);
+}
+
+.index-chip .label {
+  font-size: 0.62rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-secondary);
+}
+
+.index-chip .value-wrap {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+}
+
+.index-chip .value {
+  font-family: var(--mono);
+  font-size: 0.95rem;
+  font-weight: 700;
+}
+
+.index-chip .change {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+.index-chip .subline {
+  font-size: 0.58rem;
+  color: var(--text-muted);
+  border-left: 1px solid var(--glass-border);
+  padding-left: 8px;
+}
+
+.mini-live-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-green);
+  display: inline-block;
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+@keyframes pulse-glow {
+  0%, 100% { opacity: 0.6; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.2); }
+}
+
+.maintenance-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 20px;
+}
+.settings-group {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.field-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+.field-label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+.field-row input[type="text"], .field-row input[type="number"], .field-row select {
+  width: 140px;
+}
+.maint-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+
 </style>
 </head>
 <body>
 
 <div id="toast"></div>
+
+<!-- Index bar (Moved to top) -->
+<div class="index-bar" id="index-bar"></div>
 
 <div class="container">
   <!-- Header -->
@@ -420,9 +539,10 @@ body::before {
       <div class="brand-logo">P</div>
       <div>
         <div class="brand-name">Paper Trader</div>
-        <div class="brand-sub">Simulation Engine — Rs 5,00,000 per trade</div>
+        <div class="brand-sub">Strategy Simulation Engine</div>
       </div>
     </div>
+
     <div class="header-actions">
       <div class="auto-badge">
         <span class="auto-ring"><span class="auto-ring-fill" id="auto-fill" style="height:100%"></span></span>
@@ -455,37 +575,37 @@ body::before {
       <div class="stat-label">Total P&L</div>
       <div class="stat-value" id="s-pnl">—</div>
       <div class="stat-sub" id="s-pnl-sub">Realized P&L</div>
-      <div class="stat-icon">💰</div>
+      <div class="stat-icon"><i data-lucide="trending-up"></i></div>
     </div>
     <div class="stat-card green-top">
       <div class="stat-label">Win Rate</div>
       <div class="stat-value" id="s-wr">—</div>
       <div class="stat-sub" id="s-wr-sub">Closed trades</div>
-      <div class="stat-icon">🎯</div>
+      <div class="stat-icon"><i data-lucide="target"></i></div>
     </div>
     <div class="stat-card blue-top">
       <div class="stat-label">Open Positions</div>
       <div class="stat-value" id="s-open">—</div>
       <div class="stat-sub" id="s-unrealized">Live P&L: ₹0</div>
-      <div class="stat-icon">📈</div>
+      <div class="stat-icon"><i data-lucide="bar-chart-2"></i></div>
     </div>
     <div class="stat-card gold-top">
       <div class="stat-label">Avg Winner</div>
       <div class="stat-value up" id="s-avgw">—</div>
       <div class="stat-sub">Per winning trade</div>
-      <div class="stat-icon">⭐</div>
+      <div class="stat-icon"><i data-lucide="star"></i></div>
     </div>
     <div class="stat-card red-top">
       <div class="stat-label">Avg Loser</div>
       <div class="stat-value down" id="s-avgl">—</div>
       <div class="stat-sub">Per losing trade</div>
-      <div class="stat-icon">🔻</div>
+      <div class="stat-icon"><i data-lucide="trending-down"></i></div>
     </div>
     <div class="stat-card blue-top">
       <div class="stat-label">Total Trades (all time)</div>
       <div class="stat-value" id="s-total">—</div>
       <div class="stat-sub" id="s-total-sub">Since inception</div>
-      <div class="stat-icon">📋</div>
+      <div class="stat-icon"><i data-lucide="clipboard-list"></i></div>
     </div>
   </div>
 
@@ -613,6 +733,19 @@ body::before {
         <span class="spin"></span><span class="btn-text">📊 Generate Today's Report</span>
       </button>
     </div>
+    <div id="exit-reason-analytics" style="margin-bottom:24px; display:none;">
+      <div class="card">
+        <div class="section-title" style="margin-bottom:12px;"><span class="dot dot-blue"></span> Exit Reason Analytics</div>
+        <div class="tbl-wrap">
+          <table class="tbl">
+            <thead><tr>
+              <th>Exit Reason</th><th>Count</th><th>Avg P&L</th><th>Total P&L</th>
+            </tr></thead>
+            <tbody id="exit-reason-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
     <div id="eod-container">
       <div class="empty-state">
         <div class="big">🕒</div>
@@ -637,41 +770,103 @@ body::before {
     </div>
   </div>
 
-  <!-- Tab: Maintenance -->
+  <!-- Tab: Maintenance & Settings -->
   <div class="tab-pane" id="tab-maintenance">
     <div class="section-header">
       <div class="section-title">
         <span class="dot dot-amber"></span>
-        Database Maintenance
+        Maintenance & Config
       </div>
     </div>
-    <div class="card">
-      <p class="muted" style="margin-bottom:20px;">Use this utility to purge unwanted trade entries (churn) or reset data for specific date periods.</p>
-      
-      <div style="display:flex; gap:20px; align-items:flex-end; flex-wrap:wrap; margin-bottom:24px;">
-        <div style="flex:1; min-width:150px;">
-          <div class="stat-label">From Date</div>
-          <input type="date" id="purge-from" class="card" style="width:100%; border:1px solid var(--glass-border); padding:8px; background:var(--glass-bg); color:var(--text-primary);">
+    
+    <div class="maintenance-grid">
+      <!-- Settings Panel -->
+      <div class="card">
+        <div class="section-title" style="margin-bottom:18px;"><span class="icon">⚙️</span> Trading Settings</div>
+        <div class="settings-group">
+          <div class="field-row">
+            <span class="field-label">Capital per Trade (₹)</span>
+            <input type="number" id="set-capital" class="input-sm" step="50000">
+          </div>
+          <div class="field-row">
+            <span class="field-label">Stop Loss %</span>
+            <input type="number" id="set-sl" class="input-sm" step="0.1">
+          </div>
+          <div class="field-row">
+            <span class="field-label">Target %</span>
+            <input type="number" id="set-tgt" class="input-sm" step="0.1">
+          </div>
+          <div class="field-row">
+            <span class="field-label">Min. Confidence</span>
+            <select id="set-conf" class="input-sm">
+              <option value="LOW">LOW</option>
+              <option value="MEDIUM">MEDIUM</option>
+              <option value="HIGH">HIGH</option>
+            </select>
+          </div>
+          <div class="field-row">
+            <span class="field-label">Respect Regime Filter</span>
+            <input type="checkbox" id="set-regime" style="width:20px;height:20px;cursor:pointer;">
+          </div>
+          <div class="field-row" style="margin-top:10px; border-top:1px solid var(--glass-border); padding-top:15px;">
+            <span class="field-label">Telegram Token</span>
+            <input type="text" id="set-tg-token" class="input-sm" style="width:180px;" placeholder="Bot Token">
+          </div>
+          <div class="field-row">
+            <span class="field-label">Telegram Chat ID</span>
+            <input type="text" id="set-tg-chat" class="input-sm" style="width:180px;" placeholder="Chat ID">
+          </div>
+          
+          <div class="maint-actions" style="justify-content: flex-end;">
+            <button class="btn btn-ghost btn-sm" onclick="testTelegram(this)">
+              <span class="spin"></span><span class="btn-text">Test Ping</span>
+            </button>
+            <button class="btn btn-primary btn-sm" onclick="saveSettings(this)">
+              <span class="spin"></span><span class="btn-text">Save Config</span>
+            </button>
+          </div>
         </div>
-        <div style="flex:1; min-width:150px;">
-          <div class="stat-label">To Date</div>
-          <input type="date" id="purge-to" class="card" style="width:100%; border:1px solid var(--glass-border); padding:8px; background:var(--glass-bg); color:var(--text-primary);">
-        </div>
-        <div style="flex:1; min-width:200px; padding-bottom:12px;">
-          <label style="display:flex; align-items:center; gap:8px; cursor:pointer;" class="stat-label">
-            <input type="checkbox" id="purge-churn" checked> Purge Churn (0 P&L spam)
-          </label>
-        </div>
-        <button class="btn btn-amber" onclick="purgeDB(this)">
-          <span class="spin"></span><span class="btn-text">🧹 Purge Data</span>
-        </button>
       </div>
-      
-      <div id="purge-result" style="display:none;" class="analysis-list">
-        <!-- Results here -->
+
+      <!-- Data Panel -->
+      <div class="card">
+        <div class="section-title" style="margin-bottom:18px;"><span class="icon">🧹</span> Data Cleanup</div>
+        <div class="settings-group">
+          <div class="field-row">
+            <span class="field-label">From Date</span>
+            <input type="date" id="purge-from" class="input-sm">
+          </div>
+          <div class="field-row">
+            <span class="field-label">To Date</span>
+            <input type="date" id="purge-to" class="input-sm">
+          </div>
+          <div class="field-row">
+            <span class="field-label">Purge Churn (0 P&L)</span>
+            <input type="checkbox" id="purge-churn" checked style="width:20px;height:20px;cursor:pointer;">
+          </div>
+          
+          <div class="maint-actions" style="margin-top:20px; border-top:1px solid var(--glass-border); padding-top:15px;">
+            <button class="btn btn-amber btn-sm" onclick="purgeDB(this)">
+              <span class="spin"></span><span class="btn-text">🧹 Selective Purge</span>
+            </button>
+            <button class="btn btn-ghost btn-sm" onclick="exportCSV(this)">
+              <span class="btn-text">📥 Export CSV</span>
+            </button>
+          </div>
+          
+          <div style="margin-top:20px; padding:15px; background:rgba(239,68,68,0.05); border:1px solid rgba(239,68,68,0.15); border-radius:var(--radius-sm);">
+            <div class="stat-label" style="color:var(--accent-red); margin-bottom:10px;">Danger Zone</div>
+            <button class="btn btn-red btn-sm" style="width:100%;" onclick="resetDB(this)">
+              <span class="spin"></span><span class="btn-text">💀 Full Database Reset</span>
+            </button>
+          </div>
+        </div>
+        
+        <div id="purge-result" style="display:none; margin-top:15px;" class="analysis-list"></div>
       </div>
     </div>
   </div>
+
 
 </div><!-- /container -->
 
@@ -694,18 +889,25 @@ let _autoCountdown = 30;
 let _autoTimer = null;
 
 function fmt(n, d=2) {
-  if(n==null) return '—';
+  if(n==null || isNaN(n)) return '—';
   return Number(n).toFixed(d);
 }
 function fmtInr(n) {
-  if(n==null) return '—';
+  if(n==null || isNaN(n)) return '—';
   const abs = Math.abs(n);
   const sign = n < 0 ? '-' : '';
   if(abs >= 100000) return sign + '₹' + (abs/100000).toFixed(2) + 'L';
-  return sign + '₹' + abs.toLocaleString('en-IN', {minimumFractionDigits:0, maximumFractionDigits:0});
+  return sign + '₹' + Math.floor(abs).toLocaleString('en-IN');
 }
 function cls(v) { return v > 0 ? 'up' : v < 0 ? 'down' : 'muted'; }
 function sign(v) { return v > 0 ? '+' : ''; }
+function changeClass(v) { return v > 0 ? 'up' : v < 0 ? 'down' : 'muted'; }
+function colorPnl(value) {
+  if (value == null || isNaN(value)) return '<span class="muted">—</span>';
+  const color = value >= 0 ? 'var(--accent-green)' : 'var(--accent-red)';
+  return `<span style="color:${color}; font-weight:600;">${fmtInr(value)}</span>`;
+}
+
 
 function toast(msg, type='info') {
   const el = document.getElementById('toast');
@@ -788,8 +990,7 @@ async function loadStats() {
     }
 
     const pnl = stats.cumulative_pnl;
-    document.getElementById('s-pnl').textContent = fmtInr(pnl);
-    document.getElementById('s-pnl').className = 'stat-value ' + cls(pnl);
+    document.getElementById('s-pnl').innerHTML = colorPnl(pnl);
     document.getElementById('s-pnl-sub').textContent = `${stats.total_winners}W / ${stats.total_losers}L realized`;
 
     document.getElementById('s-wr').textContent = fmt(stats.overall_win_rate, 1) + '%';
@@ -803,18 +1004,17 @@ async function loadStats() {
     const openTrades = dataOpen.trades || [];
     const totalUnrealized = openTrades.reduce((sum, t) => sum + (t.unrealized_pnl || 0), 0);
     const unreEl = document.getElementById('s-unrealized');
-    unreEl.textContent = `Live P&L: ${fmtInr(totalUnrealized)}`;
-    unreEl.className = 'stat-sub ' + cls(totalUnrealized);
+    unreEl.innerHTML = `Live P&L: ${colorPnl(totalUnrealized)}`;
 
-    document.getElementById('s-avgw').textContent = fmtInr(stats.avg_winner);
-    document.getElementById('s-avgl').textContent = fmtInr(stats.avg_loser);
+    document.getElementById('s-avgw').innerHTML = colorPnl(stats.avg_winner);
+    document.getElementById('s-avgl').innerHTML = colorPnl(stats.avg_loser);
     document.getElementById('s-total').textContent = stats.total_trades;
     document.getElementById('s-total-sub').textContent = filterDate ? `Date: ${filterDate}` : `Since inception`;
   } catch(_){}
 }
 
 async function purgeDB(btn) {
-  if(!confirm("Are you sure? This will permanently delete trade records from the database based on your filters.")) return;
+  if(!confirm("Are you sure? This will delete trade records based on filters.")) return;
   
   await btnAction(btn, async () => {
     const from = document.getElementById('purge-from').value;
@@ -834,16 +1034,85 @@ async function purgeDB(btn) {
     const resEl = document.getElementById('purge-result');
     resEl.style.display = 'block';
     resEl.innerHTML = `
-      <li style="background:var(--accent-green-dim); color:var(--accent-green)">Successfully removed: <b>${d.removed_count}</b> trades</li>
-      <li>Remaining database size: <b>${d.final_count}</b> trades</li>
-      <li>Adjusted Cumulative P&L: <b>${fmtInr(d.cumulative_pnl)}</b></li>
+      <li style="background:var(--accent-green-dim); color:var(--accent-green)">Removed: <b>${d.removed_count}</b> trades</li>
+      <li>Database size: <b>${d.final_count}</b> trades</li>
+      <li>Cumulative P&L: <b>${fmtInr(d.cumulative_pnl)}</b></li>
     `;
-    
-    // Reload stats and current view
     loadStats();
-    if(document.getElementById('tab-history').classList.contains('active')) loadHistory();
   });
 }
+
+async function resetDB(btn) {
+  if(!confirm("CRITICAL: This will wipe ALL trades and history. Settings will be preserved. Proceed?")) return;
+  if(!confirm("ARE YOU ABSOLUTELY SURE? This cannot be undone.")) return;
+
+  await btnAction(btn, async () => {
+    const r = await fetch('/api/paper/cleanup', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({full_reset: true})
+    });
+    const d = await r.json();
+    if(d.error) { toast('Error: ' + d.error, 'err'); return; }
+    toast('Database fully reset.', 'ok');
+    loadAll();
+  });
+}
+
+async function loadSettings() {
+  try {
+    const r = await fetch('/api/paper/settings');
+    const s = await r.json();
+    document.getElementById('set-capital').value = s.capital_per_trade;
+    document.getElementById('set-sl').value = s.sl_pct;
+    document.getElementById('set-tgt').value = s.tgt_pct;
+    document.getElementById('set-conf').value = s.min_confidence;
+    document.getElementById('set-regime').checked = s.regime_filter;
+    document.getElementById('set-tg-token').value = s.telegram_bot_token || '';
+    document.getElementById('set-tg-chat').value = s.telegram_chat_id || '';
+  } catch(_){}
+}
+
+async function saveSettings(btn) {
+  await btnAction(btn, async () => {
+    const body = {
+      capital_per_trade: parseFloat(document.getElementById('set-capital').value),
+      sl_pct: parseFloat(document.getElementById('set-sl').value),
+      tgt_pct: parseFloat(document.getElementById('set-tgt').value),
+      min_confidence: document.getElementById('set-conf').value,
+      regime_filter: document.getElementById('set-regime').checked,
+      telegram_bot_token: document.getElementById('set-tg-token').value,
+      telegram_chat_id: document.getElementById('set-tg-chat').value
+    };
+    const r = await fetch('/api/paper/settings', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body)
+    });
+    const d = await r.json();
+    if(d.error) { toast('Save failed: ' + d.error, 'err'); return; }
+    toast('Settings saved successfully.', 'ok');
+    loadStats();
+  });
+}
+
+function exportCSV() {
+  window.location.href = '/api/paper/export';
+}
+
+async function testTelegram(btn) {
+  await btnAction(btn, async () => {
+    const r = await fetch('/api/test-telegram');
+    const d = await r.json();
+    if (d.ok) {
+      toast('Test ping sent! Check Telegram.', 'ok');
+    } else {
+      toast('Failed: ' + (d.telegram_description || 'Unknown error'), 'err');
+    }
+    pollTelegramStatus();
+  });
+}
+
 
 // ── Load Open Positions ───────────────────────────────────────
 async function loadOpen() {
@@ -877,7 +1146,7 @@ async function loadOpen() {
         <td class="down">${fmt(t.sl_price)}</td>
         <td class="up">${fmt(t.tgt_price)}</td>
         <td>${t.qty}</td>
-        <td class="${cls(upnl)}">${upnl!=null ? (sign(upnl)+fmtInr(upnl)) : '—'}</td>
+        <td>${colorPnl(upnl)}</td>
         <td class="${cls(upct)}">${upct!=null ? sign(upct)+fmt(upct)+'%' : '—'}</td>
         <td class="muted" style="font-size:0.75rem">${time}</td>
         <td><span class="conf-badge conf-${t.confidence}" style="cursor:help" onclick="showEvidence(${t.id})" title="Click to view entry evidence">${t.confidence}</span></td>
@@ -918,8 +1187,7 @@ async function loadHistory() {
     tbody.innerHTML = closed.map(t => {
       const pnl = t.pnl;
       const pct = t.pnl_pct;
-      const pnlCell = (pnl==null) ? '<span class="muted">—</span>'
-                                  : `<span class="${cls(pnl)}">${sign(pnl)}${fmtInr(pnl)}</span>`;
+      const pnlCell = colorPnl(pnl);
       const pctCell = (pct==null) ? '<span class="muted">—</span>'
                                   : `<span class="${cls(pct)}">${sign(pct)}${fmt(pct)}%</span>`;
       return `<tr>
@@ -952,10 +1220,41 @@ async function loadEODHistory() {
     const container = document.getElementById('eod-container');
     if(!summaries.length) {
       container.innerHTML=`<div class="empty-state"><div class="big">🕒</div>No EOD summaries yet.</div>`;
-      return;
+    } else {
+      container.innerHTML = summaries.map(s => renderEOD(s)).join('<hr style="border:none;border-top:1px solid var(--glass-border);margin:24px 0;">');
     }
-    container.innerHTML = summaries.map(s => renderEOD(s)).join('<hr style="border:none;border-top:1px solid var(--glass-border);margin:24px 0;">');
+    // Render exit reason analytics
+    renderExitReasonAnalytics(_allTrades);
   } catch(_){}
+}
+
+function renderExitReasonAnalytics(trades) {
+  const closed = trades.filter(t => t.status === 'CLOSED' && t.exit_reason);
+  const analyticsEl = document.getElementById('exit-reason-analytics');
+  if (closed.length === 0) {
+    analyticsEl.style.display = 'none';
+    return;
+  }
+  const groups = {};
+  closed.forEach(t => {
+    const reason = t.exit_reason.replace(/_/g, ' ');
+    if (!groups[reason]) groups[reason] = { count: 0, totalPnl: 0 };
+    groups[reason].count++;
+    groups[reason].totalPnl += (t.pnl || 0);
+  });
+  
+  const tbody = document.getElementById('exit-reason-tbody');
+  tbody.innerHTML = Object.entries(groups).map(([reason, data]) => {
+    const avgPnl = data.totalPnl / data.count;
+    return `<tr>
+      <td style="text-align:left; font-weight:600;">${reason}</td>
+      <td>${data.count}</td>
+      <td>${colorPnl(avgPnl)}</td>
+      <td>${colorPnl(data.totalPnl)}</td>
+    </tr>`;
+  }).join('');
+  
+  analyticsEl.style.display = 'block';
 }
 
 function renderEOD(s) {
@@ -1164,19 +1463,82 @@ async function closePosition(tradeId, btn) {
   }
 }
 
-// ── Full Refresh ─────────────────────────────────────────────
-async function loadAll() {
-  await Promise.all([loadStats(), loadOpen(), loadOptions(), loadHistory(), loadEODHistory(), loadStrategyNotes()]);
+// ── Index Bar Renderer ─────────────────────────────────────────
+async function renderIndexBar() {
+  try {
+    const r = await fetch('/api/dashboard');
+    const d = await r.json();
+    if(d.error) return;
+    
+    const marketOpen = !!d.market_open;
+    const subline = marketOpen
+      ? '<span class="mini-live-dot"></span>'
+      : `${d.last_trading_date || d.session_date || '—'}`;
+      
+    const items = [
+      { label: 'NIFTY 50', value: fmt(d.nifty.close), change: d.nifty.change_pct },
+      { label: 'BANK NIFTY', value: fmt(d.banknifty.close), change: d.banknifty.change_pct },
+      { label: 'INDIA VIX', value: fmt(d.regime.vix), change: d.regime.vix_5d_change_pct, suffix: ' (5d)' },
+      { label: 'ADX', value: fmt(d.regime.adx), change: null },
+    ];
+    
+    document.getElementById('index-bar').innerHTML = items.map(i => `
+      <div class="index-chip">
+        <div class="label">${i.label}</div>
+        <div class="value-wrap">
+          <span class="value">${i.value}</span>
+          ${i.change != null ? `<span class="change ${changeClass(i.change)}">${i.change > 0 ? '+' : ''}${fmt(i.change)}%${i.suffix || ''}</span>` : ''}
+        </div>
+        <div class="subline">${subline}</div>
+      </div>
+    `).join('');
+  } catch(_){}
 }
 
+// ── Full Refresh ─────────────────────────────────────────────
+async function loadAll() {
+  await Promise.all([
+    renderIndexBar(),
+    loadSettings(),
+    loadStats(),
+    loadOpen(),
+    loadOptions(),
+    loadHistory(),
+    loadEODHistory(),
+    loadStrategyNotes()
+  ]);
+}
+
+
 // ── Auto-refresh countdown (30 sec) ──────────────────────────
+function isMarketOpen() {
+  // IST is UTC+5:30
+  const now = new Date();
+  const utc = now.getTime() + (now.getTimezoneOffset() * 60000);
+  const ist = new Date(utc + (3600000 * 5.5));
+  const day = ist.getDay(); // 0=Sun, 6=Sat
+  if (day === 0 || day === 6) return false;
+  const hours = ist.getHours();
+  const minutes = ist.getMinutes();
+  const time = hours * 100 + minutes;
+  return time >= 915 && time < 1530;
+}
+
 function startAutoRefresh() {
   _autoCountdown = 30;
   clearInterval(_autoTimer);
   _autoTimer = setInterval(() => {
-    _autoCountdown--;
+    const marketOpen = isMarketOpen();
     const fill = document.getElementById('auto-fill');
     const next = document.getElementById('auto-next');
+    
+    if (!marketOpen) {
+      if(fill) fill.style.height = '0%';
+      if(next) next.textContent = 'Market Closed — Paused';
+      return;
+    }
+    
+    _autoCountdown--;
     if(fill) fill.style.height = (_autoCountdown / 30 * 100) + '%';
     if(next) next.textContent = `refresh in ${_autoCountdown}s`;
     if(_autoCountdown <= 0) {
@@ -1275,6 +1637,7 @@ setInterval(pollTelegramStatus, 30000);
   await loadAll();
   startAutoRefresh();
   scheduleEOD();
+  if (window.lucide) lucide.createIcons();
 })();
 </script>
 </body>

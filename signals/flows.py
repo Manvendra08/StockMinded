@@ -18,6 +18,10 @@ class FlowSnapshot:
     pcr_vol: float | None
     max_pain: float | None
     smart_money_bias: str   # LONG | SHORT | NEUTRAL
+    pcr_stale: bool = False
+    mp_stale: bool = False
+    pcr_updated_at: float | None = None
+    mp_updated_at: float | None = None
     notes: str = ""
 
     def to_dict(self) -> dict:
@@ -29,6 +33,10 @@ class FlowSnapshot:
             "pcr_vol": self.pcr_vol,
             "max_pain": self.max_pain,
             "smart_money_bias": self.smart_money_bias,
+            "pcr_stale": self.pcr_stale,
+            "mp_stale": self.mp_stale,
+            "pcr_updated_at": self.pcr_updated_at,
+            "mp_updated_at": self.mp_updated_at,
             "notes": self.notes,
         }
 
@@ -139,7 +147,7 @@ def snapshot(sector_data: dict[str, pd.DataFrame], index_symbol: str = "NIFTY") 
     rs = sector_relative_strength(sector_data, lookback=5)
     top_in = rs[:3]
     top_out = rs[-3:][::-1] if len(rs) >= 3 else []
-    pcr_oi, pcr_vol, mp = pcr_and_max_pain(index_symbol)
+    pcr_oi, pcr_vol, mp, pcr_stale, mp_stale, pcr_updated_at, mp_updated_at = feed.get_pcr_max_pain_cached(index_symbol)
     return FlowSnapshot(
         fii_dii_5d_net_cr=fii_dii,
         top_inflow_sectors=top_in,
@@ -148,4 +156,8 @@ def snapshot(sector_data: dict[str, pd.DataFrame], index_symbol: str = "NIFTY") 
         pcr_vol=pcr_vol,
         max_pain=mp,
         smart_money_bias=_bias(fii_dii, pcr_oi),
+        pcr_stale=pcr_stale,
+        mp_stale=mp_stale,
+        pcr_updated_at=pcr_updated_at,
+        mp_updated_at=mp_updated_at,
     )
