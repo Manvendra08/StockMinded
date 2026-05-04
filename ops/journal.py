@@ -36,6 +36,24 @@ CREATE TABLE IF NOT EXISTS trades (
     risk_rupees REAL,
     pnl_rupees REAL,
     regime TEXT,
+    notes TEXT,
+    planned_risk REAL,
+    entry_rule TEXT,
+    trail_rule TEXT,
+    source_regime TEXT,
+    skip_reason TEXT
+);
+
+CREATE TABLE IF NOT EXISTS skipped_trades (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    symbol TEXT,
+    direction TEXT,
+    alert_confidence TEXT,
+    skip_reason TEXT,
+    regime TEXT,
+    flow_bias TEXT,
+    risk_gate TEXT,
     notes TEXT
 );
 """
@@ -82,3 +100,34 @@ class Journal:
             (datetime.utcnow().isoformat(), exit_price, pnl_rupees, trade_id),
         )
         self.conn.commit()
+
+    def log_skipped_trade(self, symbol: str, direction: str, alert_confidence: str,
+                         skip_reason: str, regime: str, flow_bias: str,
+                         risk_gate: str, notes: str = "") -> None:
+        """Log a trade that was skipped with reason for learning."""
+        self.conn.execute(
+            """INSERT INTO skipped_trades(ts, symbol, direction, alert_confidence,
+               skip_reason, regime, flow_bias, risk_gate, notes)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            (
+                datetime.utcnow().isoformat(),
+                symbol, direction, alert_confidence,
+                skip_reason, regime, flow_bias, risk_gate, notes,
+            ),
+        )
+        self.conn.commit()
+
+    def get_skipped_trades(self, limit: int = 50, since_date: str | None = None) -> list[dict]:
+        """Retrieve skipped trades for analysis."""
+        query = "SELECT * FROM skipped_trades"
+        params = []
+        if since_date:
+            query += " WHERE ts >= ?"
+            params.append(since_date)
+        query += " ORDER BY ts DESC LIMIT ?"
+        params.append(limit)
+        
+        cur = self.conn.execute(query, params)
+        rows = cur.fetchall()
+        cols = [desc[0] for desc in cur.description]
+        return [dict(zip(cols, row)) for row in rows]

@@ -1151,7 +1151,569 @@
       margin-right: 6px;
     }
 
-    /* ── UNIVERSE TABLE (full) ───────────────────────────────────── */
+    /* ── STATUS CARD (Trade Verdict) ─────────────────────────────── */
+    .status-card {
+      position: relative;
+      overflow: hidden;
+      border-radius: var(--radius);
+      padding: 32px;
+      border: 1px solid var(--glass-border);
+      transition: all var(--transition);
+      background: var(--bg-card);
+    }
+
+    .status-card[data-tone="bull"] {
+      border-color: rgba(16, 185, 129, 0.3);
+      background: linear-gradient(135deg, rgba(16, 185, 129, 0.05), rgba(16, 185, 129, 0.1));
+    }
+
+    .status-card[data-tone="bear"] {
+      border-color: rgba(239, 68, 68, 0.3);
+      background: linear-gradient(135deg, rgba(239, 68, 68, 0.05), rgba(239, 68, 68, 0.1));
+    }
+
+    .status-card[data-tone="range"] {
+      border-color: rgba(245, 158, 11, 0.3);
+      background: linear-gradient(135deg, rgba(245, 158, 11, 0.05), rgba(245, 158, 11, 0.1));
+    }
+
+    .status-card[data-tone="unclear"],
+    .status-card[data-tone="neutral"] {
+      border-color: var(--glass-border);
+      background: linear-gradient(135deg, rgba(148, 163, 184, 0.05), rgba(71, 85, 105, 0.1));
+    }
+
+    .status-card::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      opacity: 0.08;
+      border-radius: var(--radius);
+      z-index: 0;
+    }
+
+    .status-card[data-tone="bull"]::before {
+      background: var(--gradient-green);
+    }
+
+    .status-card[data-tone="bear"]::before {
+      background: var(--gradient-red);
+    }
+
+    .status-card[data-tone="range"]::before {
+      background: linear-gradient(135deg, #f59e0b, #d97706);
+    }
+
+    .status-card[data-tone="unclear"]::before,
+    .status-card[data-tone="neutral"]::before {
+      background: linear-gradient(135deg, #64748b, #475569);
+    }
+
+    .status-card-content {
+      position: relative;
+      z-index: 1;
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 24px;
+      align-items: center;
+    }
+
+    @media (max-width: 900px) {
+      .status-card-content {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .status-main {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .status-label {
+      font-size: 0.7rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 2px;
+      color: var(--text-secondary);
+    }
+
+    .status-bias {
+      font-size: 3rem;
+      font-weight: 900;
+      line-height: 1.1;
+      letter-spacing: -1px;
+    }
+
+    .status-bias.bull {
+      color: var(--accent-green);
+      text-shadow: 0 0 40px var(--accent-green-glow);
+    }
+
+    .status-bias.bear {
+      color: var(--accent-red);
+      text-shadow: 0 0 40px var(--accent-red-glow);
+    }
+
+    .status-bias.range {
+      color: var(--accent-amber);
+      text-shadow: 0 0 40px var(--accent-amber-glow);
+    }
+
+    .status-bias.unclear,
+    .status-bias.neutral {
+      color: var(--text-secondary);
+    }
+
+    .status-strategy {
+      font-size: 1.1rem;
+      font-weight: 600;
+      color: var(--text-primary);
+      margin-top: 4px;
+    }
+
+    .status-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 12px;
+    }
+
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 14px;
+      border-radius: var(--radius-xs);
+      font-size: 0.75rem;
+      font-weight: 700;
+      font-family: var(--mono);
+      border: 1px solid var(--glass-border);
+      background: var(--glass);
+      color: var(--text-secondary);
+    }
+
+    .status-badge.conf-high {
+      color: var(--accent-green);
+      border-color: rgba(16, 185, 129, 0.3);
+      background: rgba(16, 185, 129, 0.08);
+    }
+
+    .status-badge.conf-med {
+      color: var(--accent-amber);
+      border-color: rgba(245, 158, 11, 0.3);
+      background: rgba(245, 158, 11, 0.08);
+    }
+
+    .status-badge.conf-low {
+      color: var(--text-muted);
+    }
+
+    .status-picks {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      min-width: 180px;
+    }
+
+    .status-pick-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      background: var(--glass);
+      border-radius: var(--radius-xs);
+      border: 1px solid var(--glass-border);
+    }
+
+    .status-pick-label {
+      font-size: 0.65rem;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: var(--text-muted);
+      font-weight: 600;
+    }
+
+    .status-pick-value {
+      font-family: var(--mono);
+      font-size: 0.9rem;
+      font-weight: 700;
+      color: var(--text-primary);
+    }
+
+    /* ── BENTO GRID ──────────────────────────────────────────────── */
+    .bento-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      grid-auto-rows: minmax(140px, auto);
+      gap: 20px;
+      margin-bottom: 24px;
+    }
+
+    .bento-grid .card {
+      margin-bottom: 0;
+    }
+
+    .bento-item {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .bento-item.wide {
+      grid-column: span 2;
+    }
+
+    .bento-item.tall {
+      grid-row: span 2;
+    }
+
+    .bento-item.full {
+      grid-column: 1 / -1;
+    }
+
+    @media (max-width: 1100px) {
+      .bento-grid {
+        grid-template-columns: repeat(2, 1fr);
+      }
+      .bento-item.wide {
+        grid-column: span 2;
+      }
+    }
+
+    @media (max-width: 700px) {
+      .bento-grid {
+        grid-template-columns: 1fr;
+      }
+      .bento-item.wide,
+      .bento-item.tall,
+      .bento-item.full {
+        grid-column: 1;
+        grid-row: auto;
+      }
+    }
+
+    /* ── NOTIFICATION TOAST ──────────────────────────────────────── */
+    #notification-toast {
+      position: fixed;
+      top: 80px;
+      right: 24px;
+      display: none;
+      flex-direction: column;
+      gap: 8px;
+      z-index: 1002;
+      max-width: 380px;
+      animation: toast-slide-in 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    #notification-toast.visible {
+      display: flex;
+    }
+
+    @keyframes toast-slide-in {
+      from {
+        transform: translateX(120%);
+        opacity: 0;
+      }
+      to {
+        transform: translateX(0);
+        opacity: 1;
+      }
+    }
+
+    .toast-item {
+      background: rgba(239, 68, 68, 0.12);
+      border: 1px solid rgba(239, 68, 68, 0.25);
+      color: var(--accent-red);
+      padding: 14px 18px;
+      border-radius: var(--radius-sm);
+      font-size: 0.82rem;
+      backdrop-filter: blur(16px);
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      line-height: 1.5;
+    }
+
+    .toast-item.warn {
+      background: rgba(245, 158, 11, 0.12);
+      border-color: rgba(245, 158, 11, 0.25);
+      color: var(--accent-amber);
+    }
+
+    .toast-close {
+      background: none;
+      border: none;
+      color: inherit;
+      cursor: pointer;
+      font-size: 1.1rem;
+      padding: 0;
+      margin-left: auto;
+      opacity: 0.6;
+      transition: opacity 0.2s;
+    }
+
+    .toast-close:hover {
+      opacity: 1;
+    }
+
+    .system-health-btn {
+      position: relative;
+      background: var(--glass);
+      border: 1px solid var(--glass-border);
+      color: var(--text-primary);
+      width: 40px;
+      height: 40px;
+      border-radius: var(--radius-xs);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: all var(--transition);
+      font-size: 1.1rem;
+    }
+
+    .system-health-btn:hover {
+      background: var(--glass-border);
+      transform: scale(1.05);
+    }
+
+    .system-health-btn.has-issues {
+      border-color: rgba(239, 68, 68, 0.4);
+      animation: pulse-glow-red 2s ease-in-out infinite;
+    }
+
+    .health-dot {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+    }
+
+    .health-dot.ok {
+      background: var(--accent-green);
+    }
+
+    .health-dot.warn {
+      background: var(--accent-amber);
+    }
+
+    .health-dot.error {
+      background: var(--accent-red);
+    }
+
+    @keyframes pulse-glow-red {
+      0%, 100% {
+        box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.2);
+      }
+      50% {
+        box-shadow: 0 0 0 6px rgba(239, 68, 68, 0);
+      }
+    }
+
+    /* ── INDEX BAR ENHANCED ─────────────────────────────────────── */
+    .index-chip .value {
+      font-size: 1.5rem; /* Increased size for anchor */
+    }
+
+    .index-chip .label {
+      font-size: 0.75rem;
+      letter-spacing: 1px;
+    }
+
+    /* ── TICKER ENHANCEMENTS ────────────────────────────────────── */
+    .ticker-inner {
+      gap: 64px; /* More horizontal padding */
+    }
+
+    .ticker-item {
+      position: relative;
+      padding: 6px 0;
+    }
+
+    .ticker-item:not(:last-child)::after {
+      content: '';
+      position: absolute;
+      right: -32px;
+      top: 50%;
+      transform: translateY(-50%);
+      width: 1px;
+      height: 16px;
+      background: var(--glass-border);
+      opacity: 0.4;
+    }
+
+      gap: 48px;
+      padding: 0 24px;
+    }
+
+    .ticker-item {
+      position: relative;
+      cursor: pointer;
+      padding: 4px 0;
+      transition: opacity var(--transition);
+    }
+
+    .ticker-item:not(:last-child)::after {
+      content: '';
+      position: absolute;
+      right: -24px;
+      top: 50%;
+      transform: translateY(-50%);
+      width: 1px;
+      height: 14px;
+      background: var(--glass-border);
+    }
+
+    .ticker-item:hover {
+      opacity: 0.75;
+    }
+
+    /* ── TABLE VISUALIZATIONS ───────────────────────────────────── */
+    .sparkline-svg {
+      width: 50px;
+      height: 20px;
+      vertical-align: middle;
+    }
+
+    .sparkline-path {
+      fill: none;
+      stroke-width: 2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .sparkline-path.up {
+      stroke: var(--accent-green);
+    }
+
+    .sparkline-path.down {
+      stroke: var(--accent-red);
+    }
+
+    .progress-bar-wrap {
+      width: 70px;
+      height: 6px;
+      background: rgba(255, 255, 255, 0.06);
+      border-radius: 3px;
+      overflow: hidden;
+      display: inline-block;
+      vertical-align: middle;
+    }
+
+    .progress-bar-fill {
+      height: 100%;
+      border-radius: 3px;
+      min-width: 2px;
+      transition: width 0.6s ease-out;
+    }
+
+    .progress-bar-fill.up {
+      background: var(--gradient-green);
+    }
+
+    .progress-bar-fill.down {
+      background: var(--gradient-red);
+    }
+
+    .stars {
+      display: inline-flex;
+      gap: 2px;
+      font-size: 0.85rem;
+    }
+
+    .star-filled {
+      color: var(--accent-amber);
+    }
+
+    .star-empty {
+      color: var(--text-muted);
+      opacity: 0.3;
+    }
+
+    /* ── UNIVERSE SEARCH ─────────────────────────────────────────── */
+    .universe-search-bar {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 16px;
+      flex-wrap: wrap;
+    }
+
+    .universe-search-input {
+      flex: 1;
+      min-width: 200px;
+      background: var(--glass);
+      border: 1px solid var(--glass-border);
+      border-radius: var(--radius-xs);
+      color: var(--text-primary);
+      padding: 10px 14px;
+      font-family: var(--font);
+      font-size: 0.85rem;
+      transition: border-color var(--transition);
+    }
+
+    .universe-search-input:focus {
+      outline: none;
+      border-color: var(--accent-blue);
+    }
+
+    .universe-search-input::placeholder {
+      color: var(--text-muted);
+    }
+
+    .universe-filter-badge {
+      padding: 6px 12px;
+      border-radius: var(--radius-xs);
+      background: var(--glass);
+      border: 1px solid var(--glass-border);
+      color: var(--text-secondary);
+      font-size: 0.72rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all var(--transition);
+      font-family: var(--font);
+    }
+
+    .universe-filter-badge.active {
+      background: rgba(59, 130, 246, 0.15);
+      border-color: rgba(59, 130, 246, 0.3);
+      color: var(--accent-blue);
+    }
+
+    /* ── DARK MODE REFINEMENTS ──────────────────────────────────── */
+    [data-theme="dark"],
+    :root:not([data-theme="light"]) {
+      --bg-primary: #030712;
+      --bg-secondary: #0a0e1a;
+      --bg-card: rgba(17, 24, 39, 0.8);
+      --bg-card-hover: rgba(31, 41, 55, 0.9);
+      --text-primary: #f8fafc;
+      --text-secondary: #94a3b8;
+      --text-muted: #64748b;
+      --accent-blue: #3b82f6;
+      --accent-blue-glow: rgba(59, 130, 246, 0.3);
+      --accent-green: #10b981;
+      --accent-green-glow: rgba(16, 185, 129, 0.3);
+      --accent-red: #ef4444;
+      --accent-red-glow: rgba(239, 68, 68, 0.3);
+      --accent-amber: #f59e0b;
+      --glass-border: rgba(255, 255, 255, 0.1);
+    }
+
+    [data-theme="light"] {
+      --accent-blue: #2563eb;
+      --accent-green: #059669;
+      --accent-red: #dc2626;
+      --accent-amber: #d97706;
+    }
+
+    .card:hover {
+      transform: translateY(-2px);
+      border-color: rgba(255, 255, 255, 0.12);
+    }
+
     .universe-section {
       margin-bottom: 40px;
     }
@@ -1198,11 +1760,95 @@
       position: relative;
     }
 
+    .index-bar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      padding: 10px 24px;
+      background: var(--bg-secondary);
+      border-bottom: 1px solid var(--glass-border);
+      position: sticky;
+      top: 0;
+      z-index: 1001;
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+    }
+
+    .index-chip {
+      background: var(--glass);
+      border: 1px solid var(--glass-border);
+      border-radius: var(--radius-xs);
+      padding: 6px 12px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      transition: all var(--transition);
+    }
+
+    .index-chip .label {
+      font-size: 0.62rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-secondary);
+    }
+
+    .index-chip .value-wrap {
+      display: flex;
+      align-items: baseline;
+      gap: 5px;
+    }
+
+    .index-chip .value {
+      font-family: var(--mono);
+      font-size: 0.95rem;
+      font-weight: 700;
+    }
+
+    .index-chip .change {
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      font-weight: 600;
+    }
+
+    .index-chip .subline {
+      font-size: 0.58rem;
+      color: var(--text-muted);
+      border-left: 1px solid var(--glass-border);
+      padding-left: 8px;
+    }
+
+    .mini-live-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--accent-green);
+      display: inline-block;
+      animation: pulse-glow 2s ease-in-out infinite;
+    }
+
+    @keyframes pulse-glow {
+      0%, 100% { opacity: 0.6; transform: scale(1); }
+      50% { opacity: 1; transform: scale(1.2); }
+    }
+
+    .ticker-strip {
+      background: var(--bg-secondary);
+      border-bottom: 1px solid var(--glass-border);
+      padding: 8px 0;
+      overflow: hidden;
+      position: sticky;
+      top: 52px; /* Height of index-bar */
+      z-index: 1000;
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+    }
+
     .ticker-inner {
       display: flex;
       gap: 32px;
       padding: 0 20px;
-      animation: ticker-scroll 60s linear infinite;
+      animation: ticker-scroll 90s linear infinite;
       white-space: nowrap;
       will-change: transform;
       width: max-content;
@@ -1213,13 +1859,8 @@
     }
 
     @keyframes ticker-scroll {
-      0% {
-        transform: translateX(100%);
-      }
-
-      100% {
-        transform: translateX(-100%);
-      }
+      0% { transform: translateX(0); }
+      100% { transform: translateX(-50%); }
     }
 
     .ticker-item {
@@ -1251,23 +1892,16 @@
       box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08);
     }
 
-    .ticker-range-dot.low {
-      background: var(--accent-red);
-    }
-
-    .ticker-range-dot.mid {
-      background: var(--text-muted);
-    }
-
-    .ticker-range-dot.high {
-      background: var(--accent-green);
-    }
+    .ticker-range-dot.low { background: var(--accent-red); }
+    .ticker-range-dot.mid { background: var(--text-muted); }
+    .ticker-range-dot.high { background: var(--accent-green); }
 
     .intra-grid {
       display: grid;
       grid-template-columns: 1fr 1.6fr;
       gap: 20px;
     }
+
 
     @media (max-width: 900px) {
       .intra-grid {
@@ -1483,7 +2117,7 @@
       overflow: hidden;
     }
 
-    .countdown-fill {
+.countdown-fill {
       position: absolute;
       bottom: 0;
       left: 0;
@@ -1491,6 +2125,78 @@
       background: var(--accent-green);
       transition: height 1s linear;
     }
+
+    /* ══ SKIP REASONS & VERDICT TRACE PANELS ══ */
+    .skip-panel {
+      background: var(--glass);
+      backdrop-filter: blur(20px);
+      border: 1px solid var(--glass-border);
+      min-height: 320px;
+    }
+    .skip-summary { 
+      font-size: 1.3rem; 
+      font-weight: 800; 
+      margin: 8px 0; 
+      color: var(--accent-red);
+    }
+    .skip-chip { 
+      background: var(--bg-card); 
+      padding: 6px 12px; 
+      border-radius: 20px; 
+      font-size: 0.85rem; 
+      margin: 4px 6px 4px 0; 
+      display: inline-block;
+    }
+    .skip-table {
+      font-family: var(--mono);
+      font-size: 0.8rem;
+      max-height: 160px;
+      overflow-y: auto;
+    }
+    .skip-table table { width: 100%; border-collapse: collapse; }
+    .skip-table th, .skip-table td { padding: 6px 4px; text-align: left; border-bottom: 1px solid var(--glass-border); }
+    .skip-table th { color: var(--text-secondary); }
+
+    .trace-panel {
+      background: var(--glass); 
+      backdrop-filter: blur(20px); 
+      border: 1px solid var(--glass-border);
+      min-height: 320px;
+    }
+    .trace-inputs { 
+      display: grid; 
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); 
+      gap: 12px; 
+      margin: 16px 0;
+    }
+    .trace-input { 
+      display: flex; 
+      flex-direction: column; 
+    }
+    .trace-key { 
+      font-size: 0.85rem; 
+      color: var(--text-secondary); 
+      text-transform: uppercase; 
+      letter-spacing: 0.5px;
+    }
+    .trace-value { 
+      font-size: 1.1rem; 
+      font-weight: 700; 
+      margin-top: 2px;
+    }
+    .trace-path { 
+      color: var(--accent-amber); 
+      font-weight: 600; 
+      margin: 12px 0;
+    }
+    .trace-blocks { 
+      background: rgba(239,68,68,0.1); 
+      border-left: 4px solid var(--accent-red); 
+      padding: 16px; 
+      margin-top: 16px;
+      border-radius: var(--radius-sm);
+    }
+    .trace-blocks li { margin: 6px 0; }
   </style>
 </head>
 
@@ -1506,8 +2212,17 @@
   <!-- Error toast -->
   <div id="error-toast"></div>
 
+  <!-- Notification Toast for Data Issues -->
+  <div id="notification-toast"></div>
+
   <!-- Index bar (Moved to top) -->
   <div class="index-bar" id="index-bar"></div>
+
+  <!-- Global Ticker (Moved to top) -->
+  <div class="ticker-strip" id="ticker-strip">
+    <div class="ticker-inner" id="ticker-inner">Loading Ticker…</div>
+  </div>
+
 
   <!-- Dashboard -->
   <div id="dashboard" class="container">
@@ -1532,6 +2247,10 @@
           onclick="sendAlerts(this)">
           <span class="icon">✈️</span> Send Alert
         </button>
+        <button class="system-health-btn" id="system-health-btn" onclick="toggleHealthToast()" title="System Health">
+          <span>🛡️</span>
+          <span class="health-dot ok" id="health-dot"></span>
+        </button>
         <button class="theme-toggle" id="theme-toggle" onclick="toggleTheme()" title="Toggle Theme">
           <span class="icon-sun">☀️</span>
           <span class="icon-moon">🌙</span>
@@ -1550,52 +2269,67 @@
       </div>
     </header>
 
-    <!-- Decision Card -->
-    <div class="decision-card card" id="decision-card" data-tone="unclear">
-      <div class="decision-card-header">
-        <div class="card-title" style="margin-bottom:0;"><span class="icon">🎯</span> Trade Verdict</div>
-        <button class="decision-card-close" id="decision-card-close" onclick="dismissDecisionCard()"
-          title="Dismiss for this session" aria-label="Dismiss trade verdict">✕</button>
-      </div>
-      <div class="verdict-content">
-        <div class="verdict-main" id="verdict-main">—</div>
-      </div>
-    </div>
-
-    <!-- Freshness line -->
+    <!-- Freshness line (clean, no inline errors) -->
     <div class="freshness-line" id="freshness-line">—</div>
 
+    <!-- ═══ BENTO GRID LAYOUT ═══ -->
+    <div class="bento-grid">
 
-    <!-- Regime banner -->
-    <div class="regime-banner card" id="regime-banner" data-regime="">
-      <div class="content">
-        <div class="regime-header">
-          <div class="regime-label">Market Regime</div>
-          <div class="regime-badge" id="regime-badge">—</div>
-          <div class="regime-notes" id="regime-notes"></div>
+      <!-- Regime banner (WIDE) -->
+      <div class="bento-item wide card regime-banner" id="regime-banner" data-regime="">
+        <div class="content">
+          <div class="regime-header">
+            <div class="regime-label">Market Regime</div>
+            <div class="regime-badge" id="regime-badge">—</div>
+            <div class="regime-notes" id="regime-notes"></div>
+          </div>
+          <div class="regime-metrics" id="regime-metrics"></div>
         </div>
-        <div class="regime-metrics" id="regime-metrics"></div>
       </div>
-    </div>
 
-    <!-- Main grid -->
-    <div class="grid-main">
-
-      <!-- Flows -->
-      <div class="card">
+      <!-- Money Flows -->
+      <div class="bento-item card">
         <div class="card-title"><span class="icon">💰</span> Money Flows</div>
         <div class="bias-indicator" id="bias-indicator">—</div>
         <div class="flow-stats" id="flow-stats"></div>
       </div>
 
+      <!-- Trade Verdict Status Card (WIDE) -->
+      <div class="bento-item wide status-card card" id="decision-card" data-tone="unclear">
+        <div class="status-card-content">
+          <div class="status-main">
+            <div class="status-label">Trade Verdict</div>
+            <div class="status-bias unclear" id="status-bias">NEUTRAL</div>
+            <div class="status-strategy" id="status-strategy">No Trade</div>
+            <div class="status-meta" id="status-meta">
+              <span class="status-badge conf-low">Conf: LOW</span>
+            </div>
+          </div>
+          <div class="status-picks" id="status-picks">
+            <div class="status-pick-item">
+              <div>
+                <div class="status-pick-label">Top Long</div>
+                <div class="status-pick-value" id="status-top-long">—</div>
+              </div>
+            </div>
+            <div class="status-pick-item">
+              <div>
+                <div class="status-pick-label">Top Short</div>
+                <div class="status-pick-value" id="status-top-short">—</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- Sector rotation -->
-      <div class="card">
+      <div class="bento-item card">
         <div class="card-title"><span class="icon">🔄</span> Sector Rotation (5D RS)</div>
         <div class="sector-list" id="sector-list"></div>
       </div>
 
       <!-- Leaders -->
-      <div class="card">
+      <div class="bento-item card">
         <div class="card-title"><span class="icon">🚀</span> A-Grade Longs</div>
         <table class="rank-table" id="leaders-table">
           <thead>
@@ -1611,7 +2345,7 @@
       </div>
 
       <!-- Laggards -->
-      <div class="card">
+      <div class="bento-item card">
         <div class="card-title"><span class="icon">📉</span> A-Grade Shorts</div>
         <table class="rank-table" id="laggards-table">
           <thead>
@@ -1627,31 +2361,53 @@
       </div>
 
       <!-- Structure -->
-      <div class="card structure-card">
+      <div class="bento-item wide card">
         <div class="card-title"><span class="icon">🏗️</span> Trade Structure</div>
         <div class="struct-primary" id="struct-primary">—</div>
         <div class="struct-secondary" id="struct-secondary">—</div>
         <div class="struct-notes" id="struct-notes">—</div>
       </div>
+
+      <!-- Universe (FULL WIDTH) -->
+      <div class="bento-item full universe-section card">
+        <div class="card-title"><span class="icon">📊</span> Full Universe Rankings</div>
+        <div class="universe-search-bar">
+          <input type="search" class="universe-search-input" id="universe-search" placeholder="Search 212 stocks by symbol..." oninput="filterUniverse()">
+          <button class="universe-filter-badge active" id="filter-all" onclick="setUniverseFilter('all')">All</button>
+          <button class="universe-filter-badge" id="filter-q5" onclick="setUniverseFilter('q5')">Q5 ★</button>
+          <button class="universe-filter-badge" id="filter-q1" onclick="setUniverseFilter('q1')">Q1 ☆</button>
+        </div>
+        <button class="universe-toggle" id="universe-toggle" onclick="toggleUniverse()">Show All Stocks ▾</button>
+        <div id="universe-full" data-expanded="false">
+          <table class="rank-table" id="universe-table">
+            <thead>
+              <tr>
+                <th>Symbol</th>
+                <th>RS Slope 20D</th>
+                <th>vs 50DMA</th>
+                <th>Quintile</th>
+                <th>Above 50DMA</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
     </div>
 
-    <!-- Universe -->
-    <div class="universe-section card">
-      <div class="card-title"><span class="icon">📊</span> Full Universe Rankings</div>
-      <button class="universe-toggle" id="universe-toggle" onclick="toggleUniverse()">Show All Stocks ▾</button>
-      <div id="universe-full" data-expanded="false">
-        <table class="rank-table" id="universe-table">
-          <thead>
-            <tr>
-              <th>Symbol</th>
-              <th>RS Slope 20D</th>
-              <th>vs 50DMA</th>
-              <th>Quintile</th>
-              <th>Above 50DMA</th>
-            </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
+    <!-- ═══ SKIP REASONS & VERDICT TRACE ═══ -->
+    <div class="grid-main" style="margin-bottom: 24px;">
+      <div class="card skip-panel" id="skip-panel">
+        <div class="card-title"><span class="icon">🚫</span> Skip Reasons Today</div>
+        <div class="skip-summary" id="skip-total">-</div>
+        <div id="skip-reasons"></div>
+        <div class="skip-table" id="skip-recent"></div>
+      </div>
+      <div class="card trace-panel" id="trace-panel" style="display: none;">
+        <div class="card-title"><span class="icon">🔍</span> Verdict Engine Trace</div>
+        <div class="trace-inputs" id="trace-inputs"></div>
+        <div class="trace-path" id="trace-decision"></div>
+        <div class="trace-blocks" id="trace-blocks"></div>
       </div>
     </div>
 
@@ -1668,10 +2424,8 @@
         </span>
       </div>
 
-      <!-- Ticker strip -->
-      <div class="ticker-strip" id="ticker-strip">
-        <div class="ticker-inner" id="ticker-inner">Loading…</div>
-      </div>
+      <!-- Ticker strip (MOVED TO TOP) -->
+
 
       <div class="intra-grid">
         <!-- Nifty 5-min candle chart -->
@@ -1757,7 +2511,7 @@
       const marketOpen = !!d.market_open;
       const subline = marketOpen
         ? '<span class="mini-live-dot"></span>'
-        : `${d.last_trading_date || d.session_date || '—'}`;
+        : '';
       const items = [
         { label: 'NIFTY 50', value: fmt(d.nifty.close), change: d.nifty.change_pct },
         { label: 'BANK NIFTY', value: fmt(d.banknifty.close), change: d.banknifty.change_pct },
@@ -1771,18 +2525,56 @@
         <span class="value">${i.value}</span>
         ${i.change != null ? `<span class="change ${changeClass(i.change)}">${i.change > 0 ? '+' : ''}${fmt(i.change)}%${i.suffix || ''}</span>` : ''}
       </div>
-      <div class="subline">${subline}</div>
+      ${subline ? `<div class="subline">${subline}</div>` : ''}
     </div>
   `).join('');
     }
 
 
+
     function renderFreshnessLine(d) {
       const ts = d.signals_computed_at || d.ts || '—';
-      document.getElementById('freshness-line').textContent = `Data as of: ${ts} · Market: ${d.market_status || '—'}`;
+      let html = `Data as of: ${ts} · Market: ${d.market_status || '—'}`;
+      
+      const healthBtn = document.getElementById('system-health-btn');
+      const healthDot = document.getElementById('health-dot');
+      
+      if (d.source_errors && d.source_errors.length > 0) {
+        healthBtn.classList.add('has-issues');
+        healthDot.className = 'health-dot error';
+        // Auto-show health toast if there are new errors
+        showHealthToast(d.source_errors);
+      } else {
+        healthBtn.classList.remove('has-issues');
+        healthDot.className = 'health-dot ok';
+      }
+      
+      document.getElementById('freshness-line').innerHTML = html;
     }
 
-    function renderDecisionCard(d) {
+    function showHealthToast(errors) {
+      const toast = document.getElementById('notification-toast');
+      toast.innerHTML = errors.map(err => `
+        <div class="toast-item">
+          <span>⚠️</span>
+          <div>
+            <strong>Data Issue</strong><br>
+            ${err}
+          </div>
+          <button class="toast-close" onclick="this.parentElement.remove()">×</button>
+        </div>
+      `).join('');
+      toast.classList.add('visible');
+      setTimeout(() => toast.classList.remove('visible'), 10000);
+    }
+
+    function toggleHealthToast() {
+      const toast = document.getElementById('notification-toast');
+      toast.classList.toggle('visible');
+    }
+
+    function renderDecisionCardLegacy(d) {
+      const verdict = d.verdict || {};
       const regime = d.regime?.name || '';
       const bias = d.flows?.bias || 'NEUTRAL';
       const leaders = d.leaders || [];
@@ -1790,26 +2582,72 @@
       const structure = d.structure?.primary || 'No clear setup';
       const card = document.getElementById('decision-card');
       const regimeText = regime || 'UNCLEAR';
+      const action = verdict.action || regimeText;
+      const confidence = verdict.confidence || 'LOW';
+      const strategyText = verdict.strategy || structure;
+      const blocksText = (verdict.blocks || []).slice(0, 2).join(' | ');
+      const verdictHasAction = Boolean(verdict.action);
       const topLong = leaders[0]?.symbol || '—';
       const topShort = laggards[0]?.symbol || '—';
 
-      let tone = 'unclear';
-      if (regime.includes('TREND_UP')) tone = 'bull';
-      else if (regime.includes('TREND_DOWN') || regime.includes('VOL_EXPANSION')) tone = 'bear';
-      else if (regime.includes('RANGE') || regime.includes('VOL_CONTRACTION')) tone = 'range';
+      let tone = verdict.tone || 'unclear';
+      if (verdict.tone) {
+        card.dataset.tone = tone;
+      } else {
+        if (regime.includes('TREND_UP')) tone = 'bull';
+        else if (regime.includes('TREND_DOWN') || regime.includes('VOL_EXPANSION')) tone = 'bear';
+        else if (regime.includes('RANGE') || regime.includes('VOL_CONTRACTION')) tone = 'range';
+      }
 
       card.dataset.tone = tone;
       document.getElementById('verdict-main').innerHTML = [
-        `<span class="decision-pill ${tone}">${regimeText}</span>`,
+        `<span class="decision-pill ${tone}">${action}</span>`,
         '<span class="decision-arrow">→</span>',
         `<span class="decision-pill ${bias === 'LONG' ? 'bull' : bias === 'SHORT' ? 'bear' : bias === 'NEUTRAL' ? 'range' : 'unclear'}">Bias: ${bias}</span>`,
         '<span class="decision-arrow">→</span>',
-        `<span class="decision-pill unclear">Strategy: ${structure}</span>`,
+        `<span class="decision-pill ${tone}">${regimeText}</span>`,
+        '<span class="decision-arrow">â†’</span>',
+        `<span class="decision-pill unclear">Conf: ${confidence}</span>`,
+        '<span class="decision-arrow">â†’</span>',
+        `<span class="decision-pill unclear">Strategy: ${strategyText}</span>`,
         '<span class="decision-arrow">→</span>',
-        `<span class="decision-top-pick">Top Long: ${topLong}</span>`,
+        `<span class="decision-top-pick">Top Long: ${verdictHasAction ? (verdict.top_long || '-') : topLong}</span>`,
         '<span class="decision-arrow">/</span>',
-        `<span class="decision-top-pick">Top Short: ${topShort}</span>`
+        `<span class="decision-top-pick">Top Short: ${verdictHasAction ? (verdict.top_short || '-') : topShort}</span>`,
+        blocksText ? '<span class="decision-arrow">â†’</span>' : '',
+        blocksText ? `<span class="decision-top-pick">Blocked: ${blocksText}</span>` : ''
       ].join(' ');
+    }
+
+    function renderDecisionCard(d) {
+      const verdict = d.verdict || {};
+      const bias = d.flows?.bias || 'NEUTRAL';
+      const confidence = verdict.confidence || 'LOW';
+      const strategy = verdict.strategy || d.structure?.primary || 'No Trade';
+      const tone = verdict.tone || (d.regime?.name?.includes('UP') ? 'bull' : d.regime?.name?.includes('DOWN') ? 'bear' : 'unclear');
+      
+      const card = document.getElementById('decision-card');
+      card.dataset.tone = tone;
+
+      // Update Bias & Strategy (Large Typography)
+      const biasEl = document.getElementById('status-bias');
+      biasEl.textContent = bias;
+      biasEl.className = `status-bias ${tone}`;
+      
+      document.getElementById('status-strategy').textContent = strategy;
+
+      // Update Meta (Badges)
+      const confClass = confidence === 'HIGH' ? 'conf-high' : confidence === 'MED' ? 'conf-med' : 'conf-low';
+      document.getElementById('status-meta').innerHTML = `
+        <span class="status-badge ${confClass}">Confidence: ${confidence}</span>
+        ${d.source_errors?.length ? `<span class="status-badge" style="color:var(--accent-red); border-color:rgba(239,68,68,0.3);">⚠️ Data Degraded</span>` : `<span class="status-badge">System: Healthy</span>`}
+      `;
+
+      // Update Top Picks
+      const topLong = verdict.top_long || d.leaders?.[0]?.symbol || '—';
+      const topShort = verdict.top_short || d.laggards?.[0]?.symbol || '—';
+      document.getElementById('status-top-long').textContent = topLong;
+      document.getElementById('status-top-short').textContent = topShort;
     }
 
     function renderRegime(d) {
@@ -1907,14 +2745,44 @@
 
     function renderRankTable(tableId, items) {
       const tbody = document.querySelector(`#${tableId} tbody`);
-      tbody.innerHTML = items.map(r => `
-    <tr>
-      <td class="sym">${r.symbol}</td>
-      <td class="mono-val ${changeClass(r.rs_slope)}">${r.rs_slope > 0 ? '+' : ''}${fmt(r.rs_slope)}</td>
-      <td class="mono-val ${changeClass(r.pct_vs_50dma)}">${r.pct_vs_50dma > 0 ? '+' : ''}${fmt(r.pct_vs_50dma, 1)}%</td>
-      <td><span class="quintile-badge q${r.quintile}">${r.quintile}</span></td>
-    </tr>
-  `).join('');
+      tbody.innerHTML = items.map(r => {
+        const rsVal = Number(r.rs_slope || 0);
+        const vs50Val = Number(r.pct_vs_50dma || 0);
+        const q = Number(r.quintile || 1);
+        
+        // Simple sparkline mock-up using CSS/SVG
+        const sparkColor = rsVal > 0 ? 'up' : 'down';
+        const sparkPath = rsVal > 0 ? 'M2,18 L10,14 L18,15 L26,10 L34,12 L42,5' : 'M2,5 L10,10 L18,8 L26,14 L34,12 L42,18';
+        
+        // Progress bar for vs 50DMA
+        const barWidth = Math.min(Math.abs(vs50Val) * 5, 100);
+        const barCls = vs50Val > 0 ? 'up' : 'down';
+        
+        // Stars for Q
+        let stars = '';
+        for(let i=0; i<5; i++) {
+          stars += `<span class="${i < q ? 'star-filled' : 'star-empty'}">★</span>`;
+        }
+
+        return `
+          <tr>
+            <td class="sym">${r.symbol}</td>
+            <td>
+              <div style="display:flex; align-items:center; gap:8px;">
+                <svg class="sparkline-svg" viewBox="0 0 44 22"><path class="sparkline-path ${sparkColor}" d="${sparkPath}" /></svg>
+                <span class="mono-val ${changeClass(rsVal)}">${rsVal > 0 ? '+' : ''}${fmt(rsVal)}</span>
+              </div>
+            </td>
+            <td>
+              <div style="display:flex; flex-direction:column; gap:2px;">
+                <div class="progress-bar-wrap"><div class="progress-bar-fill ${barCls}" style="width:${barWidth}%"></div></div>
+                <span class="mono-val" style="font-size:0.65rem">${vs50Val > 0 ? '+' : ''}${fmt(vs50Val, 1)}%</span>
+              </div>
+            </td>
+            <td><div class="stars">${stars}</div></td>
+          </tr>
+        `;
+      }).join('');
     }
 
     function renderStructure(d) {
@@ -1929,19 +2797,36 @@
 
     function renderUniverse(d) {
       const tbody = document.querySelector('#universe-table tbody');
-      const all = d.all_ranks || [];
+      if (!d || !d.all_ranks) return;
+      
+      let filtered = d.all_ranks.filter(r => 
+        r.symbol.toLowerCase().includes(_universeSearch)
+      );
+      
+      if (_universeFilter === 'q5') filtered = filtered.filter(r => r.quintile === 5);
+      if (_universeFilter === 'q1') filtered = filtered.filter(r => r.quintile === 1);
+
       const expanded = document.getElementById('universe-full').dataset.expanded === 'true';
-      const visible = expanded ? all : all.slice(0, 10);
-      tbody.innerHTML = visible.map(r => `
-    <tr>
-      <td class="sym">${r.symbol}</td>
-      <td class="mono-val ${changeClass(r.rs_slope)}">${r.rs_slope > 0 ? '+' : ''}${fmt(r.rs_slope)}</td>
-      <td class="mono-val ${changeClass(r.pct_vs_50dma)}">${r.pct_vs_50dma > 0 ? '+' : ''}${fmt(r.pct_vs_50dma, 1)}%</td>
-      <td><span class="quintile-badge q${r.quintile}">${r.quintile}</span></td>
-      <td>${r.above_50dma ? '<span class="up">✓</span>' : '<span class="down">✗</span>'}</td>
-    </tr>
-  `).join('');
-      document.getElementById('universe-toggle').textContent = expanded ? 'Hide ▴' : `Show All [${all.length}] Stocks ▾`;
+      const visible = expanded ? filtered : filtered.slice(0, 10);
+      
+      tbody.innerHTML = visible.map(r => {
+        const q = Number(r.quintile || 1);
+        let stars = '';
+        for(let i=0; i<5; i++) {
+          stars += `<span class="${i < q ? 'star-filled' : 'star-empty'}" style="font-size:0.75rem">★</span>`;
+        }
+        return `
+        <tr>
+          <td class="sym">${r.symbol}</td>
+          <td class="mono-val ${changeClass(r.rs_slope)}">${r.rs_slope > 0 ? '+' : ''}${fmt(r.rs_slope)}</td>
+          <td class="mono-val ${changeClass(r.pct_vs_50dma)}">${r.pct_vs_50dma > 0 ? '+' : ''}${fmt(r.pct_vs_50dma, 1)}%</td>
+          <td><div class="stars">${stars}</div></td>
+          <td>${r.above_50dma ? '<span class="up">✓</span>' : '<span class="down">✗</span>'}</td>
+        </tr>
+      `;}).join('');
+      
+      const totalCount = filtered.length;
+      document.getElementById('universe-toggle').textContent = expanded ? 'Hide ▴' : `Show All [${totalCount}] Stocks ▾`;
     }
 
     function getCapitalConfig(baseRisk) {
@@ -1978,7 +2863,76 @@
   `).join('');
     }
 
-    function renderAll(data) {
+function renderSkipPanel(skips) {
+  const total = skips.summary.total;
+  document.getElementById('skip-total').textContent = `${total} skips`;
+  
+  let reasonsHtml = '';
+  for (const [reason, count] of Object.entries(skips.summary.by_reason)) {
+    reasonsHtml += `<span class="skip-chip">${reason}: ${count}</span>`;
+  }
+  document.getElementById('skip-reasons').innerHTML = reasonsHtml || '<div style="color:var(--text-muted);font-style:italic;">No skips today</div>';
+  
+  const recent = skips.today || [];
+  let recentHtml = '<table><tr><th>Time</th><th>Sym</th><th>Reason</th></tr>';
+  recent.slice(0, 5).forEach(skip => {
+    const time = new Date(skip.ts).toLocaleTimeString('en-IN', {hour:'numeric', minute:'2-digit'});
+    recentHtml += `<tr><td>${time}</td><td>${skip.symbol}</td><td>${skip.skip_reason || skip.risk_gate}</td></tr>`;
+  });
+  recentHtml += '</table>';
+  document.getElementById('skip-recent').innerHTML = recent.length ? recentHtml : '<div style="color:var(--text-muted);font-style:italic;">No recent skips</div>';
+}
+
+function renderVerdictTrace(trace) {
+  if (!trace || !trace.inputs) {
+    document.getElementById('trace-panel').style.display = 'none';
+    return;
+  }
+  
+  // Show panel only for WAIT/NO_TRADE decisions
+  const action = trace.action || '';
+  if (!action.includes('WAIT') && !action.includes('NO_TRADE')) {
+    document.getElementById('trace-panel').style.display = 'none';
+    return;
+  }
+  
+  document.getElementById('trace-panel').style.display = 'block';
+  
+  // Key inputs
+  const inputs = trace.inputs;
+  let inputsHtml = '';
+  inputsHtml += `<div class="trace-input"><span class="trace-key">Regime</span><span class="trace-value">${inputs.regime || 'N/A'}</span></div>`;
+  inputsHtml += `<div class="trace-input"><span class="trace-key">Trend Score</span><span class="trace-value">${inputs.trend_score || 'N/A'}</span></div>`;
+  inputsHtml += `<div class="trace-input"><span class="trace-key">Breadth >50DMA</span><span class="trace-value">${inputs.breadth_pct_above_50dma || 'N/A'}%</span></div>`;
+  inputsHtml += `<div class="trace-input"><span class="trace-key">PCR (OI)</span><span class="trace-value">${inputs.pcr_oi != null ? inputs.pcr_oi : 'N/A'}</span></div>`;
+  inputsHtml += `<div class="trace-input"><span class="trace-key">Max Pain Fresh</span><span class="trace-value">${inputs.mp_stale ? '🟡 Stale' : inputs.max_pain != null ? '🟢 Fresh' : '❌ Missing'}</span></div>`;
+  inputsHtml += `<div class="trace-input"><span class="trace-key">PCR Fresh</span><span class="trace-value">${inputs.pcr_stale ? '🟡 Stale' : inputs.pcr_oi != null ? '🟢 Fresh' : '❌ Missing'}</span></div>`;
+  inputsHtml += `<div class="trace-input"><span class="trace-key">Data Freshness</span><span class="trace-value">${inputs.data_freshness_status || 'N/A'}</span></div>`;
+  inputsHtml += `<div class="trace-input"><span class="trace-key">VIX</span><span class="trace-value">${inputs.vix || 'N/A'}</span></div>`;
+  inputsHtml += `<div class="trace-input"><span class="trace-key">Bias</span><span class="trace-value">${inputs.bias || 'N/A'}</span></div>`;
+  document.getElementById('trace-inputs').innerHTML = inputsHtml;
+  
+  // Decision path
+  const strategy = trace.strategy || '';
+  const confidence = trace.confidence || 'LOW';
+  document.getElementById('trace-decision').innerHTML = `Action: <strong>${action}</strong> | Strategy: <strong>${strategy}</strong> | Confidence: <strong>${confidence}</strong>`;
+  
+  // Blocks/Reasons
+  const blocks = trace.blocks || [];
+  const reasons = trace.reasons || [];
+  if (blocks.length || reasons.length) {
+    let blocksHtml = '<ul>';
+    [...blocks, ...reasons].slice(0, 6).forEach(block => {
+      blocksHtml += `<li>${block}</li>`;
+    });
+    blocksHtml += '</ul>';
+    document.getElementById('trace-blocks').innerHTML = blocksHtml;
+  } else {
+    document.getElementById('trace-blocks').innerHTML = '<div style="color:var(--text-muted);font-style:italic;">No specific blocks/reasons</div>';
+  }
+}
+
+function renderAll(data) {
       window._lastDashboardData = data;
       document.getElementById('ts').textContent = data.ts;
       const statusEl = document.getElementById('mkt-status');
@@ -2002,9 +2956,26 @@
       renderRankTable('laggards-table', data.laggards);
       renderStructure(data);
       renderUniverse(data);
-      renderUniverse(data);
+      if (data.skips) renderSkipPanel(data.skips);
+      if (data.verdict_trace) renderVerdictTrace(data.verdict_trace);
     }
 
+
+    let _universeSearch = '';
+    let _universeFilter = 'all';
+
+    function filterUniverse() {
+      _universeSearch = document.getElementById('universe-search').value.toLowerCase();
+      renderUniverse(window._lastDashboardData);
+    }
+
+    function setUniverseFilter(f) {
+      _universeFilter = f;
+      document.querySelectorAll('.universe-filter-badge').forEach(b => b.classList.remove('active'));
+      const btn = document.getElementById(`filter-${f}`);
+      if (btn) btn.classList.add('active');
+      renderUniverse(window._lastDashboardData);
+    }
 
     function toggleUniverse() {
       const el = document.getElementById('universe-full');
@@ -2059,14 +3030,14 @@
     }
 
     function isMarketOpen() {
-      // IST is UTC+5:30
       const now = new Date();
-      const utc = now.getTime() + (now.getTimezoneOffset() * 60000);
-      const ist = new Date(utc + (3600000 * 5.5));
-      const day = ist.getDay(); // 0=Sun, 6=Sat
+      // Create a Date object shifted to IST (UTC+5:30)
+      // We use UTC getters so it works regardless of the browser's local timezone
+      const ist = new Date(now.getTime() + (5.5 * 3600000));
+      const day = ist.getUTCDay(); // 0=Sun, 6=Sat
       if (day === 0 || day === 6) return false;
-      const hours = ist.getHours();
-      const minutes = ist.getMinutes();
+      const hours = ist.getUTCHours();
+      const minutes = ist.getUTCMinutes();
       const time = hours * 100 + minutes;
       return time >= 915 && time < 1530;
     }
@@ -2135,7 +3106,6 @@
     }
 
     function renderTicker(rows) {
-      // Deduplicate rows just in case
       const uniqueRows = [...new Map(rows.map(r => [r.symbol, r])).values()];
       const items = uniqueRows.filter(r => r.ltp != null);
       const html = items.map(r => {
@@ -2146,14 +3116,33 @@
           : null;
         const bucket = used == null ? 'mid' : used < 30 ? 'low' : used < 70 ? 'mid' : 'high';
         const title = used == null ? 'Day range used: —' : `Day range used: ${fmt(used, 1)}% | H: ${fmt(r.high)} L: ${fmt(r.low)}`;
-        return `<span class="ticker-item">
+        return `<span class="ticker-item" onclick="handleTickerClick('${r.symbol}')">
       <span class="ticker-sym">${r.symbol}</span>
       <span class="ticker-price ${cls}">${fmt(r.ltp)}</span>
       <span class="ticker-chg ${cls}">${sign}${fmt(r.chg_pct)}%</span>
       <span class="ticker-range-dot ${bucket}" title="${title}"></span>
     </span>`;
       }).join('');
-      document.getElementById('ticker-inner').innerHTML = html || '<span class="ticker-item">—</span>';
+      document.getElementById('ticker-inner').innerHTML = html ? html + html : '<span class="ticker-item">—</span>';
+    }
+
+    function handleTickerClick(symbol) {
+      console.log(`Updating chart and monitor for: ${symbol}`);
+      // If we had a stock-specific chart or monitor, we would update it here.
+      // For now, we update the Nifty chart label to show we're "tracking" this stock
+      // and maybe highlight it in the watchlist if it exists.
+      const label = document.getElementById('chart-label');
+      if (label) label.textContent = `Tracking ${symbol} — Fetching specific data…`;
+      
+      // Flash the watchlist row if it exists
+      const rows = document.querySelectorAll('#intra-tbody tr');
+      rows.forEach(row => {
+        if (row.cells[0].textContent === symbol) {
+          row.style.background = 'rgba(59, 130, 246, 0.2)';
+          row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          setTimeout(() => row.style.background = '', 2000);
+        }
+      });
     }
 
     function dismissDecisionCard() {

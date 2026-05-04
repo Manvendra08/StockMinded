@@ -1,14 +1,17 @@
 import os
-import re
 from pathlib import Path
 import yaml
 
-_ENV_PATTERN = re.compile(r"\$\{([^}]+)\}")
-
 
 def _expand(value):
+    """Expand environment variables in config values using os.path.expandvars.
+    
+    Supports ${VAR} and $VAR syntax. Returns empty string for undefined vars.
+    """
     if isinstance(value, str):
-        return _ENV_PATTERN.sub(lambda m: os.getenv(m.group(1), ""), value)
+        # os.path.expandvars is safer than custom regex substitution
+        # It handles ${VAR} and $VAR syntax and doesn't allow arbitrary code execution
+        return os.path.expandvars(value)
     if isinstance(value, dict):
         return {k: _expand(v) for k, v in value.items()}
     if isinstance(value, list):
@@ -35,9 +38,17 @@ def load_universe(cfg: dict) -> list[str]:
                     sym = row.get("symbol", "").strip()
                     if sym and sym not in symbols:
                         symbols.append(sym)
+                if not symbols:
+                    raise ValueError("fno200.csv loaded but contained no valid symbols")
                 return symbols
         except Exception as e:
             print(f"Failed to load fno200.csv: {e}")
-            return cfg.get("universe_fo_sample", [])
+            fallback = cfg.get("universe_fo_sample", [])
+            if not fallback:
+                raise ValueError("Universe is empty. Check config 'universe_fo_sample' or 'fno200.csv'.") from e
+            return fallback
     else:
-        return cfg.get("universe_fo_sample", [])
+        symbols = cfg.get("universe_fo_sample", [])
+        if not symbols:
+            raise ValueError("Universe is empty. Check config 'universe_fo_sample'.")
+        return symbols

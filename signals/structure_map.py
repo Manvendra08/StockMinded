@@ -30,9 +30,9 @@ MAP: dict[Regime, StructurePlan] = {
         notes="Exit at 50% max profit or 1 wing tested. No new ICs if VIX > 14.",
     ),
     Regime.RANGE_HIGH_VOL: StructurePlan(
-        primary="Iron Fly (ATM short + protective wings) or Calendar spread.",
-        secondary="Wait — sit in cash if edges unclear.",
-        notes="Avoid naked short options. Use defined risk.",
+        primary="Defined-risk Nifty income only if option chain is fresh: Iron Fly / wide Iron Condor.",
+        secondary="Wait in cash when max-pain/PCR is missing or stale.",
+        notes="No naked option selling. Reduce size in high VIX.",
     ),
     Regime.VOL_EXPANSION: StructurePlan(
         primary="Long Straddle/Strangle ONLY around scheduled event (RBI, Fed, budget, result).",

@@ -64,7 +64,9 @@ def format_dashboard(regime_snap, flow_snap, structure_plan, longs, shorts) -> s
     lines = []
     lines.append("*📊 Morning Dashboard*")
     lines.append("")
-    lines.append(f"*Regime:* `{regime_snap.regime.value}`")
+    # Safe access for regime value (handles both Enum and string)
+    regime_val = regime_snap.regime.value if hasattr(regime_snap.regime, 'value') else regime_snap.regime
+    lines.append(f"*Regime:* `{regime_val}`")
     lines.append(
         f"  trend={regime_snap.trend_score:+d}  VIX={regime_snap.vix} ({regime_snap.vix_5d_change_pct:+.1f}% 5d)  ADX={regime_snap.adx}"
     )

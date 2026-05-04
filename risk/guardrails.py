@@ -16,14 +16,22 @@ class GuardrailCheck:
 
 class Guardrails:
     def __init__(self, cfg: dict):
+        # Validate required config keys exist
+        if "risk" not in cfg:
+            raise ValueError("Missing 'risk' section in config")
+        if "account" not in cfg or "capital" not in cfg["account"]:
+            raise ValueError("Missing 'account.capital' in config")
+        
         r = cfg["risk"]
         cap = cfg["account"]["capital"]
         self.capital = float(cap)
-        self.daily_stop = self.capital * r["daily_stop_pct"]
-        self.monthly_stop = self.capital * r["monthly_stop_pct"]
-        self.concurrent_cap = self.capital * r["concurrent_open_pct"]
-        self.margin_cap_pct = r["margin_util_cap"]
-        self.corr_max = r["correlation_max"]
+        
+        # Use .get() with sensible defaults for risk parameters
+        self.daily_stop = self.capital * r.get("daily_stop_pct", 0.02)
+        self.monthly_stop = self.capital * r.get("monthly_stop_pct", 0.05)
+        self.concurrent_cap = self.capital * r.get("concurrent_open_pct", 0.25)
+        self.margin_cap_pct = r.get("margin_util_cap", 0.80)
+        self.corr_max = r.get("correlation_max", 0.75)
 
     def check_new_trade(self, *, proposed_risk: float, open_risk: float,
                         day_pnl: float, month_pnl: float,

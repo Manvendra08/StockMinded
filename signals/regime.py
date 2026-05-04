@@ -57,24 +57,37 @@ def _adx(df: pd.DataFrame, n: int = 14) -> float:
     return float(dx.ewm(alpha=1 / n, adjust=False).mean().iloc[-1])
 
 
+def _cmp(a: float, b: float, neutral_band: float = 0.0015) -> int:
+    if not b:
+        return 0
+    diff = (a - b) / abs(b)
+    if diff > neutral_band:
+        return 1
+    if diff < -neutral_band:
+        return -1
+    return 0
+
+
 def _trend_score(close: pd.Series) -> int:
-    e20 = _ema(close, 20).iloc[-1]
-    e50 = _ema(close, 50).iloc[-1]
-    e200 = _ema(close, 200).iloc[-1]
-    px = close.iloc[-1]
+    ema20 = _ema(close, 20)
+    ema50 = _ema(close, 50)
+    ema200 = _ema(close, 200)
+    e20 = float(ema20.iloc[-1])
+    e50 = float(ema50.iloc[-1])
+    e200 = float(ema200.iloc[-1])
+    px = float(close.iloc[-1])
     score = 0
-    # Price vs EMAs
-    score += 1 if px > e20 else -1
-    score += 1 if px > e50 else -1
-    score += 1 if px > e200 else -1
-    # EMA alignment
-    score += 1 if e20 > e50 else -1
-    score += 1 if e50 > e200 else -1
-    # EMA slopes (using last 5 days)
-    e20_slope = 1 if len(close) > 5 and _ema(close, 20).iloc[-1] > _ema(close, 20).iloc[-5] else -1
-    e50_slope = 1 if len(close) > 5 and _ema(close, 50).iloc[-1] > _ema(close, 50).iloc[-5] else -1
-    score += e20_slope
-    score += e50_slope
+    score += _cmp(px, e20)
+    score += _cmp(px, e50)
+    score += _cmp(px, e200)
+    score += _cmp(e20, e50)
+    score += _cmp(e50, e200)
+    if len(close) > 20:
+        score += _cmp(e20, float(ema20.iloc[-5]))
+        score += _cmp(e50, float(ema50.iloc[-5]))
+        score += _cmp(px, float(close.iloc[-6]), neutral_band=0.003)
+        score += _cmp(px, float(close.iloc[-21]), neutral_band=0.006)
+        score += _cmp(float(close.iloc[-6]), float(close.iloc[-21]), neutral_band=0.003)
     return int(score)
 
 
@@ -117,7 +130,9 @@ def classify(index_symbol: str = "NIFTY", stock_universe_data: dict | None = Non
     vix_chg = 100 * (vix_now - vix_5d_ago) / vix_5d_ago if vix_5d_ago else 0.0
     breadth = breadth_pct_above_50dma(stock_universe_data or {})
 
-    # Rule stack
+    breadth_val = 50.0 if breadth is None else float(breadth)
+
+    # Rule stack. Breadth confirms direction; mixed breadth blocks clean trend calls.
     notes = []
     if vix_chg > 25 and vix_now > 16:
         regime = Regime.VOL_EXPANSION
@@ -125,13 +140,19 @@ def classify(index_symbol: str = "NIFTY", stock_universe_data: dict | None = Non
     elif vix_chg < -20 and vix_now < 14:
         regime = Regime.VOL_CONTRACTION
         notes.append(f"VIX {vix_chg:.1f}% in 5d at {vix_now:.1f}")
-    elif adx >= 25 and trend >= 2:
+    elif trend <= -3 and breadth_val >= 60:
+        regime = Regime.RANGE_HIGH_VOL if vix_now >= 16 else Regime.RANGE_LOW_VOL
+        notes.append("mixed tape: index weak, breadth strong")
+    elif trend >= 3 and breadth_val <= 40:
+        regime = Regime.RANGE_HIGH_VOL if vix_now >= 16 else Regime.RANGE_LOW_VOL
+        notes.append("mixed tape: index firm, breadth weak")
+    elif adx >= 22 and trend >= 4 and breadth_val >= 50:
         regime = Regime.TREND_UP
-    elif adx >= 25 and trend <= -2:
+    elif adx >= 22 and trend <= -4 and breadth_val <= 50:
         regime = Regime.TREND_DOWN
-    elif adx < 20 and vix_now < 14:
+    elif adx < 22 and vix_now < 14:
         regime = Regime.RANGE_LOW_VOL
-    elif adx < 20 and vix_now >= 16:
+    elif adx < 22 and vix_now >= 16:
         regime = Regime.RANGE_HIGH_VOL
     else:
         regime = Regime.RANGE_LOW_VOL if vix_now < 15 else Regime.RANGE_HIGH_VOL

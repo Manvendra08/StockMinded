@@ -11,7 +11,7 @@ import sys
 import traceback
 from datetime import datetime
 
-from config.loader import load_config
+from config.loader import load_config, load_universe
 from data import feed
 from signals import regime as regime_mod
 from signals import flows as flows_mod
@@ -25,7 +25,7 @@ def run_dashboard(cfg: dict) -> None:
     alerter = Alerter(cfg["alerts"].get("telegram_bot_token"), cfg["alerts"].get("telegram_chat_id"))
     journal = Journal(cfg["paths"]["journal_db"])
 
-    universe = cfg["universe_fo_sample"]
+    universe = load_universe(cfg)
     sectors = cfg["sectors"]
 
     try:
@@ -67,11 +67,11 @@ def run_health(cfg: dict) -> None:
         checks.append(f"❌ VIX: {e}")
 
     try:
-        oc = feed.option_chain("NIFTY")
-        n = len(oc.get("records", {}).get("data", []))
-        checks.append(f"✅ Option chain NIFTY: {n} strikes")
+        # Use the cached version which now raises RuntimeError on total failure
+        pcr_oi, pcr_vol, mp, stale, _, updated_at, _ = feed.get_pcr_max_pain_cached("NIFTY")
+        checks.append(f"✅ PCR (OI): {pcr_oi} (Updated: {updated_at})")
     except Exception as e:
-        checks.append(f"❌ Option chain: {e}")
+        checks.append(f"❌ Option chain/PCR feed: {e}")
 
     try:
         df = feed.fii_dii_cash(days=3)
@@ -83,6 +83,8 @@ def run_health(cfg: dict) -> None:
 
 
 def run_schedule(cfg: dict) -> None:
+    import signal
+    import sys
     from apscheduler.schedulers.blocking import BlockingScheduler
     from apscheduler.triggers.cron import CronTrigger
     from pytz import timezone
@@ -104,7 +106,20 @@ def run_schedule(cfg: dict) -> None:
     hh, mm = map(int, s["morning_dashboard"].split(":"))
     sched.add_job(_h("dashboard", run_dashboard), CronTrigger(hour=hh, minute=mm, day_of_week="mon-fri"))
     print(f"Scheduler started (IST). Morning dashboard @ {s['morning_dashboard']}.  Ctrl-C to stop.")
-    sched.start()
+    
+    # Add graceful shutdown handler
+    def _shutdown_handler(signum, frame):
+        print("\nShutting down scheduler gracefully...")
+        sched.shutdown(wait=False)
+        sys.exit(0)
+    
+    signal.signal(signal.SIGINT, _shutdown_handler)
+    signal.signal(signal.SIGTERM, _shutdown_handler)
+    
+    try:
+        sched.start()
+    except (KeyboardInterrupt, SystemExit):
+        print("\nScheduler stopped.")
 
 
 def main() -> int:
@@ -126,4 +141,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    import io
+    if sys.stdout.encoding != 'utf-8':
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
     sys.exit(main())

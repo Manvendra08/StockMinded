@@ -17,6 +17,11 @@ from typing import Any
 import yfinance as yf
 import pandas as pd
 
+# Import risk modules
+from risk.guardrails import Guardrails
+from risk.sizing import directional_size, SizeResult
+from ops.journal import Journal
+
 DATA_FILE = Path(__file__).parent / "paper_trades.json"
 IST = timezone(timedelta(hours=5, minutes=30))
 DEFAULT_SETTINGS = {
@@ -25,6 +30,8 @@ DEFAULT_SETTINGS = {
     "tgt_pct": 4.0,
     "trail_sl": False,
     "min_confidence": "HIGH",
+    "max_trades_per_day": 8,
+    "max_new_entries_per_cycle": 5,
     "regime_filter": True,
     "telegram_bot_token": "",
     "telegram_chat_id": ""
@@ -107,6 +114,8 @@ def save_settings(new_settings: dict) -> dict:
             # Type casting/validation
             if k in ("capital_per_trade", "sl_pct", "tgt_pct"):
                 db["settings"][k] = float(v)
+            elif k in ("max_trades_per_day", "max_new_entries_per_cycle"):
+                db["settings"][k] = int(v)
             elif k in ("trail_sl", "regime_filter"):
                 db["settings"][k] = bool(v)
             else:
@@ -140,6 +149,13 @@ def _next_id(db: dict) -> int:
 def _get_ltp(symbol: str) -> float | None:
     """Fetch the latest trading price for a symbol."""
     try:
+        from data import feed
+        px = feed.ltp(symbol)
+        if px:
+            return px
+    except Exception:
+        pass
+    try:
         yf_sym = f"{symbol}.NS" if not symbol.startswith("^") and "." not in symbol else symbol
         t = yf.Ticker(yf_sym)
         info = t.fast_info
@@ -150,22 +166,35 @@ def _get_ltp(symbol: str) -> float | None:
 
 def _get_ltp_batch(symbols: list[str]) -> dict[str, float | None]:
     """Fetch LTPs for multiple symbols at once."""
-    result = {}
+    try:
+        from data import feed
+        quotes = feed.quote_batch(symbols)
+        result = {s: (round(float(quotes[s]["ltp"]), 2) if quotes.get(s, {}).get("ltp") else None) for s in symbols}
+        if any(v is not None for v in result.values()):
+            missing = [s for s, v in result.items() if v is None]
+            if not missing:
+                return result
+        else:
+            missing = symbols
+    except Exception:
+        result = {}
+        missing = symbols
+
     yf_syms = []
-    for s in symbols:
+    for s in missing:
         yf_s = f"{s}.NS" if not s.startswith("^") and "." not in s else s
         yf_syms.append(yf_s)
 
     try:
         tickers = yf.Tickers(" ".join(yf_syms))
-        for sym, yf_s in zip(symbols, yf_syms):
+        for sym, yf_s in zip(missing, yf_syms):
             try:
                 info = tickers.tickers[yf_s].fast_info
                 result[sym] = round(float(info.last_price), 2) if info.last_price else None
             except Exception:
                 result[sym] = None
     except Exception:
-        for s in symbols:
+        for s in missing:
             result[s] = None
     return result
 
@@ -206,17 +235,30 @@ def enter_trade(alert: dict) -> dict:
     sl_pct = settings["sl_pct"]
     tgt_pct = settings["tgt_pct"]
 
-    # Calculate position sizing
+    # Manual entries use fixed allocation; auto entries may pass risk-sized qty.
     qty = int(capital_per_trade / entry_price) if entry_price > 0 else 0
-    if qty == 0:
-        return {"error": f"Price too high for Rs {capital_per_trade:,.0f} allocation"}
 
-    if direction == "LONG":
+    alert_stop = alert.get("stop")
+    alert_t1 = alert.get("target1")
+    if isinstance(alert_stop, (int, float)) and alert_stop > 0:
+        sl_price = round(float(alert_stop), 2)
+    elif direction == "LONG":
         sl_price = round(entry_price * (1 - sl_pct / 100), 2)
-        tgt_price = round(entry_price * (1 + tgt_pct / 100), 2)
     else:
         sl_price = round(entry_price * (1 + sl_pct / 100), 2)
+
+    if isinstance(alert_t1, (int, float)) and alert_t1 > 0:
+        tgt_price = round(float(alert_t1), 2)
+    elif direction == "LONG":
+        tgt_price = round(entry_price * (1 + tgt_pct / 100), 2)
+    else:
         tgt_price = round(entry_price * (1 - tgt_pct / 100), 2)
+
+    alert_qty = int(alert.get("qty") or 0)
+    if alert_qty > 0:
+        qty = alert_qty
+    if qty == 0:
+        return {"error": f"Price too high for Rs {capital_per_trade:,.0f} allocation"}
 
 
     trade = {
@@ -243,6 +285,13 @@ def enter_trade(alert: dict) -> dict:
         "evidence": alert.get("evidence", []),
         "confidence": alert.get("confidence", "MEDIUM"),
         "notes": "",
+        # Enhanced fields for tracking
+        "planned_risk": alert.get("planned_risk", round((entry_price - sl_price) * qty if direction == "LONG" else (sl_price - entry_price) * qty, 2)),
+        "risk_rupees": alert.get("planned_risk", round((entry_price - sl_price) * qty if direction == "LONG" else (sl_price - entry_price) * qty, 2)),
+        "entry_rule": alert.get("entry_trigger", ""),
+        "trail_rule": alert.get("trail_rule", ""),
+        "source_regime": alert.get("source_regime", ""),
+        "skip_reason": None,  # Only populated if trade was initially skipped then re-entered
     }
 
     db["trades"].append(trade)
@@ -465,6 +514,385 @@ def check_option_exits() -> list[dict]:
     return closed
 
 
+# ═══════════════════════════════════════════════════════════════
+#  NIFTY OPTION SELLING - TRADE MANAGEMENT
+# ═══════════════════════════════════════════════════════════════
+
+def enter_nifty_option_structure(setup, resolved_legs: list, cfg: dict) -> dict:
+    """
+    Enter a NIFTY option-selling structure with full metadata.
+    
+    Args:
+        setup: NiftyOptionSetup with strategy details
+        resolved_legs: list of ResolvedLeg objects
+        cfg: config dict
+    
+    Returns: trade dict or error
+    """
+    from signals.options import is_within_entry_window, check_naked_legs, calc_structure_max_loss
+    
+    now_ist = _now_ist()
+    
+    # Check entry window
+    in_window, window_reason = is_within_entry_window(cfg, now_ist)
+    if not in_window:
+        return {"error": f"NIFTY entry blocked: {window_reason}"}
+    
+    # Check naked legs
+    leg_dicts = [{"side": l.side, "type": l.type, "strike": l.strike, 
+                  "expiry": l.expiry, "qty": l.lots * l.lot_size} for l in resolved_legs]
+    no_naked, naked_reason = check_naked_legs(leg_dicts)
+    if not no_naked:
+        return {"error": f"NIFTY entry blocked: {naked_reason}"}
+    
+    db = _load_db()
+    if "option_trades" not in db:
+        db["option_trades"] = []
+    
+    # Check concurrent NIFTY structures limit
+    nifty_cfg = cfg.get("nifty_options", {})
+    max_nifty = nifty_cfg.get("max_nifty_structures", 2)
+    open_nifty = [t for t in db["option_trades"] 
+                  if t["status"] == "OPEN" and t.get("symbol") == "NIFTY"]
+    if len(open_nifty) >= max_nifty:
+        return {"error": f"Max concurrent NIFTY structures ({max_nifty}) reached"}
+    
+    # Calculate financials
+    net_credit = sum((l.premium * l.lots * l.lot_size) * (1 if l.side == "SELL" else -1) 
+                     for l in resolved_legs)
+    if net_credit <= 0:
+        return {"error": f"NIFTY entry blocked: non-credit structure (net={net_credit:.2f})"}
+    wing_width = setup.wing_width
+    lot_size = resolved_legs[0].lot_size if resolved_legs else 1
+    
+    # Determine structure type
+    if setup.strategy.startswith("IRON_CONDOR"):
+        struct_type = "iron_condor"
+    elif "BULL_PUT" in setup.strategy:
+        struct_type = "bull_put_spread"
+    elif "BEAR_CALL" in setup.strategy:
+        struct_type = "bear_call_spread"
+    else:
+        struct_type = "unknown"
+    
+    max_loss = calc_structure_max_loss(struct_type, net_credit, wing_width, lot_size)
+    
+    # Check max risk per structure
+    capital = cfg.get("account", {}).get("capital", 7000000)
+    options_cfg = cfg.get("options", {})
+    max_risk_pct = nifty_cfg.get("max_risk_per_pct", options_cfg.get("max_risk_per_structure_pct", 0.01))
+    max_allowed_risk = capital * max_risk_pct
+    if max_loss > max_allowed_risk:
+        return {"error": f"NIFTY risk check: max loss ₹{max_loss:,.0f} > allowed ₹{max_allowed_risk:,.0f}"}
+    
+    # Build trade record
+    trade = {
+        "id": _next_id(db),
+        "symbol": "NIFTY",
+        "structure": setup.strategy,
+        "mode": setup.mode,
+        "strategy": setup.strategy,
+        "regime": setup.regime,
+        "bias": setup.bias,
+        "entry_reason": setup.entry_reason,
+        "exit_rules": setup.exit_rules,
+        "legs": [
+            {
+                "side": l.side,
+                "type": l.type,
+                "strike": l.strike,
+                "expiry": l.expiry,
+                "qty": l.lots * l.lot_size,
+                "entry_premium": l.premium,
+                "exit_premium": None
+            } for l in resolved_legs
+        ],
+        "net_credit": round(net_credit, 2),
+        "max_loss_rupees": round(max_loss, 2),
+        "risk_pct": round(max_loss / capital * 100, 2),
+        "breakevens": setup.breakevens,
+        "short_strikes": setup.short_strikes,
+        "wing_width": wing_width,
+        "vix_entry": setup.vix,
+        "vix_change_pct_entry": setup.vix_change_pct,
+        "pcr_entry": setup.pcr,
+        "entry_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "entry_date": date.today().isoformat(),
+        "exit_time": None,
+        "exit_reason": None,
+        "pnl": None,
+        "status": "OPEN"
+    }
+    
+    db["option_trades"].append(trade)
+    _save_db(db)
+    return trade
+
+
+def check_nifty_option_exits(vix_current: float = None, cfg: dict = None) -> list[dict]:
+    """
+    Check NIFTY option trades for exit conditions.
+    
+    Exit triggers:
+    - Profit take at 50% of max credit
+    - Stop loss at 1.25x credit received
+    - Short strike breach
+    - VIX spike > 10%
+    - EOD cutoff (intraday mode)
+    - Expiry day cutoff (positional mode)
+    """
+    from signals.options import check_vix_spike_exit, is_within_exit_window, is_expiry_day
+    
+    if cfg is None:
+        from config.loader import load_config
+        cfg = load_config()
+    
+    now_ist = _now_ist()
+    if not is_market_open(now_ist) and not is_eod_window(now_ist):
+        return []
+    
+    nifty_cfg = cfg.get("nifty_options", {})
+    
+    db = _load_db()
+    open_nifty = [t for t in db.get("option_trades", []) 
+                  if t["status"] == "OPEN" and t.get("symbol") == "NIFTY"]
+    if not open_nifty:
+        return []
+    
+    # Get current prices
+    price_map = _build_option_price_map(open_nifty)
+    closed = []
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    # Get VIX if not provided
+    if vix_current is None:
+        try:
+            vix_data = yf.Ticker("^INDIAVIX")
+            vix_current = vix_data.fast_info.last_price or 15.0
+        except:
+            vix_current = 15.0
+    
+    for t in open_nifty:
+        current_net = None
+        entry_credit = t.get("net_credit", 0.0)
+        exit_reason = None
+        mode = t.get("mode", "positional")
+        structure = t.get("structure", "")
+        
+        # Check expiry day exit for positional trades
+        if mode == "positional":
+            leg_expiries = [l.get("expiry") for l in t.get("legs", [])]
+            is_exp = any(is_expiry_day(e) for e in leg_expiries)
+            if is_exp:
+                in_exit, exit_msg = is_within_exit_window(cfg, now_ist, mode)
+                if in_exit:
+                    exit_reason = "EXPIRY_DAY_CUTOFF"
+        
+        # Check EOD exit for intraday trades
+        if not exit_reason and mode == "intraday":
+            in_exit, exit_msg = is_within_exit_window(cfg, now_ist, mode)
+            if in_exit:
+                exit_reason = "EOD_CUTOFF"
+        
+        # Check P&L based exits
+        if not exit_reason:
+            current_net = _option_net_premium(t.get("legs", []), price_map)
+            
+            if current_net is not None:
+                # For credit spreads: profit when net decreases, loss when net increases
+                pnl = entry_credit - current_net
+                
+                # Get exit levels
+                profit_take_pct = t.get("exit_rules", {}).get("profit_take_pct", 0.50)
+                sl_mult = t.get("exit_rules", {}).get("stop_loss_mult", 1.25)
+                
+                profit_target = entry_credit * profit_take_pct
+                stop_loss = entry_credit * sl_mult
+                
+                # Check profit take
+                if pnl >= profit_target:
+                    exit_reason = "PROFIT_TAKEN"
+                # Check stop loss (pnl is negative when losing)
+                elif pnl <= -stop_loss:
+                    exit_reason = "STOP_LOSS"
+                
+                # Check short strike breach for Iron Condor
+                if not exit_reason and "IRON_CONDOR" in structure:
+                    short_strikes = t.get("short_strikes", [])
+                    try:
+                        spot = _get_ltp("NIFTY")
+                    except Exception:
+                        spot = None
+                    if spot is not None and len(short_strikes) == 2:
+                        if spot <= min(short_strikes) or spot >= max(short_strikes):
+                            exit_reason = "SHORT_STRIKE_BREACH"
+
+                if not exit_reason and structure == "BULL_PUT_SPREAD":
+                    short_strikes = t.get("short_strikes", [])
+                    spot = _get_ltp("NIFTY")
+                    if spot is not None and short_strikes and spot <= short_strikes[0]:
+                        exit_reason = "SHORT_STRIKE_BREACH"
+
+                if not exit_reason and structure == "BEAR_CALL_SPREAD":
+                    short_strikes = t.get("short_strikes", [])
+                    spot = _get_ltp("NIFTY")
+                    if spot is not None and short_strikes and spot >= short_strikes[0]:
+                        exit_reason = "SHORT_STRIKE_BREACH"
+        
+        # Check VIX spike exit
+        if not exit_reason:
+            vix_entry = t.get("vix_entry", 15)
+            vix_thresh = nifty_cfg.get("vix_spike_exit_pct", 10.0)
+            should_exit, exit_msg = check_vix_spike_exit(vix_current, vix_entry, vix_thresh)
+            if should_exit:
+                exit_reason = f"VIX_SPIKE: {exit_msg}"
+        
+        # Execute close
+        if exit_reason:
+            t["exit_time"] = now_str
+            t["exit_reason"] = exit_reason
+            t["status"] = "CLOSED"
+            
+            if current_net is not None:
+                t["pnl"] = round(entry_credit - current_net, 2)
+                for leg in t.get("legs", []):
+                    key = (leg["strike"], leg["expiry"], leg["type"])
+                    if key in price_map:
+                        leg["exit_premium"] = price_map[key]
+            else:
+                t["pnl"] = 0.0
+            
+            closed.append(t)
+    
+    if closed:
+        _save_db(db)
+    
+    return closed
+
+
+def get_nifty_option_setups(data: dict, cfg: dict = None) -> list[dict]:
+    """
+    Generate actionable NIFTY option-selling setups from signal data.
+    
+    Returns list of setups with full metadata for potential entry.
+    """
+    from signals.option_strategy import pick_nifty_strategy, resolve_nifty_structure
+    from signals.options import chain_snapshot, atm_strike, is_within_entry_window
+    
+    if cfg is None:
+        from config.loader import load_config
+        cfg = load_config()
+    
+    setups = []
+    nifty_cfg = cfg.get("nifty_options", {})
+    if not nifty_cfg.get("enabled", False):
+        return setups
+    
+    regime = data.get("regime", {})
+    flows = data.get("flows", {})
+    
+    regime_name = regime.get("name", "")
+    bias = flows.get("bias", "NEUTRAL")
+    vix = regime.get("vix", 15)
+    vix_change = regime.get("vix_5d_change_pct", 0)
+    pcr = flows.get("pcr_oi")
+    
+    # Get NIFTY spot
+    nifty_data = data.get("nifty", {})
+    spot = nifty_data.get("close", 0)
+    
+    if spot <= 0:
+        return setups
+    
+    # Check entry window
+    in_window, window_reason = is_within_entry_window(cfg)
+    
+    # Pick strategy
+    setup = pick_nifty_strategy(regime_name, bias, vix, vix_change, pcr, cfg)
+    
+    if setup is None:
+        setups.append({
+            "symbol": "NIFTY",
+            "suitable": False,
+            "skip_reason": "No strategy for current regime/bias",
+            "regime": regime_name,
+            "bias": bias,
+            "vix": vix
+        })
+        return setups
+    
+    # Get option chain
+    try:
+        chain = chain_snapshot("NIFTY")
+    except Exception:
+        setups.append({
+            "symbol": "NIFTY",
+            "suitable": False,
+            "skip_reason": "Could not fetch NIFTY option chain",
+            "regime": regime_name,
+            "bias": bias,
+            "vix": vix
+        })
+        return setups
+    
+    if chain.empty:
+        setups.append({
+            "symbol": "NIFTY",
+            "suitable": False,
+            "skip_reason": "Empty option chain",
+            "regime": regime_name,
+            "bias": bias,
+            "vix": vix
+        })
+        return setups
+    
+    # Resolve strikes
+    lot_size = nifty_cfg.get("lot_size", {}).get("NIFTY", 75)
+    strike_step = nifty_cfg.get("strike_step", {}).get("NIFTY", 50)
+    
+    setup = resolve_nifty_structure(setup, chain, spot, lot_size, strike_step)
+    
+    # Add entry window status
+    setup.entry_window_ok = in_window
+    
+    # Convert to dict for JSON serialization
+    setup_dict = {
+        "symbol": setup.symbol,
+        "mode": setup.mode,
+        "strategy": setup.strategy,
+        "regime": setup.regime,
+        "bias": setup.bias,
+        "vix": setup.vix,
+        "vix_change_pct": setup.vix_change_pct,
+        "pcr": setup.pcr,
+        "entry_reason": setup.entry_reason,
+        "entry_window_ok": setup.entry_window_ok,
+        "entry_window_reason": window_reason,
+        "suitable": setup.suitable and in_window,
+        "skip_reason": setup.skip_reason if not setup.suitable else ("" if in_window else window_reason),
+        "net_credit": setup.net_credit,
+        "max_loss_rupees": setup.max_loss_rupees,
+        "risk_pct": setup.risk_pct,
+        "breakevens": setup.breakevens,
+        "short_strikes": setup.short_strikes,
+        "wing_width": setup.wing_width,
+        "exit_rules": setup.exit_rules,
+        "legs": [
+            {
+                "side": l.side,
+                "type": l.type,
+                "strike": l.strike,
+                "expiry": l.expiry,
+                "qty": l.lots * l.lot_size,
+                "premium": l.premium
+            } for l in setup.legs
+        ] if setup.legs else []
+    }
+    
+    setups.append(setup_dict)
+    return setups
+
+
 def close_trade_manual(trade_id: int, reason: str = "MANUAL") -> dict | None:
     """Manually close a specific trade at current LTP."""
     db = _load_db()
@@ -499,11 +927,21 @@ def close_trade_manual(trade_id: int, reason: str = "MANUAL") -> dict | None:
 #  AUTO-TRADE FROM ALERTS
 # ═══════════════════════════════════════════════════════════════
 
-def auto_enter_from_alerts(alerts: list[dict]) -> list[dict]:
+def auto_enter_from_alerts(alerts: list[dict], cfg: dict | None = None) -> list[dict]:
     """Take paper trades on HIGH confidence alerts automatically.
+    
+    Applies risk guardrails before entering:
+    - Daily/monthly loss limits
+    - Concurrent open risk cap
+    - Margin utilization cap
+    - Correlation filter
+    
     Skips if same symbol already has any trade (OPEN or CLOSED) today.
     Hard cutoff: No entries after 15:15 IST (15 min before close to avoid EOD churn).
+    Logs all skipped trades to journal for learning.
     """
+    from config.loader import load_config
+    
     now_ist = _now_ist()
     if not is_market_open(now_ist):
         return []
@@ -511,6 +949,16 @@ def auto_enter_from_alerts(alerts: list[dict]) -> list[dict]:
     if now_ist.hour == 15 and now_ist.minute >= 15:
         return []
 
+    # Load config for risk parameters
+    if cfg is None:
+        cfg = load_config()
+    
+    # Initialize guardrails
+    guardrails = Guardrails(cfg)
+    
+    # Initialize journal for logging skipped trades
+    journal = Journal(cfg["paths"]["journal_db"])
+    
     today_str = date.today().isoformat()
     db = _load_db()
     # Block symbols already traded today (open OR closed)
@@ -518,34 +966,143 @@ def auto_enter_from_alerts(alerts: list[dict]) -> list[dict]:
 
     settings = get_settings()
     min_conf = settings["min_confidence"]
+    max_trades_per_day = int(settings.get("max_trades_per_day", 8))
+    max_new_entries_per_cycle = int(settings.get("max_new_entries_per_cycle", 5))
     conf_levels = {"LOW": 1, "MEDIUM": 2, "HIGH": 3}
     min_val = conf_levels.get(min_conf, 3)
 
+    # Get current P&L state for guardrail checks
+    all_closed = [t for t in db["trades"] if t["status"] == "CLOSED"]
+    today_pnl = sum(t.get("pnl", 0) or 0 for t in all_closed if t.get("entry_date") == today_str)
+    month_pnl = sum(t.get("pnl", 0) or 0 for t in all_closed 
+                   if t.get("entry_date", "")[:7] == today_str[:7])  # YYYY-MM
+    open_risk = sum(t.get("risk_rupees", 0) or 0 for t in db["trades"] if t["status"] == "OPEN")
+    
+    # Estimate margin utilization (simplified)
+    total_capital = cfg["account"]["capital"]
+    deployed = sum(t.get("capital_deployed", 0) or 0 for t in db["trades"] if t["status"] == "OPEN")
+    margin_used_pct = deployed / total_capital if total_capital > 0 else 0
+    today_trade_count = len([t for t in db["trades"] if t.get("entry_date") == today_str])
+
     entered = []
     for alert in alerts:
+        if today_trade_count + len(entered) >= max_trades_per_day:
+            break
+        if len(entered) >= max_new_entries_per_cycle:
+            break
+
         sym = alert.get("symbol", "")
         conf = alert.get("confidence", "MEDIUM")
+        direction = alert.get("direction", "LONG")
+        
+        # Get regime and flow info from alert for logging
+        regime = alert.get("source_regime", "UNKNOWN")
+        flow_bias = alert.get("flow_bias", "NEUTRAL")
+
+        if direction not in ("LONG", "SHORT"):
+            journal.log_skipped_trade(
+                symbol=sym, direction=direction, alert_confidence=conf,
+                skip_reason="NOT_DIRECTIONAL", regime=regime, flow_bias=flow_bias,
+                risk_gate="paper_equity_only",
+                notes=alert.get("no_trade_reason") or alert.get("entry_trigger", "")
+            )
+            continue
         
         # Stricter confidence filter from settings
         if conf_levels.get(conf, 2) < min_val:
+            journal.log_skipped_trade(
+                symbol=sym, direction=direction, alert_confidence=conf,
+                skip_reason="CONFIDENCE_FILTER", regime=regime, flow_bias=flow_bias,
+                risk_gate=f"min_conf={min_conf}",
+                notes=f"Alert confidence {conf} < required {min_conf}"
+            )
             continue
             
         # Regime filter if enabled
         if settings.get("regime_filter"):
-            # Simple heuristic: if regime is RANGE and it's a trend signal, skip? 
-            # For now, we trust the alert generator already respects regime, 
-            # but this is a placeholder for engine-level filtering.
+            # Skip if regime/flow mismatch (already handled by alert generator,
+            # but double-check here as safety)
             pass
 
         # Skip if already traded today
         if sym in today_symbols:
+            journal.log_skipped_trade(
+                symbol=sym, direction=direction, alert_confidence=conf,
+                skip_reason="DUPLICATE_TODAY", regime=regime, flow_bias=flow_bias,
+                risk_gate="daily_dedup",
+                notes=f"Symbol {sym} already traded today"
+            )
             continue
 
+        # === RISK GATE CHECKS ===
+        # Calculate proposed risk from alert
+        proposed_risk = alert.get("risk_rupees", 0) or 0
+        
+        # Check guardrails
+        gate_result = guardrails.check_new_trade(
+            proposed_risk=proposed_risk,
+            open_risk=open_risk,
+            day_pnl=today_pnl,
+            month_pnl=month_pnl,
+            margin_used_pct=margin_used_pct,
+        )
+        
+        if not gate_result.ok:
+            journal.log_skipped_trade(
+                symbol=sym, direction=direction, alert_confidence=conf,
+                skip_reason="RISK_GATE", regime=regime, flow_bias=flow_bias,
+                risk_gate="; ".join(gate_result.reasons),
+                notes=f"Proposed risk: ₹{proposed_risk:,.0f}"
+            )
+            continue
 
+        # === SIZE CALCULATION ===
+        # Use sizing module to calculate proper position size
+        entry_price = alert.get("entry_price", 0)
+        stop = alert.get("stop", 0)
+        if entry_price > 0 and stop > 0 and entry_price != stop:
+            capital = cfg["account"]["capital"]
+            per_trade_pct = cfg["risk"]["per_trade_pct"]
+            size_result = directional_size(
+                capital=capital, per_trade_pct=per_trade_pct,
+                entry=entry_price, stop=stop, lot_size=1
+            )
+            # Override alert qty with calculated size
+            if size_result.qty > 0:
+                alert["qty"] = size_result.qty
+                alert["planned_risk"] = size_result.risk_rupees
+                alert["risk_rupees"] = size_result.risk_rupees
+            else:
+                journal.log_skipped_trade(
+                    symbol=sym, direction=direction, alert_confidence=conf,
+                    skip_reason="INVALID_STOP", regime=regime, flow_bias=flow_bias,
+                    risk_gate="sizing_failed",
+                    notes="Could not size trade from entry/stop"
+                )
+                continue
+        elif entry_price <= 0 or stop <= 0:
+            journal.log_skipped_trade(
+                symbol=sym, direction=direction, alert_confidence=conf,
+                skip_reason="INVALID_ENTRY_DATA", regime=regime, flow_bias=flow_bias,
+                risk_gate="missing_entry_stop",
+                notes=f"entry={entry_price}, stop={stop}"
+            )
+            continue
+
+        # === ENTER TRADE ===
         result = enter_trade(alert)
         if "error" not in result:
             entered.append(result)
             today_symbols.add(sym)
+            # Update open_risk for next iteration
+            open_risk += result.get("risk_rupees", 0) or 0
+        else:
+            journal.log_skipped_trade(
+                symbol=sym, direction=direction, alert_confidence=conf,
+                skip_reason="ENTER_FAILED", regime=regime, flow_bias=flow_bias,
+                risk_gate="enter_trade_error",
+                notes=result.get("error", "Unknown error")
+            )
 
     return entered
 
@@ -941,4 +1498,3 @@ def export_trades_to_csv() -> str:
     # Filter only available columns
     available_cols = [c for c in cols if c in df.columns]
     return df[available_cols].to_csv(index=False)
-

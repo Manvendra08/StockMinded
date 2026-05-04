@@ -14,3 +14,10 @@ dashboard/paper_trades.json
 .roo/
 .cursor/
 .planning/
+data/*.sqlite
+*.jpg
+*.bak
+.minimax/
+scratch/
+r360.html
+r360_oc_response.json

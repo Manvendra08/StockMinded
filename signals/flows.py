@@ -23,6 +23,7 @@ class FlowSnapshot:
     pcr_updated_at: float | None = None
     mp_updated_at: float | None = None
     notes: str = ""
+    option_source: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -38,6 +39,7 @@ class FlowSnapshot:
             "pcr_updated_at": self.pcr_updated_at,
             "mp_updated_at": self.mp_updated_at,
             "notes": self.notes,
+            "option_source": self.option_source,
         }
 
 
@@ -147,7 +149,17 @@ def snapshot(sector_data: dict[str, pd.DataFrame], index_symbol: str = "NIFTY") 
     rs = sector_relative_strength(sector_data, lookback=5)
     top_in = rs[:3]
     top_out = rs[-3:][::-1] if len(rs) >= 3 else []
-    pcr_oi, pcr_vol, mp, pcr_stale, mp_stale, pcr_updated_at, mp_updated_at = feed.get_pcr_max_pain_cached(index_symbol)
+    notes = ""
+    try:
+        pcr_oi, pcr_vol, mp, pcr_stale, mp_stale, pcr_updated_at, mp_updated_at = feed.get_pcr_max_pain_cached(index_symbol)
+        if pcr_oi is None and mp is None and (pcr_stale or mp_stale):
+            notes = "Option chain unavailable; PCR/max-pain unavailable"
+    except Exception as e:
+        pcr_oi, pcr_vol, mp = None, None, None
+        pcr_stale, mp_stale = True, True
+        pcr_updated_at, mp_updated_at = None, None
+        notes = f"Option chain unavailable: {e}"
+
     return FlowSnapshot(
         fii_dii_5d_net_cr=fii_dii,
         top_inflow_sectors=top_in,
@@ -160,4 +172,6 @@ def snapshot(sector_data: dict[str, pd.DataFrame], index_symbol: str = "NIFTY") 
         mp_stale=mp_stale,
         pcr_updated_at=pcr_updated_at,
         mp_updated_at=mp_updated_at,
+        notes=notes,
+        option_source=feed.option_chain_source(index_symbol),
     )

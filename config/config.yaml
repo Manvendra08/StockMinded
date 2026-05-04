@@ -62,10 +62,13 @@ schedule_ist:
   eod_review: "15:20"
 
 broker:
-  provider: kite          # kite | dhan | fyers
+  provider: dhan          # kite | dhan | fyers
   api_key: "${BROKER_API_KEY}"
   api_secret: "${BROKER_API_SECRET}"
   access_token: "${BROKER_ACCESS_TOKEN}"
+  dhan:
+    client_id: "${DHAN_CLIENT_ID}"
+    access_token: "${DHAN_ACCESS_TOKEN}"
 
 alerts:
   telegram_bot_token: "${TELEGRAM_BOT_TOKEN}"
@@ -74,6 +77,19 @@ alerts:
 paths:
   journal_db: "./data/journal.sqlite"
   cache_dir: "./data/cache"
+
+data_sources:
+  dhan:
+    enabled: true
+    primary: true
+    instrument_master_url: "https://images.dhan.co/api-data/api-scrip-master.csv"
+    underlyings:
+      NIFTY: {security_id: 13, segment: IDX_I}
+      BANKNIFTY: {security_id: 25, segment: IDX_I}
+      FINNIFTY: {security_id: 27, segment: IDX_I}
+
+  local_files:
+    option_chain: "./data/manual/option_chain_NIFTY.csv"
 
 options:
   enabled: true
@@ -90,3 +106,30 @@ options:
     - BEAR_PUT_SPREAD
     - LONG_STRADDLE
     - SHORT_STRANGLE_WINGED     # short strangle + protective wings (defined risk)
+
+# NIFTY Option Selling - Defined Risk Only
+nifty_options:
+  enabled: true
+  # Trade modes: intraday | positional
+  mode: positional
+  # Intraday window
+  intraday_entry_start: "09:45"
+  intraday_entry_end: "14:30"
+  intraday_exit_by: "15:15"
+  # Positional window - Mon=0, Tue=1, Wed=2 only
+  positional_entry_days: [0, 1, 2]
+  positional_exit_expiry_cutoff: "15:15"
+  # Max concurrent NIFTY structures
+  max_nifty_structures: 2
+  # Strategy wings
+  iron_condor_wing_width: 300       # Rs distance for Iron Condor wings
+  spread_width: 200                 # Rs distance for credit spreads
+  # Risk per structure (% of account capital)
+  max_risk_per_pct: 0.01            # 1% max risk per NIFTY structure
+  # Avoid conditions
+  avoid_vol_expansion: true         # Don't sell when VIX expanding
+  vol_expansion_threshold: 5.0       # % VIX change to block entry
+  # Exit rules
+  profit_take_pct: 0.50             # Book profit at 50% of max credit
+  stop_loss_mult: 1.25              # Stop loss at 1.25x credit received
+  vix_spike_exit_pct: 10.0          # Close if VIX jumps >10% intraday

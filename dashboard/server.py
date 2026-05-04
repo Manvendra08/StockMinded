@@ -10,7 +10,7 @@ import os
 import sys
 import traceback
 from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime, date, timezone, timedelta
 from pathlib import Path
 
 # Ensure project root is on sys.path so signal imports work
@@ -22,6 +22,7 @@ load_dotenv(PROJECT_ROOT / ".env")
 
 from flask import Flask, jsonify, request, send_from_directory
 import numpy as np
+import pandas as pd
 
 from config.loader import load_config, load_universe
 from data import feed
@@ -29,7 +30,9 @@ from signals import regime as regime_mod
 from signals import flows as flows_mod
 from signals import leadership as lead_mod
 from signals import structure_map as sm
+from signals import verdict as verdict_mod
 from ops.alerts import Alerter
+from ops.journal import Journal
 
 app = Flask(__name__, static_folder=str(Path(__file__).parent))
 
@@ -87,7 +90,23 @@ def _run_engine() -> dict:
         source_errors.append(f"Sector feed failed: {e}")
 
     regime_snap = regime_mod.classify("NIFTY", stock_universe_data=stock_data)
-    flow_snap = flows_mod.snapshot(sector_data, index_symbol="NIFTY")
+    try:
+        flow_snap = flows_mod.snapshot(sector_data, index_symbol="NIFTY")
+        if getattr(flow_snap, "notes", ""):
+            source_errors.append(flow_snap.notes)
+    except Exception as e:
+        # Create a dummy flow_snap so the rest of the engine can continue
+        from signals.flows import FlowSnapshot
+        flow_snap = FlowSnapshot(
+            fii_dii_5d_net_cr={"fii": 0.0, "dii": 0.0},
+            top_inflow_sectors=[],
+            top_outflow_sectors=[],
+            pcr_oi=None,
+            pcr_vol=None,
+            max_pain=None,
+            smart_money_bias="NEUTRAL"
+        )
+        source_errors.append(f"Option chain feed failed: {e}")
 
     bench = feed.ohlc_cached("NIFTY", period="1y")
     ranks = lead_mod.rank_universe(stock_data, bench)
@@ -137,14 +156,20 @@ def _run_engine() -> dict:
                     max_age_secs = age
                 checked += 1
                 
-    freshness_status = "LIVE" if max_age_secs < 900 else ("STALE" if max_age_secs < 3600 else "OLD")
+    market_now = _market_status_now()
+    if checked == 0:
+        freshness_status = "MISSING"
+    elif market_now["market_open"]:
+        freshness_status = "LIVE" if max_age_secs < 900 else ("STALE" if max_age_secs < 3600 else "OLD")
+    else:
+        freshness_status = "EOD"
     data_freshness = {
         "status": freshness_status,
         "max_age_minutes": round(max_age_secs / 60, 1),
         "cache_files_checked": checked
     }
 
-    status = _market_status_now()
+    status = market_now
     last_trading_date = None
     if not nifty_df.empty:
         try:
@@ -184,6 +209,8 @@ def _run_engine() -> dict:
             "mp_stale": flow_snap.mp_stale,
             "pcr_updated_at": flow_snap.pcr_updated_at,
             "mp_updated_at": flow_snap.mp_updated_at,
+            "notes": getattr(flow_snap, "notes", ""),
+            "option_source": getattr(flow_snap, "option_source", None),
         },
         "leaders": [
             {"symbol": r.symbol, "rs_slope": max(-150.0, min(150.0, r.rs_slope_20d)), "pct_vs_50dma": r.pct_vs_50dma, "quintile": r.quintile}
@@ -210,6 +237,62 @@ def _run_engine() -> dict:
             "monthly_stop_pct": risk_cfg.get("monthly_stop_pct", 0),
             "margin_util_cap": risk_cfg.get("margin_util_cap", 0),
         },
+    }
+    result["verdict"] = verdict_mod.build_trade_verdict(result).to_dict()
+
+    # --- Skip Reasons (Today's) ---
+    try:
+        journal = Journal(cfg["paths"]["journal_db"])
+        ist = timezone(timedelta(hours=5, minutes=30))
+        today_ist = datetime.now(ist).date()
+        start_ist = datetime.combine(today_ist, datetime.min.time(), tzinfo=ist)
+        start_utc = start_ist.astimezone(timezone.utc).replace(tzinfo=None)
+        skip_rows = journal.get_skipped_trades(limit=50, since_date=start_utc.isoformat())
+
+        by_reason: dict[str, int] = {}
+        by_gate: dict[str, int] = {}
+        for row in skip_rows:
+            reason = row.get("skip_reason") or "UNKNOWN"
+            gate = row.get("risk_gate") or "UNKNOWN"
+            by_reason[reason] = by_reason.get(reason, 0) + 1
+            by_gate[gate] = by_gate.get(gate, 0) + 1
+
+        result["skips"] = {
+            "today": skip_rows[:10],
+            "summary": {
+                "total": len(skip_rows),
+                "by_reason": by_reason,
+                "by_gate": by_gate,
+            }
+        }
+    except Exception as e:
+        result["skips"] = {"today": [], "summary": {"total": 0, "by_reason": {}, "by_gate": {}}, "error": str(e)}
+
+    # --- Verdict Engine Trace ---
+    verdict = result["verdict"]
+    flows = result.get("flows", {})
+    regime = result.get("regime", {})
+    freshness = result.get("data_freshness", {})
+    result["verdict_trace"] = {
+        "inputs": {
+            "regime": regime.get("name"),
+            "trend_score": regime.get("trend_score"),
+            "adx": regime.get("adx"),
+            "vix": regime.get("vix"),
+            "breadth_pct_above_50dma": regime.get("breadth_pct_above_50dma"),
+            "pcr_oi": flows.get("pcr_oi"),
+            "max_pain": flows.get("max_pain"),
+            "pcr_stale": flows.get("pcr_stale"),
+            "mp_stale": flows.get("mp_stale"),
+            "data_freshness_status": freshness.get("status"),
+            "bias": flows.get("bias"),
+            "source_errors": result.get("source_errors", []),
+        },
+        "blocks": verdict.get("blocks", []),
+        "reasons": verdict.get("reasons", []),
+        "action": verdict.get("action"),
+        "strategy": verdict.get("strategy"),
+        "confidence": verdict.get("confidence"),
     }
 
     def _make_safe(obj):
@@ -239,13 +322,17 @@ def _run_engine() -> dict:
 # -- Trade Alert Generation ----------------------------------------
 
 def _generate_trade_alerts(data: dict) -> list[dict]:
-    """Generate specific trade alerts based on signal evidence."""
+    """Generate structured, actionable trade objects based on signal evidence.
+    
+    Returns list of trade dicts with:
+      symbol, direction, entry_trigger, entry_price, stop, target1, target2,
+      trail_rule, qty, risk_rupees, confidence, no_trade_reason, evidence
+    """
     alerts = []
     regime = data.get("regime", {})
     flows = data.get("flows", {})
     leaders = data.get("leaders", [])
     laggards = data.get("laggards", [])
-    structure = data.get("structure", {})
     risk = data.get("risk", {})
     nifty = data.get("nifty", {})
     banknifty = data.get("banknifty", {})
@@ -253,133 +340,155 @@ def _generate_trade_alerts(data: dict) -> list[dict]:
     regime_name = regime.get("name", "")
     bias = flows.get("bias", "NEUTRAL")
     capital = risk.get("capital", 7000000)
-    per_trade_risk = risk.get("per_trade_pct", 0.0075)
-
-    # --- INDEX ALERTS ---
-    # Nifty directional alert
-    nifty_chg = nifty.get("change_pct", 0)
+    per_trade_risk_pct = risk.get("per_trade_pct", 0.0075)
+    
     nifty_px = nifty.get("close", 0)
-    bn_chg = banknifty.get("change_pct", 0)
+    nifty_chg = nifty.get("change_pct", 0)
     bn_px = banknifty.get("close", 0)
-
+    bn_chg = banknifty.get("change_pct", 0)
     pcr = flows.get("pcr_oi")
     max_pain = flows.get("max_pain")
+    vix = regime.get("vix", 0)
+    breadth = regime.get("breadth_pct_above_50dma", 0)
+    trend_score = regime.get("trend_score", 0)
+    trade_verdict = data.get("verdict") or verdict_mod.build_trade_verdict(data).to_dict()
+    verdict_action = trade_verdict.get("action", "WAIT")
+    can_trade_equity = bool(trade_verdict.get("can_trade_equity"))
+    can_trade_options = bool(trade_verdict.get("can_trade_options"))
 
-    # Nifty trade idea based on regime + bias
-    if regime_name in ("TREND_UP",) and bias in ("LONG", "NEUTRAL"):
+    # --- PRO FILTERS & GATING ---
+    allow_longs = can_trade_equity and verdict_action == "LONG_ONLY"
+    allow_shorts = can_trade_equity and verdict_action == "SHORT_ONLY"
+    
+    # 2. Time filter: avoid entries after 14:45 to reduce EOD churn
+    now_ist = datetime.now(timezone(timedelta(hours=5, minutes=30)))
+    if (now_ist.hour, now_ist.minute) >= (14, 45):
+        allow_longs = False
+        allow_shorts = False
+    
+    # 2. VIX Filter
+    if vix > 24:
+        allow_longs = False
+        allow_shorts = False
         alerts.append({
-            "type": "INDEX",
-            "symbol": "NIFTY",
-            "direction": "LONG",
-            "instrument": "NIFTY FUT / ATM CE",
-            "entry": f"Above {nifty_px:.0f}",
-            "sl": f"{nifty_px * 0.995:.0f} (-0.5%)",
-            "target": f"{nifty_px * 1.01:.0f} (+1%)",
-            "evidence": [
-                f"Regime: {regime_name}",
-                f"Bias: {bias}",
-                f"Trend score: {regime.get('trend_score', 0):+d}",
-                f"Breadth: {regime.get('breadth_pct_above_50dma', 0):.0f}% > 50DMA",
-            ],
-            "confidence": "HIGH" if bias == "LONG" else "MEDIUM",
+            "symbol": "NIFTY", "direction": "AVOID", "entry_trigger": "VIX > 24",
+            "entry_price": None, "stop": None, "target1": None, "target2": None,
+            "trail_rule": "", "qty": 0, "risk_rupees": 0, "confidence": "HIGH",
+            "no_trade_reason": "Extreme volatility (VIX > 24). Stay flat.",
+            "evidence": [f"VIX: {vix:.1f}", f"Regime: {regime_name}"]
         })
-    elif regime_name in ("TREND_DOWN",) and bias in ("SHORT", "NEUTRAL"):
+        return alerts
+
+    if verdict_action in ("WAIT", "NO_TRADE_DATA_STALE") and not can_trade_equity and not can_trade_options:
         alerts.append({
-            "type": "INDEX",
-            "symbol": "NIFTY",
-            "direction": "SHORT",
-            "instrument": "NIFTY FUT / ATM PE",
-            "entry": f"Below {nifty_px:.0f}",
-            "sl": f"{nifty_px * 1.005:.0f} (+0.5%)",
-            "target": f"{nifty_px * 0.99:.0f} (-1%)",
-            "evidence": [
-                f"Regime: {regime_name}",
-                f"Bias: {bias}",
-                f"Trend score: {regime.get('trend_score', 0):+d}",
-            ],
-            "confidence": "HIGH" if bias == "SHORT" else "MEDIUM",
+            "symbol": "NIFTY", "direction": "AVOID", "entry_trigger": verdict_action,
+            "entry_price": None, "stop": None, "target1": None, "target2": None,
+            "trail_rule": "", "qty": 0, "risk_rupees": 0, "confidence": trade_verdict.get("confidence", "LOW"),
+            "no_trade_reason": trade_verdict.get("strategy", "No clean edge."),
+            "evidence": trade_verdict.get("reasons", []) + trade_verdict.get("blocks", [])
         })
-    elif regime_name in ("RANGE_HIGH_VOL", "RANGE_LOW_VOL"):
-        # Range regime: option selling / straddle
+        return alerts
+
+    # --- INDEX ALERTS ---
+    if allow_longs and trend_score >= 2:
+        sl_dist = nifty_px * 0.005
+        alerts.append({
+            "symbol": "NIFTY", "direction": "LONG", "entry_trigger": f"Breakout > {nifty_px:.0f}",
+            "entry_price": nifty_px, "stop": round(nifty_px - sl_dist, 2),
+            "target1": round(nifty_px + sl_dist * 2, 2), "target2": round(nifty_px + sl_dist * 3, 2),
+            "trail_rule": "Trail SL by 0.25% after T1", "qty": 50, "risk_rupees": round(sl_dist * 50, 2),
+            "confidence": "HIGH" if bias == "LONG" else "MEDIUM", "no_trade_reason": None,
+            "evidence": [f"Regime: {regime_name}", f"Trend: {trend_score}", f"Bias: {bias}", f"Breadth: {breadth}%"],
+            # Metadata for tracking
+            "planned_risk": round(sl_dist * 50, 2),
+            "entry_rule": f"Breakout > {nifty_px:.0f} in {regime_name} regime",
+            "trail_rule": "Trail SL by 0.25% after T1",
+            "source_regime": regime_name,
+            "flow_bias": bias,
+        })
+    elif allow_shorts and trend_score <= -2:
+        sl_dist = nifty_px * 0.005
+        alerts.append({
+            "symbol": "NIFTY", "direction": "SHORT", "entry_trigger": f"Breakdown < {nifty_px:.0f}",
+            "entry_price": nifty_px, "stop": round(nifty_px + sl_dist, 2),
+            "target1": round(nifty_px - sl_dist * 2, 2), "target2": round(nifty_px - sl_dist * 3, 2),
+            "trail_rule": "Trail SL by 0.25% after T1", "qty": 50, "risk_rupees": round(sl_dist * 50, 2),
+            "confidence": "HIGH" if bias == "SHORT" else "MEDIUM", "no_trade_reason": None,
+            "evidence": [f"Regime: {regime_name}", f"Trend: {trend_score}", f"Bias: {bias}"]
+        })
+    elif can_trade_options and verdict_action == "OPTION_SELL_DEFINED_RISK" and regime_name in ("RANGE_LOW_VOL", "RANGE_HIGH_VOL", "VOL_CONTRACTION"):
         if max_pain:
             alerts.append({
-                "type": "INDEX",
-                "symbol": "NIFTY",
-                "direction": "NEUTRAL",
-                "instrument": "Iron Condor / Short Strangle",
-                "entry": f"Max Pain @ {max_pain:.0f}" if max_pain else "At current levels",
-                "sl": "Predefined spread width",
-                "target": "Theta decay",
-                "evidence": [
-                    f"Regime: {regime_name} (range-bound)",
-                    f"VIX: {regime.get('vix', 0):.1f}",
-                    f"PCR: {pcr:.2f}" if pcr else "PCR: N/A",
-                    f"Max Pain: {max_pain:.0f}" if max_pain else "Max Pain: N/A",
-                ],
-                "confidence": "MEDIUM",
+                "symbol": "NIFTY", "direction": "NEUTRAL", "entry_trigger": f"Iron Condor @ Max Pain {max_pain:.0f}",
+                "entry_price": nifty_px, "stop": "Defined Risk", "target1": "Theta Decay", "target2": None,
+                "trail_rule": "Adjust wings if breached", "qty": 50, "risk_rupees": round(nifty_px * 0.01 * 50, 2),
+                "confidence": "MEDIUM", "no_trade_reason": None,
+                "evidence": [f"Regime: {regime_name}", f"PCR: {pcr}", f"Max Pain: {max_pain}"]
             })
 
-    # BankNifty if diverging from Nifty
+    # BankNifty Divergence
     if abs(bn_chg - nifty_chg) > 0.5:
-        stronger = "BANKNIFTY" if bn_chg > nifty_chg else "NIFTY"
-        alerts.append({
-            "type": "INDEX",
-            "symbol": "BANKNIFTY",
-            "direction": "LONG" if bn_chg > nifty_chg else "SHORT",
-            "instrument": f"BN FUT / Spread vs NIFTY",
-            "entry": f"BN @ {bn_px:.0f}",
-            "sl": f"{bn_px * (0.995 if bn_chg > nifty_chg else 1.005):.0f}",
-            "target": f"Mean reversion or follow-through",
-            "evidence": [
-                f"BN: {bn_chg:+.2f}% vs NIFTY: {nifty_chg:+.2f}%",
-                f"Relative divergence: {abs(bn_chg - nifty_chg):.2f}%",
-                f"{stronger} leading",
-            ],
-            "confidence": "LOW",
-        })
+        direction = "LONG" if bn_chg > nifty_chg else "SHORT"
+        if (direction == "LONG" and allow_longs) or (direction == "SHORT" and allow_shorts):
+            sl_dist = bn_px * 0.005
+            alerts.append({
+                "symbol": "BANKNIFTY", "direction": direction, "entry_trigger": f"Divergence play ({bn_chg:+.2f}% vs Nifty {nifty_chg:+.2f}%)",
+                "entry_price": bn_px, "stop": round(bn_px - sl_dist if direction == "LONG" else bn_px + sl_dist, 2),
+                "target1": round(bn_px + sl_dist * 2 if direction == "LONG" else bn_px - sl_dist * 2, 2), "target2": None,
+                "trail_rule": "Fixed SL", "qty": 15, "risk_rupees": round(sl_dist * 15, 2),
+                "confidence": "LOW", "no_trade_reason": None,
+                "evidence": [f"BN Divergence: {abs(bn_chg - nifty_chg):.2f}%"]
+            })
 
     # --- STOCK ALERTS ---
-    # Long alerts for A-grade leaders
-    for stock in leaders[:3]:
-        risk_per_share_pct = 2.0  # typical SL
-        risk_amt = capital * per_trade_risk
-        alerts.append({
-            "type": "STOCK",
-            "symbol": stock["symbol"],
-            "direction": "LONG",
-            "instrument": f"{stock['symbol']} EQ / FUT",
-            "entry": "At market / pullback to 50DMA",
-            "sl": f"-2% from entry",
-            "target": f"+4% (2:1 R:R)",
-            "qty_hint": f"Risk Rs {risk_amt:,.0f} per trade",
-            "evidence": [
-                f"RS Slope: {stock['rs_slope']:+.2f} (Quintile {stock['quintile']})",
-                f"vs 50DMA: {stock['pct_vs_50dma']:+.1f}%",
-                f"Regime supports longs: {regime_name}",
-                f"Sector inflows: {', '.join(s for s, _ in flows.get('top_inflow', [])[:2])}",
-            ],
-            "confidence": "HIGH" if stock["quintile"] == 5 and stock["rs_slope"] > 0 else "MEDIUM",
-        })
+    risk_amt = capital * per_trade_risk_pct
+    
+    if allow_longs:
+        for stock in leaders[:8]:
+            sym = stock["symbol"]
+            px = nifty_px # Placeholder, ideally fetch LTP. We'll use a proxy or assume alert consumer fetches LTP.
+            # For structured alerts, we provide a reference price. The paper trader will fetch actual LTP on entry.
+            ref_price = 1000 # Placeholder. Paper trader overrides with LTP.
+            sl_pct = 0.02
+            stop = round(ref_price * (1 - sl_pct), 2)
+            risk_per_share = ref_price - stop
+            qty = max(1, int(risk_amt / risk_per_share)) if risk_per_share > 0 else 1
+            
+            alerts.append({
+                "symbol": sym, "direction": "LONG", "entry_trigger": "Pullback to 50DMA or Breakout",
+                "entry_price": ref_price, "stop": stop,
+                "target1": round(ref_price * 1.04, 2), "target2": round(ref_price * 1.08, 2),
+                "trail_rule": "Move SL to cost at T1", "qty": qty, "risk_rupees": round(risk_amt, 2),
+                "confidence": "HIGH" if stock["quintile"] == 5 else "MEDIUM", "no_trade_reason": None,
+                "evidence": [f"RS Slope: {stock['rs_slope']}", f"Q: {stock['quintile']}", f"vs 50DMA: {stock['pct_vs_50dma']}%"]
+            })
 
-    # Short alerts for A-grade laggards
-    for stock in laggards[:2]:
-        risk_amt = capital * per_trade_risk
-        alerts.append({
-            "type": "STOCK",
-            "symbol": stock["symbol"],
-            "direction": "SHORT",
-            "instrument": f"{stock['symbol']} FUT",
-            "entry": "At market / bounce to 50DMA",
-            "sl": f"+2% from entry",
-            "target": f"-4% (2:1 R:R)",
-            "qty_hint": f"Risk Rs {risk_amt:,.0f} per trade",
-            "evidence": [
-                f"RS Slope: {stock['rs_slope']:+.2f} (Quintile {stock['quintile']})",
-                f"vs 50DMA: {stock['pct_vs_50dma']:+.1f}%",
-                f"Below 50DMA: weak relative strength",
-            ],
-            "confidence": "HIGH" if stock["quintile"] == 1 and stock["rs_slope"] < 0 else "MEDIUM",
-        })
+    if allow_shorts:
+        for stock in laggards[:5]:
+            sym = stock["symbol"]
+            ref_price = 1000
+            sl_pct = 0.02
+            stop = round(ref_price * (1 + sl_pct), 2)
+            risk_per_share = stop - ref_price
+            qty = max(1, int(risk_amt / risk_per_share)) if risk_per_share > 0 else 1
+            
+            alerts.append({
+                "symbol": sym, "direction": "SHORT", "entry_trigger": "Bounce to 50DMA or Breakdown",
+                "entry_price": ref_price, "stop": stop,
+                "target1": round(ref_price * 0.96, 2), "target2": round(ref_price * 0.92, 2),
+                "trail_rule": "Move SL to cost at T1", "qty": qty, "risk_rupees": round(risk_amt, 2),
+                "confidence": "HIGH" if stock["quintile"] == 1 else "MEDIUM", "no_trade_reason": None,
+                "evidence": [f"RS Slope: {stock['rs_slope']}", f"Q: {stock['quintile']}", f"vs 50DMA: {stock['pct_vs_50dma']}%"]
+            })
+
+    for alert in alerts:
+        if alert.get("direction") not in ("LONG", "SHORT", "NEUTRAL"):
+            continue
+        alert.setdefault("planned_risk", alert.get("risk_rupees", 0))
+        alert.setdefault("entry_rule", alert.get("entry_trigger", ""))
+        alert.setdefault("source_regime", regime_name)
+        alert.setdefault("flow_bias", bias)
+        alert.setdefault("verdict_action", verdict_action)
 
     return alerts
 
@@ -399,33 +508,25 @@ def _format_telegram_alert(data: dict, alerts: list[dict]) -> str:
     lines.append(f"NIFTY: {nifty.get('close', 0):.0f} ({nifty.get('change_pct', 0):+.2f}%)")
     lines.append("")
 
-    idx_alerts = [a for a in alerts if a["type"] == "INDEX"]
-    stk_alerts = [a for a in alerts if a["type"] == "STOCK"]
+    actionable = [a for a in alerts if a.get("direction") != "AVOID"]
+    avoid = [a for a in alerts if a.get("direction") == "AVOID"]
 
-    if idx_alerts:
-        lines.append("*-- INDEX TRADES --*")
-        for a in idx_alerts:
-            arrow = "BUY" if a["direction"] == "LONG" else ("SELL" if a["direction"] == "SHORT" else "NEUTRAL")
-            conf = a.get("confidence", "")
-            lines.append(f"  `{arrow}` *{a['symbol']}* [{conf}]")
-            lines.append(f"    {a['instrument']}")
-            lines.append(f"    Entry: {a['entry']}")
-            lines.append(f"    SL: {a['sl']}  |  Tgt: {a['target']}")
-            for ev in a.get("evidence", []):
-                lines.append(f"    - {ev}")
-            lines.append("")
+    if avoid:
+        lines.append("*-- NO TRADE --*")
+        for a in avoid:
+            lines.append(f"  ⛔ {a.get('no_trade_reason', 'Avoid')}")
+        lines.append("")
 
-    if stk_alerts:
-        lines.append("*-- STOCK TRADES --*")
-        for a in stk_alerts:
-            arrow = "BUY" if a["direction"] == "LONG" else "SELL"
+    if actionable:
+        lines.append("*-- ACTIONABLE TRADES --*")
+        for a in actionable:
+            arrow = "🟢 BUY" if a["direction"] == "LONG" else ("🔴 SELL" if a["direction"] == "SHORT" else "⚪ NEUTRAL")
             conf = a.get("confidence", "")
-            lines.append(f"  `{arrow}` *{a['symbol']}* [{conf}]")
-            lines.append(f"    {a['instrument']}")
-            lines.append(f"    Entry: {a['entry']}")
-            lines.append(f"    SL: {a['sl']}  |  Tgt: {a['target']}")
-            if a.get("qty_hint"):
-                lines.append(f"    Sizing: {a['qty_hint']}")
+            lines.append(f"  {arrow} *{a['symbol']}* [{conf}]")
+            lines.append(f"    Trigger: {a.get('entry_trigger', 'N/A')}")
+            lines.append(f"    Entry: {a.get('entry_price', 'N/A')} | SL: {a.get('stop', 'N/A')}")
+            lines.append(f"    T1: {a.get('target1', 'N/A')} | T2: {a.get('target2', 'N/A')}")
+            lines.append(f"    Risk: ₹{a.get('risk_rupees', 0):,.0f} | Qty: {a.get('qty', 0)}")
             for ev in a.get("evidence", []):
                 lines.append(f"    - {ev}")
             lines.append("")
@@ -435,7 +536,7 @@ def _format_telegram_alert(data: dict, alerts: list[dict]) -> str:
         lines.append(f"Regime `{regime.get('name', '')}` -- stay flat or wait.")
 
     lines.append("---")
-    lines.append("_Risk: 0.75% per trade | Max 3% concurrent_")
+    lines.append("_Risk: 0.75% per trade | Max 3% concurrent | Hard gates enforced_")
     return "\n".join(lines)
 
 
@@ -482,6 +583,7 @@ def api_intraday():
             top_syms = universe[:top_n]
             
         instruments = [f"{s}.NS" if not s.startswith("^") and "." not in s else s for s in top_syms]
+        broker_quotes = feed.quote_batch(top_syms)
         import yfinance as yf
         tickers = yf.Tickers(" ".join(instruments))
         
@@ -494,14 +596,24 @@ def api_intraday():
         rows = []
         for sym, raw in zip(top_syms, instruments):
             try:
-                info = tickers.tickers[raw].fast_info
-                ltp   = round(float(info.last_price), 2) if hasattr(info, "last_price") and info.last_price else None
-                open_ = round(float(info.open),       2) if hasattr(info, "open")       and info.open       else None
-                high  = round(float(info.day_high),   2) if hasattr(info, "day_high")   and info.day_high   else None
-                low   = round(float(info.day_low),    2) if hasattr(info, "day_low")    and info.day_low    else None
-                prev  = round(float(info.previous_close), 2) if hasattr(info, "previous_close") and info.previous_close else None
-                avg_vol = int(info.three_month_average_volume or 0)
-                chg_pct = round(100 * (ltp - prev) / prev, 2) if ltp and prev else None
+                q = broker_quotes.get(sym) or {}
+                if q.get("source") == "dhan_quote":
+                    ltp = round(float(q["ltp"]), 2) if q.get("ltp") else None
+                    open_ = round(float(q["open"]), 2) if q.get("open") else None
+                    high = round(float(q["high"]), 2) if q.get("high") else None
+                    low = round(float(q["low"]), 2) if q.get("low") else None
+                    prev = round(float(q["prev_close"]), 2) if q.get("prev_close") else None
+                    avg_vol = int(q.get("volume") or 0)
+                    chg_pct = q.get("change_pct")
+                else:
+                    info = tickers.tickers[raw].fast_info
+                    ltp   = round(float(info.last_price), 2) if hasattr(info, "last_price") and info.last_price else None
+                    open_ = round(float(info.open),       2) if hasattr(info, "open")       and info.open       else None
+                    high  = round(float(info.day_high),   2) if hasattr(info, "day_high")   and info.day_high   else None
+                    low   = round(float(info.day_low),    2) if hasattr(info, "day_low")    and info.day_low    else None
+                    prev  = round(float(info.previous_close), 2) if hasattr(info, "previous_close") and info.previous_close else None
+                    avg_vol = int(info.three_month_average_volume or 0)
+                    chg_pct = round(100 * (ltp - prev) / prev, 2) if ltp and prev else None
                 
                 # Calculate today's volume and relative volume
                 today_vol = 0
@@ -541,7 +653,7 @@ def api_intraday():
         
         candles = []
         try:
-            nifty_intra = yf.download("^NSEI", period=tf_cfg["period"], interval=tf_cfg["interval"], progress=False, auto_adjust=True)
+            nifty_intra = feed.ohlc_cached("NIFTY", period=tf_cfg["period"], interval=tf_cfg["interval"])
             if not nifty_intra.empty:
                 # Flatten MultiIndex columns from newer yfinance
                 if isinstance(nifty_intra.columns, __import__('pandas').MultiIndex):
@@ -549,10 +661,10 @@ def api_intraday():
                 for ts, row in nifty_intra.iterrows():
                     candles.append({
                         "t": ts.strftime("%H:%M" if tf in ["5m", "15m", "1h"] else "%d-%m"),
-                        "o": round(float(row["Open"]),  2),
-                        "h": round(float(row["High"]),  2),
-                        "l": round(float(row["Low"]),   2),
-                        "c": round(float(row["Close"]), 2),
+                        "o": round(float(row.get("Open", row.get("open"))),  2),
+                        "h": round(float(row.get("High", row.get("high"))),  2),
+                        "l": round(float(row.get("Low", row.get("low"))),   2),
+                        "c": round(float(row.get("Close", row.get("close"))), 2),
                     })
         except Exception as e:
             print(f"[intraday candle error] {e}")
@@ -705,10 +817,26 @@ def api_paper_enter():
 def api_paper_auto_enter():
     """Auto-enter paper trades from generated alerts."""
     try:
+        cfg = load_config()
         data = _run_engine()
         alerts = _generate_trade_alerts(data)
-        entered = pt.auto_enter_from_alerts(alerts)
-        return jsonify({"entered": entered, "alert_count": len(alerts)})
+        # Pass config for risk guardrails
+        entered = pt.auto_enter_from_alerts(alerts, cfg=cfg)
+        entered_nifty_options = []
+        setups = pt.get_nifty_option_setups(data, cfg)
+        for s in setups:
+            if not s.get("suitable") or not s.get("legs"):
+                continue
+            result = pt.enter_nifty_option_structure(_dict_to_setup(s), _dict_legs_to_resolved(s["legs"]), cfg)
+            if "error" not in result:
+                entered_nifty_options.append(result)
+
+        return jsonify({
+            "entered": entered,
+            "entered_nifty_options": entered_nifty_options,
+            "alert_count": len(alerts),
+            "nifty_setup_count": len(setups),
+        })
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -718,8 +846,11 @@ def api_paper_auto_enter():
 def api_paper_check():
     """Check open trades against SL/TGT/EOD and close if triggered."""
     try:
+        cfg = load_config()
+        data = _run_engine()
         closed = pt.check_and_close_trades()
-        return jsonify({"closed": closed, "count": len(closed)})
+        closed_opts = pt.check_nifty_option_exits(vix_current=data.get("regime", {}).get("vix", 15.0), cfg=cfg)
+        return jsonify({"closed": closed, "count": len(closed), "closed_nifty_options": closed_opts, "nifty_option_count": len(closed_opts)})
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -771,12 +902,131 @@ def api_paper_strategy_notes():
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
+
+@app.route("/api/paper/skipped")
+def api_paper_skipped():
+    """Return skipped trade reasons for an IST date (default: today)."""
+    try:
+        cfg = load_config()
+        journal = Journal(cfg["paths"]["journal_db"])
+        limit = int(request.args.get("limit", 200))
+        date_str = request.args.get("date")
+        ist = timezone(timedelta(hours=5, minutes=30))
+
+        if date_str:
+            try:
+                target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+            except ValueError:
+                return jsonify({"error": "Invalid date format. Use YYYY-MM-DD."}), 400
+        else:
+            target_date = datetime.now(ist).date()
+
+        start_ist = datetime.combine(target_date, datetime.min.time(), tzinfo=ist)
+        start_utc = start_ist.astimezone(timezone.utc).replace(tzinfo=None)
+        rows = journal.get_skipped_trades(limit=limit, since_date=start_utc.isoformat())
+
+        by_reason: dict[str, int] = {}
+        by_gate: dict[str, int] = {}
+        for row in rows:
+            reason = row.get("skip_reason") or "UNKNOWN"
+            gate = row.get("risk_gate") or "UNKNOWN"
+            by_reason[reason] = by_reason.get(reason, 0) + 1
+            by_gate[gate] = by_gate.get(gate, 0) + 1
+
+        return jsonify({
+            "date": target_date.isoformat(),
+            "skipped": rows,
+            "summary": {
+                "total": len(rows),
+                "by_reason": by_reason,
+                "by_gate": by_gate,
+            },
+        })
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
 @app.route("/api/options/structures")
 def api_options_structures():
     try:
         db = pt._load_db()
         ops = db.get("option_trades", [])
         return jsonify({"option_trades": ops})
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+def _dict_to_setup(d: dict):
+    from signals.option_strategy import NiftyOptionSetup
+    return NiftyOptionSetup(
+        symbol=d.get("symbol", "NIFTY"),
+        mode=d.get("mode", "positional"),
+        strategy=d.get("strategy", ""),
+        regime=d.get("regime", ""),
+        bias=d.get("bias", ""),
+        vix=d.get("vix", 0.0),
+        vix_change_pct=d.get("vix_change_pct", 0.0),
+        pcr=d.get("pcr"),
+        entry_reason=d.get("entry_reason", ""),
+        net_credit=d.get("net_credit", 0.0),
+        max_loss_rupees=d.get("max_loss_rupees", 0.0),
+        risk_pct=d.get("risk_pct", 0.0),
+        breakevens=d.get("breakevens", []),
+        short_strikes=d.get("short_strikes", []),
+        wing_width=d.get("wing_width", 0.0),
+        entry_window_ok=d.get("entry_window_ok", True),
+        suitable=d.get("suitable", False),
+        skip_reason=d.get("skip_reason", ""),
+        exit_rules=d.get("exit_rules", {}),
+    )
+
+
+def _dict_legs_to_resolved(legs: list[dict]):
+    from signals.option_strategy import ResolvedLeg
+    out = []
+    for leg in legs:
+        qty = max(1, int(leg.get("qty", 1)))
+        out.append(ResolvedLeg(
+            side=leg.get("side", ""),
+            type=leg.get("type", ""),
+            strike=leg.get("strike", 0),
+            expiry=leg.get("expiry", ""),
+            lots=1,
+            lot_size=qty,
+            premium=leg.get("premium", 0.0),
+        ))
+    return out
+
+
+@app.route("/api/options/alerts")
+def api_options_alerts():
+    """Generate NIFTY option-selling setups."""
+    try:
+        cfg = load_config()
+        data = _run_engine()
+        setups = pt.get_nifty_option_setups(data, cfg)
+        return jsonify({"ts": data.get("ts"), "setups": setups})
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/options/auto-enter")
+def api_options_auto_enter():
+    """Auto-enter suitable NIFTY option setups."""
+    try:
+        cfg = load_config()
+        data = _run_engine()
+        setups = pt.get_nifty_option_setups(data, cfg)
+        entered = []
+        for s in setups:
+            if not s.get("suitable") or not s.get("legs"):
+                continue
+            result = pt.enter_nifty_option_structure(_dict_to_setup(s), _dict_legs_to_resolved(s["legs"]), cfg)
+            if "error" not in result:
+                entered.append(result)
+        return jsonify({"entered": entered, "setups": setups})
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -824,6 +1074,7 @@ def api_paper_cleanup():
         data = request.json or {}
         from_date = data.get("from_date")
         to_date = data.get("to_date")
+        purge_churn = data.get("purge_churn", False)
         full_reset = data.get("full_reset", False)
 
         result = pt.cleanup_db(from_date, to_date, purge_churn, full_reset)
@@ -854,12 +1105,12 @@ def _automation_worker():
                 data = _run_engine()
                 if market_open:
                     alerts = _generate_trade_alerts(data)
-                    entered = pt.auto_enter_from_alerts(alerts)
+                    cfg = load_config()
+                    entered = pt.auto_enter_from_alerts(alerts, cfg=cfg)
                     if entered:
                         print(f"  > Auto-entered {len(entered)} trades: {', '.join(e['symbol'] for e in entered)}")
                         # Fire Telegram alert so user is notified of auto-trades.
                         try:
-                            cfg = load_config()
                             token = cfg.get("alerts", {}).get("telegram_bot_token")
                             chat_id = cfg.get("alerts", {}).get("telegram_chat_id")
                             # Filter original alerts to only those that were actually entered
@@ -875,15 +1126,34 @@ def _automation_worker():
                                 print(f"  > Telegram alert failed. Last error: {alerts_mod._last_send.get('error')}")
                         except Exception as te:
                             print(f"  > Telegram send failed: {te}")
-                            
+
+                    try:
+                        setups = pt.get_nifty_option_setups(data, cfg)
+                        nifty_entered = []
+                        for s in setups:
+                            if not s.get("suitable") or not s.get("legs"):
+                                continue
+                            result = pt.enter_nifty_option_structure(
+                                _dict_to_setup(s), _dict_legs_to_resolved(s["legs"]), cfg
+                            )
+                            if "error" not in result:
+                                nifty_entered.append(result)
+                        if nifty_entered:
+                            token = cfg.get("alerts", {}).get("telegram_bot_token")
+                            chat_id = cfg.get("alerts", {}).get("telegram_chat_id")
+                            Alerter(token, chat_id).send(
+                                f"*[AUTO-EXECUTED NIFTY OPTIONS]*\nCount: {len(nifty_entered)}"
+                            )
+                    except Exception as ne:
+                        print(f"  > NIFTY options automation error: {ne}")
+
                     # Phase 3: Options Auto-Execution
-                    cfg = load_config()
                     if cfg.get("options", {}).get("enabled"):
                         try:
                             from signals.options import iv_rank, chain_snapshot
                             from signals.option_strategy import pick_structure, resolve_legs
                             
-                            underlyings = cfg.get("options", {}).get("underlyings", ["NIFTY", "BANKNIFTY"])
+                            underlyings = [u for u in cfg.get("options", {}).get("underlyings", ["NIFTY", "BANKNIFTY"]) if u != "NIFTY"]
                             token = cfg.get("alerts", {}).get("telegram_bot_token")
                             chat_id = cfg.get("alerts", {}).get("telegram_chat_id")
                             
@@ -928,6 +1198,11 @@ def _automation_worker():
             # except for the 15:25-15:35 EOD flatten window.
             pt.check_and_close_trades()
             pt.check_option_exits()
+            try:
+                vix_now = data.get("regime", {}).get("vix", 15.0) if "data" in locals() else 15.0
+                pt.check_nifty_option_exits(vix_current=vix_now, cfg=load_config())
+            except Exception as ex:
+                print(f"NIFTY exit check failed: {ex}")
             
         except Exception as e:
             print(f"Error in automation worker: {e}")
