@@ -1239,10 +1239,10 @@
     }
 
     .status-bias {
-      font-size: 3rem;
+      font-size: 2.2rem;
       font-weight: 900;
-      line-height: 1.1;
-      letter-spacing: -1px;
+      line-height: 1.2;
+      letter-spacing: -0.5px;
     }
 
     .status-bias.bull {
@@ -1266,10 +1266,11 @@
     }
 
     .status-strategy {
-      font-size: 1.1rem;
+      font-size: 1rem;
       font-weight: 600;
-      color: var(--text-primary);
-      margin-top: 4px;
+      color: var(--text-secondary);
+      margin-top: 6px;
+      line-height: 1.4;
     }
 
     .status-meta {
@@ -1490,6 +1491,20 @@
       width: 7px;
       height: 7px;
       border-radius: 50%;
+    }
+
+    .hidden-session {
+      display: none !important;
+    }
+
+    .status-verdict-header {
+      font-size: 1.2rem;
+      font-weight: 800;
+      color: var(--text-primary);
+      margin-bottom: 16px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
     }
 
     .health-dot.ok {
@@ -2275,9 +2290,10 @@
     <!-- ═══ BENTO GRID LAYOUT ═══ -->
     <div class="bento-grid">
 
-      <!-- Regime banner (WIDE) -->
-      <div class="bento-item wide card regime-banner" id="regime-banner" data-regime="">
-        <div class="content">
+      <!-- Row 1: Regime, Trace, Bias -->
+      <!-- Merged Regime & Money Flows (Span 2) -->
+      <div class="bento-item wide card regime-banner" id="regime-banner" data-regime="" style="padding: 0; display: flex; flex-direction: row; gap: 0;">
+        <div class="content" style="flex: 1.2; padding: 24px 28px; border-right: 1px solid var(--glass-border);">
           <div class="regime-header">
             <div class="regime-label">Market Regime</div>
             <div class="regime-badge" id="regime-badge">—</div>
@@ -2285,47 +2301,71 @@
           </div>
           <div class="regime-metrics" id="regime-metrics"></div>
         </div>
+        <div class="content" style="flex: 1; padding: 24px 28px; background: rgba(0, 0, 0, 0.1);">
+          <div class="card-title" style="margin-bottom: 12px;"><span class="icon">💰</span> Money Flows</div>
+          <div class="bias-indicator" id="bias-indicator" style="padding: 10px; margin-bottom: 12px; font-size: 0.9rem;">—</div>
+          <div class="flow-stats" id="flow-stats"></div>
+        </div>
       </div>
 
-      <!-- Money Flows -->
-      <div class="bento-item card">
-        <div class="card-title"><span class="icon">💰</span> Money Flows</div>
-        <div class="bias-indicator" id="bias-indicator">—</div>
-        <div class="flow-stats" id="flow-stats"></div>
+      <!-- Verdict Engine Trace (Moved to Row 1) -->
+      <div class="bento-item card trace-panel" id="trace-panel">
+        <div class="card-title"><span class="icon">🔍</span> Verdict Engine Trace</div>
+        <div class="trace-inputs" id="trace-inputs"></div>
+        <div class="trace-path" id="trace-decision"></div>
+        <div class="trace-blocks" id="trace-blocks"></div>
       </div>
 
       <!-- Trade Verdict Status Card (WIDE) -->
       <div class="bento-item wide status-card card" id="decision-card" data-tone="unclear">
-        <div class="status-card-content">
-          <div class="status-main">
-            <div class="status-label">Trade Verdict</div>
-            <div class="status-bias unclear" id="status-bias">NEUTRAL</div>
-            <div class="status-strategy" id="status-strategy">No Trade</div>
-            <div class="status-meta" id="status-meta">
-              <span class="status-badge conf-low">Conf: LOW</span>
+        <div class="status-card-content" style="display:grid; grid-template-columns: 1fr 1fr; gap:24px;">
+          <div class="status-verdict-header" style="grid-column: span 2; border-bottom: 1px solid var(--glass-border); padding-bottom: 12px; margin-bottom: 0;">
+            <span class="icon">⚖️</span> Final Trading Verdict — <span id="verdict-date"></span>
+          </div>
+          <!-- Stock System -->
+          <div class="status-main" id="stock-verdict-ui">
+            <div class="status-label">Directional Stock Strategy</div>
+            <div class="status-bias unclear" id="stock-status-action">WAIT</div>
+            <div class="status-strategy" id="stock-status-strategy">Calculating directional edge...</div>
+            <div class="status-meta" id="stock-status-meta">
+              <span class="status-badge conf-low" id="stock-conf-badge">Conf: LOW</span>
             </div>
           </div>
-          <div class="status-picks" id="status-picks">
-            <div class="status-pick-item">
-              <div>
-                <div class="status-pick-label">Top Long</div>
-                <div class="status-pick-value" id="status-top-long">—</div>
-              </div>
+          
+          <!-- Options System -->
+          <div class="status-main" id="nifty-verdict-ui" style="border-left: 1px solid var(--glass-border); padding-left: 24px;">
+            <div class="status-label">Nifty Options System</div>
+            <div class="status-bias unclear" id="nifty-status-action">WAIT</div>
+            <div class="status-strategy" id="nifty-status-strategy">Waiting for setup.</div>
+            <div class="status-meta" id="nifty-status-meta">
+              <span class="status-badge conf-low" id="nifty-conf-badge">Conf: LOW</span>
             </div>
-            <div class="status-pick-item">
-              <div>
-                <div class="status-pick-label">Top Short</div>
-                <div class="status-pick-value" id="status-top-short">—</div>
-              </div>
+          </div>
+        </div>
+        
+        <!-- Picks Footer (Optional, usually tied to stocks) -->
+        <div class="status-picks" id="status-picks" style="border-top:1px solid var(--glass-border); margin-top:12px; padding-top:12px;">
+          <div class="status-pick-item">
+            <div style="display:flex; gap:12px;">
+              <div class="status-pick-label">Leaders:</div>
+              <div class="status-pick-value" id="status-top-long">—</div>
+            </div>
+          </div>
+          <div class="status-pick-item">
+            <div style="display:flex; gap:12px;">
+              <div class="status-pick-label">Laggards:</div>
+              <div class="status-pick-value" id="status-top-short">—</div>
             </div>
           </div>
         </div>
       </div>
 
-      <!-- Sector rotation -->
-      <div class="bento-item card">
-        <div class="card-title"><span class="icon">🔄</span> Sector Rotation (5D RS)</div>
-        <div class="sector-list" id="sector-list"></div>
+      <!-- Skip Reasons Today (Moved to Row 2) -->
+      <div class="bento-item card skip-panel" id="skip-panel">
+        <div class="card-title"><span class="icon">🚫</span> Skip Reasons Today</div>
+        <div class="skip-summary" id="skip-total">-</div>
+        <div id="skip-reasons"></div>
+        <div class="skip-table" id="skip-recent"></div>
       </div>
 
       <!-- Leaders -->
@@ -2360,16 +2400,16 @@
         </table>
       </div>
 
-      <!-- Structure -->
-      <div class="bento-item wide card">
-        <div class="card-title"><span class="icon">🏗️</span> Trade Structure</div>
-        <div class="struct-primary" id="struct-primary">—</div>
-        <div class="struct-secondary" id="struct-secondary">—</div>
-        <div class="struct-notes" id="struct-notes">—</div>
+      <!-- Sector rotation (Moved to Far Right of Row 3) -->
+      <div class="bento-item card">
+        <div class="card-title"><span class="icon">🔄</span> Sector Rotation (5D RS)</div>
+        <div class="sector-list" id="sector-list"></div>
       </div>
 
-      <!-- Universe (FULL WIDTH) -->
-      <div class="bento-item full universe-section card">
+
+
+      <!-- Universe & Watchlist (Adjacent) -->
+      <div class="bento-item wide universe-section card">
         <div class="card-title"><span class="icon">📊</span> Full Universe Rankings</div>
         <div class="universe-search-bar">
           <input type="search" class="universe-search-input" id="universe-search" placeholder="Search 212 stocks by symbol..." oninput="filterUniverse()">
@@ -2393,23 +2433,28 @@
           </table>
         </div>
       </div>
+
+      <!-- Watchlist Live -->
+      <div class="bento-item card" style="display:flex; flex-direction:column;">
+        <div class="card-title"><span class="icon">👁</span> Watchlist Live</div>
+        <div style="flex:1; overflow-y:auto;">
+          <table class="intra-table" style="margin:0;">
+            <thead>
+              <tr>
+                <th>Symbol</th>
+                <th>LTP</th>
+                <th>Chg%</th>
+                <th>H / L</th>
+                <th title="Relative Volume = Today Vol ÷ 20D Avg Vol. >1.5x = above-average activity">Rel Vol</th>
+                <th>Range</th>
+              </tr>
+            </thead>
+            <tbody id="intra-tbody"></tbody>
+          </table>
+        </div>
+      </div>
     </div>
 
-    <!-- ═══ SKIP REASONS & VERDICT TRACE ═══ -->
-    <div class="grid-main" style="margin-bottom: 24px;">
-      <div class="card skip-panel" id="skip-panel">
-        <div class="card-title"><span class="icon">🚫</span> Skip Reasons Today</div>
-        <div class="skip-summary" id="skip-total">-</div>
-        <div id="skip-reasons"></div>
-        <div class="skip-table" id="skip-recent"></div>
-      </div>
-      <div class="card trace-panel" id="trace-panel" style="display: none;">
-        <div class="card-title"><span class="icon">🔍</span> Verdict Engine Trace</div>
-        <div class="trace-inputs" id="trace-inputs"></div>
-        <div class="trace-path" id="trace-decision"></div>
-        <div class="trace-blocks" id="trace-blocks"></div>
-      </div>
-    </div>
 
     <!-- Risk bar (MOVED TO PAPER TRADER) -->
 
@@ -2448,24 +2493,6 @@
             <canvas id="nifty-chart"></canvas>
             <div class="chart-label" id="chart-label">—</div>
           </div>
-        </div>
-
-        <!-- Watchlist table -->
-        <div class="card">
-          <div class="card-title"><span class="icon">👁</span> Watchlist Live</div>
-          <table class="intra-table">
-            <thead>
-              <tr>
-                <th>Symbol</th>
-                <th>LTP</th>
-                <th>Chg%</th>
-                <th>H / L</th>
-                <th title="Relative Volume = Today Vol ÷ 20D Avg Vol. >1.5x = above-average activity">Rel Vol</th>
-                <th>Range</th>
-              </tr>
-            </thead>
-            <tbody id="intra-tbody"></tbody>
-          </table>
         </div>
       </div>
     </section>
@@ -2621,33 +2648,65 @@
 
     function renderDecisionCard(d) {
       const verdict = d.verdict || {};
-      const bias = d.flows?.bias || 'NEUTRAL';
-      const confidence = verdict.confidence || 'LOW';
-      const strategy = verdict.strategy || d.structure?.primary || 'No Trade';
-      const tone = verdict.tone || (d.regime?.name?.includes('UP') ? 'bull' : d.regime?.name?.includes('DOWN') ? 'bear' : 'unclear');
+      const stock = verdict.stock || {};
+      const nifty = verdict.nifty || {};
       
       const card = document.getElementById('decision-card');
+      if (!card) return;
+
+      const dateEl = document.getElementById('verdict-date');
+      if (dateEl) dateEl.textContent = new Date().toLocaleDateString();
+
+      const tone = stock.tone || nifty.tone || 'unclear';
       card.dataset.tone = tone;
 
-      // Update Bias & Strategy (Large Typography)
-      const biasEl = document.getElementById('status-bias');
-      biasEl.textContent = bias;
-      biasEl.className = `status-bias ${tone}`;
+      // 1. Update Stock System
+      const stockActionEl = document.getElementById('stock-status-action');
+      if (stockActionEl) {
+        stockActionEl.textContent = stock.action || 'WAIT';
+        stockActionEl.className = `status-bias ${stock.tone || 'unclear'}`;
+      }
       
-      document.getElementById('status-strategy').textContent = strategy;
+      const stockStratEl = document.getElementById('stock-status-strategy');
+      if (stockStratEl) stockStratEl.textContent = stock.strategy || 'No directional edge.';
+      
+      const stockMetaEl = document.getElementById('stock-status-meta');
+      if (stockMetaEl) {
+          const sConf = stock.confidence || 'LOW';
+          const sConfCls = sConf === 'HIGH' ? 'conf-high' : sConf === 'MED' ? 'conf-med' : 'conf-low';
+          stockMetaEl.innerHTML = `
+            <span class="status-badge ${sConfCls}">Conf: ${sConf}</span>
+            ${stock.can_trade ? '<span class="status-badge" style="color:var(--accent-green);border-color:var(--accent-green);">Live</span>' : '<span class="status-badge">Paused</span>'}
+          `;
+      }
 
-      // Update Meta (Badges)
-      const confClass = confidence === 'HIGH' ? 'conf-high' : confidence === 'MED' ? 'conf-med' : 'conf-low';
-      document.getElementById('status-meta').innerHTML = `
-        <span class="status-badge ${confClass}">Confidence: ${confidence}</span>
-        ${d.source_errors?.length ? `<span class="status-badge" style="color:var(--accent-red); border-color:rgba(239,68,68,0.3);">⚠️ Data Degraded</span>` : `<span class="status-badge">System: Healthy</span>`}
-      `;
+      // 2. Update Nifty System
+      const niftyActionEl = document.getElementById('nifty-status-action');
+      if (niftyActionEl) {
+          niftyActionEl.textContent = nifty.action || 'WAIT';
+          niftyActionEl.className = `status-bias ${nifty.tone || 'unclear'}`;
+      }
+      
+      const niftyStratEl = document.getElementById('nifty-status-strategy');
+      if (niftyStratEl) niftyStratEl.textContent = nifty.strategy || 'Waiting for setup...';
+      
+      const niftyMetaEl = document.getElementById('nifty-status-meta');
+      if (niftyMetaEl) {
+          const nConf = nifty.confidence || 'LOW';
+          const nConfCls = nConf === 'HIGH' ? 'conf-high' : nConf === 'MED' ? 'conf-med' : 'conf-low';
+          niftyMetaEl.innerHTML = `
+            <span class="status-badge ${nConfCls}">Conf: ${nConf}</span>
+            ${nifty.can_trade ? '<span class="status-badge" style="color:var(--accent-green);border-color:var(--accent-green);">Live</span>' : '<span class="status-badge">Paused</span>'}
+          `;
+      }
 
-      // Update Top Picks
-      const topLong = verdict.top_long || d.leaders?.[0]?.symbol || '—';
-      const topShort = verdict.top_short || d.laggards?.[0]?.symbol || '—';
-      document.getElementById('status-top-long').textContent = topLong;
-      document.getElementById('status-top-short').textContent = topShort;
+      // 3. Update Top Picks (Footer)
+      const topLong = stock.top_long || (d.leaders && d.leaders[0] ? d.leaders[0].symbol : '—');
+      const topShort = stock.top_short || (d.laggards && d.laggards[0] ? d.laggards[0].symbol : '—');
+      const tlEl = document.getElementById('status-top-long');
+      const tsEl = document.getElementById('status-top-short');
+      if (tlEl) tlEl.textContent = topLong;
+      if (tsEl) tsEl.textContent = topShort;
     }
 
     function renderRegime(d) {
@@ -2786,13 +2845,7 @@
     }
 
     function renderStructure(d) {
-      const regimeName = d.regime?.name || '?';
-      const computedAt = d.signals_computed_at || d.ts || '';
-      document.getElementById('struct-primary').innerHTML =
-        `<div style="font-size:0.72rem;color:var(--text-muted);margin-bottom:6px;font-weight:600;letter-spacing:0.5px;">REGIME: <span style="color:var(--accent-blue);">${regimeName}</span> &middot; computed ${computedAt}</div>` +
-        `<div>${d.structure.primary}</div>`;
-      document.getElementById('struct-secondary').innerHTML = `<strong>Alt:</strong> ${d.structure.secondary}`;
-      document.getElementById('struct-notes').innerHTML = `💡 ${d.structure.notes}`;
+      // Trade Structure card removed
     }
 
     function renderUniverse(d) {
@@ -2889,13 +2942,8 @@ function renderVerdictTrace(trace) {
     return;
   }
   
-  // Show panel only for WAIT/NO_TRADE decisions
+  // Always show panel if trace data is available
   const action = trace.action || '';
-  if (!action.includes('WAIT') && !action.includes('NO_TRADE')) {
-    document.getElementById('trace-panel').style.display = 'none';
-    return;
-  }
-  
   document.getElementById('trace-panel').style.display = 'block';
   
   // Key inputs
@@ -2954,7 +3002,7 @@ function renderAll(data) {
       renderSectors(data);
       renderRankTable('leaders-table', data.leaders);
       renderRankTable('laggards-table', data.laggards);
-      renderStructure(data);
+      // renderStructure(data);
       renderUniverse(data);
       if (data.skips) renderSkipPanel(data.skips);
       if (data.verdict_trace) renderVerdictTrace(data.verdict_trace);

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -69,14 +69,14 @@ class Journal:
     def log_regime(self, payload: dict) -> None:
         self.conn.execute(
             "INSERT INTO regime_snapshots(ts, regime, payload) VALUES (?,?,?)",
-            (datetime.utcnow().isoformat(), payload.get("regime"), json.dumps(payload)),
+            (datetime.now(timezone.utc).isoformat(), payload.get("regime"), json.dumps(payload)),
         )
         self.conn.commit()
 
     def log_flow(self, payload: dict) -> None:
         self.conn.execute(
             "INSERT INTO flow_snapshots(ts, payload) VALUES (?,?)",
-            (datetime.utcnow().isoformat(), json.dumps(payload, default=str)),
+            (datetime.now(timezone.utc).isoformat(), json.dumps(payload, default=str)),
         )
         self.conn.commit()
 
@@ -85,7 +85,7 @@ class Journal:
             """INSERT INTO trades(opened_at, symbol, structure, side, qty, entry, stop, target, risk_rupees, regime, notes)
                VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
             (
-                kw.get("opened_at", datetime.utcnow().isoformat()),
+                kw.get("opened_at", datetime.now(timezone.utc).isoformat()),
                 kw["symbol"], kw["structure"], kw["side"], kw["qty"],
                 kw.get("entry"), kw.get("stop"), kw.get("target"),
                 kw.get("risk_rupees"), kw.get("regime"), kw.get("notes", ""),
@@ -97,7 +97,7 @@ class Journal:
     def close_trade(self, trade_id: int, exit_price: float, pnl_rupees: float) -> None:
         self.conn.execute(
             "UPDATE trades SET closed_at=?, exit_price=?, pnl_rupees=? WHERE id=?",
-            (datetime.utcnow().isoformat(), exit_price, pnl_rupees, trade_id),
+            (datetime.now(timezone.utc).isoformat(), exit_price, pnl_rupees, trade_id),
         )
         self.conn.commit()
 
@@ -110,7 +110,7 @@ class Journal:
                skip_reason, regime, flow_bias, risk_gate, notes)
                VALUES (?,?,?,?,?,?,?,?,?)""",
             (
-                datetime.utcnow().isoformat(),
+                datetime.now(timezone.utc).isoformat(),
                 symbol, direction, alert_confidence,
                 skip_reason, regime, flow_bias, risk_gate, notes,
             ),

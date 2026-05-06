@@ -4,14 +4,20 @@ import yaml
 
 
 def _expand(value):
-    """Expand environment variables in config values using os.path.expandvars.
+    """Expand environment variables in config values.
     
     Supports ${VAR} and $VAR syntax. Returns empty string for undefined vars.
     """
     if isinstance(value, str):
-        # os.path.expandvars is safer than custom regex substitution
-        # It handles ${VAR} and $VAR syntax and doesn't allow arbitrary code execution
-        return os.path.expandvars(value)
+        import re
+        # Match both $VAR and ${VAR}
+        pattern = re.compile(r'\$(?:(\w+)|{(\w+)})')
+        
+        def replace(match):
+            var_name = match.group(1) or match.group(2)
+            return os.environ.get(var_name, "")
+            
+        return pattern.sub(replace, value)
     if isinstance(value, dict):
         return {k: _expand(v) for k, v in value.items()}
     if isinstance(value, list):

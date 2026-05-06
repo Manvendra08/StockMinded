@@ -311,6 +311,11 @@ def calc_structure_max_loss(structure_type: str, net_credit: float, wing_width: 
         return max(0, (wing_width * lot_size) - net_credit)
     elif structure_type == "credit_spread":
         return max(0, (wing_width * lot_size) - net_credit)
+    elif structure_type == "naked_short":
+        # Naked options have theoretically unlimited loss. 
+        # For paper trading risk gating, we'll proxy max loss as 20% of the underlying's value.
+        # In Nifty terms, ~24000 * 0.20 = 4800 points * 50 = 240,000 per lot.
+        return 250000.0 * lot_size
     
     return wing_width * lot_size
 
@@ -343,14 +348,17 @@ def calc_exit_levels(entry_net_credit: float, max_loss: float, cfg: dict = None)
     }
 
 
-def check_naked_legs(legs: list) -> Tuple[bool, str]:
+def check_naked_legs(legs: list, allow_naked: bool = False) -> Tuple[bool, str]:
     """
-    Verify that no leg is a naked short option.
-    All short positions must have corresponding protective legs.
+    Verify that no leg is a naked short option, unless allow_naked is True.
+    All short positions must have corresponding protective legs in defined-risk mode.
     """
     if not legs:
         return True, "No legs"
     
+    if allow_naked:
+        return True, "Naked allowed for this strategy"
+
     def _get(leg, key):
         if isinstance(leg, dict):
             return leg.get(key)

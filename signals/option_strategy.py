@@ -63,7 +63,7 @@ class NiftyOptionSetup:
     exit_rules: dict = field(default_factory=dict)
 
 
-def pick_nifty_strategy(regime: str, bias: str, vix: float, vix_change_pct: float,
+def pick_nifty_strategy(data: dict, regime: str, bias: str, vix: float, vix_change_pct: float,
                         pcr: Optional[float] = None, cfg: dict = None) -> Optional[NiftyOptionSetup]:
     """Select NIFTY option-selling strategy based on regime/bias/VIX."""
     if cfg is None:
@@ -87,7 +87,14 @@ def pick_nifty_strategy(regime: str, bias: str, vix: float, vix_change_pct: floa
                                 suitable=False, skip_reason=f"VIX expanding {vix_change_pct:.1f}% > {vol_exp_thresh}%")
     
     mode = nifty_cfg.get("mode", "positional")
-    
+    verdict = data.get("verdict", {})
+    nifty_v = verdict.get("nifty", {})
+    v_action = nifty_v.get("action", "WAIT")
+
+    # If the verdict explicitly requested Naked Selling, prioritize it
+    if v_action == "NAKED_OPTION_SELL":
+        return _build_naked_selling(regime, bias, vix, pcr, cfg, mode)
+
     if regime in ("RANGE_LOW_VOL", "VOL_CONTRACTION"):
         return _build_iron_condor(regime, bias, vix, pcr, cfg, mode, vol_expansion_blocked)
     elif regime == "RANGE_HIGH_VOL" and not vol_expansion_blocked:
@@ -97,6 +104,21 @@ def pick_nifty_strategy(regime: str, bias: str, vix: float, vix_change_pct: floa
     elif regime == "TREND_DOWN" and bias in ("SHORT", "BEAR_FLOW"):
         return _build_bear_call_spread(regime, bias, vix, pcr, cfg, mode, vol_expansion_blocked)
     return None
+
+def _build_naked_selling(regime: str, bias: str, vix: float, pcr: Optional[float],
+                         cfg: dict, mode: str) -> NiftyOptionSetup:
+    nifty_cfg = cfg.get("nifty_options", {})
+    direction = "LONG" if bias in ("LONG", "BULL_FLOW") else "SHORT"
+    strategy = "NAKED_PUT_SELL" if direction == "LONG" else "NAKED_CALL_SELL"
+    return NiftyOptionSetup(
+        symbol="NIFTY", mode=mode, strategy=strategy, regime=regime, bias=bias,
+        vix=vix, pcr=pcr, wing_width=0, entry_reason=f"Directional bias {bias} -> Naked {strategy}",
+        suitable=True,
+        exit_rules={"profit_take_pct": nifty_cfg.get("profit_take_pct", 0.50),
+                    "stop_loss_mult": nifty_cfg.get("stop_loss_mult", 1.25),
+                    "vix_spike_exit_pct": nifty_cfg.get("vix_spike_exit_pct", 10.0),
+                    "eod_exit": mode == "intraday", "expiry_exit": mode == "positional"}
+    )
 
 
 def _build_iron_condor(regime: str, bias: str, vix: float, pcr: Optional[float],
@@ -179,6 +201,8 @@ def resolve_nifty_structure(setup: NiftyOptionSetup, chain: pd.DataFrame,
     
     wing = setup.wing_width
     resolved_legs = []
+    net_credit = 0.0
+    max_loss = 0.0
     
     if setup.strategy in ("IRON_CONDOR", "IRON_CONDOR_WIDE"):
         short_put = _nearest(atm - wing, strikes, prefer_higher=False)
@@ -207,7 +231,8 @@ def resolve_nifty_structure(setup: NiftyOptionSetup, chain: pd.DataFrame,
             ResolvedLeg("SELL", "CE", short_call, expiry, 1, lot_size, scr.iloc[0]["ce_ltp"]),
             ResolvedLeg("BUY", "CE", long_call, expiry, 1, lot_size, lcr.iloc[0]["ce_ltp"]),
         ]
-        setup.breakevens = [short_put, short_call]
+        credit_per_lot = net_credit / lot_size
+        setup.breakevens = [short_put - credit_per_lot, short_call + credit_per_lot]
         setup.short_strikes = [short_put, short_call]
         
     elif setup.strategy in ("BULL_PUT_SPREAD", "BEAR_CALL_SPREAD"):
@@ -236,7 +261,30 @@ def resolve_nifty_structure(setup: NiftyOptionSetup, chain: pd.DataFrame,
             ResolvedLeg("SELL", leg_type, short_s, expiry, 1, lot_size, short_prem),
             ResolvedLeg("BUY", leg_type, long_s, expiry, 1, lot_size, long_prem),
         ]
-        setup.breakevens = [short_s]
+        credit_per_lot = net_credit / lot_size
+        setup.breakevens = [short_s - credit_per_lot if leg_type == "PE" else short_s + credit_per_lot]
+        setup.short_strikes = [short_s]
+    
+    elif setup.strategy in ("NAKED_PUT_SELL", "NAKED_CALL_SELL"):
+        leg_type = "PE" if setup.strategy == "NAKED_PUT_SELL" else "CE"
+        # Sell OTM delta 20-30 or 1 strike OTM
+        short_s = _nearest(atm - 100 if leg_type == "PE" else atm + 100, strikes, 
+                          prefer_higher=(leg_type == "CE"))
+        
+        sr = chain[chain["strike"] == short_s]
+        if sr.empty:
+            setup.suitable = False
+            return setup
+            
+        expiry = chain.iloc[0]["expiry"]
+        prem = sr.iloc[0][f"{leg_type.lower()}_ltp"]
+        
+        resolved_legs = [
+            ResolvedLeg("SELL", leg_type, short_s, expiry, 1, lot_size, prem),
+        ]
+        net_credit = prem * lot_size
+        max_loss = 250000.0 * lot_size # Proxy for naked
+        setup.breakevens = [short_s - prem if leg_type == "PE" else short_s + prem]
         setup.short_strikes = [short_s]
     
     setup.legs = resolved_legs

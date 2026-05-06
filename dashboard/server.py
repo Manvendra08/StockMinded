@@ -10,7 +10,7 @@ import os
 import sys
 import traceback
 from dataclasses import asdict
-from datetime import datetime, date, timezone, timedelta
+from datetime import datetime, date, time, timezone, timedelta
 from pathlib import Path
 
 # Ensure project root is on sys.path so signal imports work
@@ -35,6 +35,7 @@ from ops.alerts import Alerter
 from ops.journal import Journal
 
 app = Flask(__name__, static_folder=str(Path(__file__).parent))
+app.json.ensure_ascii = False  # Allow native UTF-8 (like Rupee symbol) in JSON responses
 
 # -- cache in memory so refresh is instant after first load --------
 _cache: dict = {}
@@ -238,14 +239,22 @@ def _run_engine() -> dict:
             "margin_util_cap": risk_cfg.get("margin_util_cap", 0),
         },
     }
-    result["verdict"] = verdict_mod.build_trade_verdict(result).to_dict()
+    # Compute verdict using FULL data before slicing leaders/laggards for UI
+    result_for_verdict = {
+        **result,
+        "leaders": [{"quintile": r.quintile, "symbol": r.symbol} for r in longs],
+        "laggards": [{"quintile": r.quintile, "symbol": r.symbol} for r in shorts]
+    }
+    result["verdict"] = verdict_mod.build_trade_verdict(result_for_verdict).to_dict()
 
     # --- Skip Reasons (Today's) ---
     try:
         journal = Journal(cfg["paths"]["journal_db"])
         ist = timezone(timedelta(hours=5, minutes=30))
-        today_ist = datetime.now(ist).date()
-        start_ist = datetime.combine(today_ist, datetime.min.time(), tzinfo=ist)
+        now_ist = datetime.now(ist)
+        # Shift logical day so that 'today' rolls over at 6:00 AM IST instead of midnight
+        logical_date = (now_ist - timedelta(hours=6)).date()
+        start_ist = datetime.combine(logical_date, time(6, 0), tzinfo=ist)
         start_utc = start_ist.astimezone(timezone.utc).replace(tzinfo=None)
         skip_rows = journal.get_skipped_trades(limit=50, since_date=start_utc.isoformat())
 
@@ -275,7 +284,7 @@ def _run_engine() -> dict:
     freshness = result.get("data_freshness", {})
     result["verdict_trace"] = {
         "inputs": {
-            "regime": regime.get("name"),
+            "regime": regime.get("name") or regime.get("regime"),
             "trend_score": regime.get("trend_score"),
             "adx": regime.get("adx"),
             "vix": regime.get("vix"),
@@ -337,7 +346,7 @@ def _generate_trade_alerts(data: dict) -> list[dict]:
     nifty = data.get("nifty", {})
     banknifty = data.get("banknifty", {})
 
-    regime_name = regime.get("name", "")
+    regime_name = str(regime.get("name") or regime.get("regime") or "")
     bias = flows.get("bias", "NEUTRAL")
     capital = risk.get("capital", 7000000)
     per_trade_risk_pct = risk.get("per_trade_pct", 0.0075)
@@ -352,13 +361,27 @@ def _generate_trade_alerts(data: dict) -> list[dict]:
     breadth = regime.get("breadth_pct_above_50dma", 0)
     trend_score = regime.get("trend_score", 0)
     trade_verdict = data.get("verdict") or verdict_mod.build_trade_verdict(data).to_dict()
-    verdict_action = trade_verdict.get("action", "WAIT")
-    can_trade_equity = bool(trade_verdict.get("can_trade_equity"))
-    can_trade_options = bool(trade_verdict.get("can_trade_options"))
+    # --- VERDICT EXTRACTION ---
+    stock_v = trade_verdict.get("stock", {})
+    nifty_v = trade_verdict.get("nifty", {})
+    
+    stock_action = stock_v.get("action", "WAIT")
+    nifty_action = nifty_v.get("action", "WAIT")
+    
+    can_trade_equity = bool(stock_v.get("can_trade"))
+    can_trade_options = bool(nifty_v.get("can_trade"))
+
+    # Derive verdict_action for backward compatibility in filters
+    if can_trade_equity:
+        verdict_action = stock_action
+    elif can_trade_options:
+        verdict_action = nifty_action
+    else:
+        verdict_action = "WAIT"
 
     # --- PRO FILTERS & GATING ---
-    allow_longs = can_trade_equity and verdict_action == "LONG_ONLY"
-    allow_shorts = can_trade_equity and verdict_action == "SHORT_ONLY"
+    allow_longs = can_trade_equity and stock_action in ("LONG_ONLY", "LONG_AND_SHORT")
+    allow_shorts = can_trade_equity and stock_action in ("SHORT_ONLY", "LONG_AND_SHORT")
     
     # 2. Time filter: avoid entries after 14:45 to reduce EOD churn
     now_ist = datetime.now(timezone(timedelta(hours=5, minutes=30)))
@@ -389,41 +412,28 @@ def _generate_trade_alerts(data: dict) -> list[dict]:
         })
         return alerts
 
-    # --- INDEX ALERTS ---
-    if allow_longs and trend_score >= 2:
-        sl_dist = nifty_px * 0.005
-        alerts.append({
-            "symbol": "NIFTY", "direction": "LONG", "entry_trigger": f"Breakout > {nifty_px:.0f}",
-            "entry_price": nifty_px, "stop": round(nifty_px - sl_dist, 2),
-            "target1": round(nifty_px + sl_dist * 2, 2), "target2": round(nifty_px + sl_dist * 3, 2),
-            "trail_rule": "Trail SL by 0.25% after T1", "qty": 50, "risk_rupees": round(sl_dist * 50, 2),
-            "confidence": "HIGH" if bias == "LONG" else "MEDIUM", "no_trade_reason": None,
-            "evidence": [f"Regime: {regime_name}", f"Trend: {trend_score}", f"Bias: {bias}", f"Breadth: {breadth}%"],
-            # Metadata for tracking
-            "planned_risk": round(sl_dist * 50, 2),
-            "entry_rule": f"Breakout > {nifty_px:.0f} in {regime_name} regime",
-            "trail_rule": "Trail SL by 0.25% after T1",
-            "source_regime": regime_name,
-            "flow_bias": bias,
-        })
-    elif allow_shorts and trend_score <= -2:
-        sl_dist = nifty_px * 0.005
-        alerts.append({
-            "symbol": "NIFTY", "direction": "SHORT", "entry_trigger": f"Breakdown < {nifty_px:.0f}",
-            "entry_price": nifty_px, "stop": round(nifty_px + sl_dist, 2),
-            "target1": round(nifty_px - sl_dist * 2, 2), "target2": round(nifty_px - sl_dist * 3, 2),
-            "trail_rule": "Trail SL by 0.25% after T1", "qty": 50, "risk_rupees": round(sl_dist * 50, 2),
-            "confidence": "HIGH" if bias == "SHORT" else "MEDIUM", "no_trade_reason": None,
-            "evidence": [f"Regime: {regime_name}", f"Trend: {trend_score}", f"Bias: {bias}"]
-        })
-    elif can_trade_options and verdict_action == "OPTION_SELL_DEFINED_RISK" and regime_name in ("RANGE_LOW_VOL", "RANGE_HIGH_VOL", "VOL_CONTRACTION"):
-        if max_pain:
+    # --- NIFTY OPTIONS ALERTS ---
+    if can_trade_options:
+        if nifty_action == "OPTION_SELL_DEFINED_RISK" and regime_name in ("RANGE_LOW_VOL", "RANGE_HIGH_VOL", "VOL_CONTRACTION"):
+            if max_pain:
+                alerts.append({
+                    "symbol": "NIFTY", "direction": "NEUTRAL", "entry_trigger": f"Iron Condor @ Max Pain {max_pain:.0f}",
+                    "entry_price": nifty_px, "stop": "Defined Risk", "target1": "Theta Decay", "target2": None,
+                    "trail_rule": "Adjust wings if breached", "qty": 50, "risk_rupees": round(nifty_px * 0.01 * 50, 2),
+                    "confidence": "MEDIUM", "no_trade_reason": None,
+                    "evidence": [f"Regime: {regime_name}", f"PCR: {pcr}", f"Max Pain: {max_pain}"],
+                    "verdict_action": "OPTION_SELL_DEFINED_RISK"
+                })
+        elif nifty_action == "NAKED_OPTION_SELL":
+            direction = "LONG" if (nifty_v.get("tone") == "bull" or bias == "LONG") else "SHORT"
+            side = "PUTS" if direction == "LONG" else "CALLS"
             alerts.append({
-                "symbol": "NIFTY", "direction": "NEUTRAL", "entry_trigger": f"Iron Condor @ Max Pain {max_pain:.0f}",
-                "entry_price": nifty_px, "stop": "Defined Risk", "target1": "Theta Decay", "target2": None,
-                "trail_rule": "Adjust wings if breached", "qty": 50, "risk_rupees": round(nifty_px * 0.01 * 50, 2),
-                "confidence": "MEDIUM", "no_trade_reason": None,
-                "evidence": [f"Regime: {regime_name}", f"PCR: {pcr}", f"Max Pain: {max_pain}"]
+                "symbol": "NIFTY", "direction": direction, "entry_trigger": f"Naked {side} Sell ({nifty_v.get('confidence')} Conf)",
+                "entry_price": nifty_px, "stop": "20% Premium SL", "target1": "80% Premium Decay", "target2": None,
+                "trail_rule": "Trail SL to cost after 50% decay", "qty": 50, "risk_rupees": 5000,
+                "confidence": nifty_v.get("confidence", "MEDIUM"), "no_trade_reason": None,
+                "evidence": [f"Regime: {regime_name}", f"Trend: {trend_score}", f"Bias: {bias}"],
+                "verdict_action": "NAKED_OPTION_SELL"
             })
 
     # BankNifty Divergence
@@ -435,7 +445,7 @@ def _generate_trade_alerts(data: dict) -> list[dict]:
                 "symbol": "BANKNIFTY", "direction": direction, "entry_trigger": f"Divergence play ({bn_chg:+.2f}% vs Nifty {nifty_chg:+.2f}%)",
                 "entry_price": bn_px, "stop": round(bn_px - sl_dist if direction == "LONG" else bn_px + sl_dist, 2),
                 "target1": round(bn_px + sl_dist * 2 if direction == "LONG" else bn_px - sl_dist * 2, 2), "target2": None,
-                "trail_rule": "Fixed SL", "qty": 15, "risk_rupees": round(sl_dist * 15, 2),
+                "trail_rule": "Fixed SL", "qty": 30, "risk_rupees": round(sl_dist * 30, 2),
                 "confidence": "LOW", "no_trade_reason": None,
                 "evidence": [f"BN Divergence: {abs(bn_chg - nifty_chg):.2f}%"]
             })
@@ -446,39 +456,31 @@ def _generate_trade_alerts(data: dict) -> list[dict]:
     if allow_longs:
         for stock in leaders[:8]:
             sym = stock["symbol"]
-            px = nifty_px # Placeholder, ideally fetch LTP. We'll use a proxy or assume alert consumer fetches LTP.
-            # For structured alerts, we provide a reference price. The paper trader will fetch actual LTP on entry.
-            ref_price = 1000 # Placeholder. Paper trader overrides with LTP.
-            sl_pct = 0.02
-            stop = round(ref_price * (1 - sl_pct), 2)
-            risk_per_share = ref_price - stop
-            qty = max(1, int(risk_amt / risk_per_share)) if risk_per_share > 0 else 1
-            
+            q = int(stock.get("quintile", 0))
+            conf = "HIGH" if q >= 5 else ("MEDIUM" if q >= 4 else "LOW")
             alerts.append({
-                "symbol": sym, "direction": "LONG", "entry_trigger": "Pullback to 50DMA or Breakout",
-                "entry_price": ref_price, "stop": stop,
-                "target1": round(ref_price * 1.04, 2), "target2": round(ref_price * 1.08, 2),
-                "trail_rule": "Move SL to cost at T1", "qty": qty, "risk_rupees": round(risk_amt, 2),
-                "confidence": "HIGH" if stock["quintile"] == 5 else "MEDIUM", "no_trade_reason": None,
-                "evidence": [f"RS Slope: {stock['rs_slope']}", f"Q: {stock['quintile']}", f"vs 50DMA: {stock['pct_vs_50dma']}%"]
+                "symbol": sym, "direction": "LONG", "entry_trigger": "A-Grade RS leader: pullback/breakout",
+                "entry_price": None, "stop": None,
+                "target1": None, "target2": None,
+                "trail_rule": "Move SL to cost at T1", "qty": 0, "risk_rupees": round(risk_amt, 2),
+                "confidence": conf,
+                "no_trade_reason": None,
+                "evidence": [f"RS Slope: {stock['rs_slope']}", f"Q: {q}", f"vs 50DMA: {stock['pct_vs_50dma']}%"]
             })
 
     if allow_shorts:
         for stock in laggards[:5]:
             sym = stock["symbol"]
-            ref_price = 1000
-            sl_pct = 0.02
-            stop = round(ref_price * (1 + sl_pct), 2)
-            risk_per_share = stop - ref_price
-            qty = max(1, int(risk_amt / risk_per_share)) if risk_per_share > 0 else 1
-            
+            q = int(stock.get("quintile", 0))
+            conf = "HIGH" if q >= 5 else ("MEDIUM" if q >= 4 else "LOW")
             alerts.append({
-                "symbol": sym, "direction": "SHORT", "entry_trigger": "Bounce to 50DMA or Breakdown",
-                "entry_price": ref_price, "stop": stop,
-                "target1": round(ref_price * 0.96, 2), "target2": round(ref_price * 0.92, 2),
-                "trail_rule": "Move SL to cost at T1", "qty": qty, "risk_rupees": round(risk_amt, 2),
-                "confidence": "HIGH" if stock["quintile"] == 1 else "MEDIUM", "no_trade_reason": None,
-                "evidence": [f"RS Slope: {stock['rs_slope']}", f"Q: {stock['quintile']}", f"vs 50DMA: {stock['pct_vs_50dma']}%"]
+                "symbol": sym, "direction": "SHORT", "entry_trigger": "A-Grade RS laggard: bounce/breakdown",
+                "entry_price": None, "stop": None,
+                "target1": None, "target2": None,
+                "trail_rule": "Move SL to cost at T1", "qty": 0, "risk_rupees": round(risk_amt, 2),
+                "confidence": conf,
+                "no_trade_reason": None,
+                "evidence": [f"RS Slope: {stock['rs_slope']}", f"Q: {q}", f"vs 50DMA: {stock['pct_vs_50dma']}%"]
             })
 
     for alert in alerts:
@@ -767,6 +769,17 @@ def api_paper_trades():
         trades = pt.get_all_trades(limit=100)
         stats = pt.get_stats()
         return jsonify({"trades": trades, "stats": stats})
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/paper/learned-filters")
+def api_paper_learned_filters():
+    """Get active learned filters."""
+    try:
+        filters = pt.get_learned_filters()
+        return jsonify({"filters": filters})
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -1090,8 +1103,10 @@ import time
 
 def _automation_worker():
     """Background task to keep the engine fresh and automated."""
-    print("Background worker started...")
+    start_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    print(f"[{start_time}] Background worker started...")
     last_engine_run = 0
+    data = {} # Maintain scope for exit checks
     
     while True:
         try:
@@ -1163,7 +1178,7 @@ def _automation_worker():
                             db_path = cfg.get("options", {}).get("iv_history_db", "./data/iv_history.sqlite")
 
                             for sym in underlyings:
-                                if True:  # process each underlying independently of equity alerts
+                                try:
                                     chain = chain_snapshot(sym)
                                     spot = (data.get("nifty", {}).get("close") if sym == "NIFTY"
                                             else data.get("banknifty", {}).get("close")) or 0
@@ -1190,22 +1205,24 @@ def _automation_worker():
                                                     f"Regime: `{regime_name}` | Bias: `{bias}` | IVR: `{ivr:.0f}` | VIX: `{vix:.1f}`"
                                                 )
                                                 Alerter(token, chat_id).send(msg)
+                                except Exception as sym_err:
+                                    print(f"  > Underlying {sym} automation failed: {sym_err}")
                         except Exception as oe:
-                            print(f"  > Options automation error: {oe}")
+                            print(f"  > Options automation core error: {oe}")
                 last_engine_run = now
 
-            # 2. SL/TGT/EOD check — paper_trader internally no-ops outside market hours
             # except for the 15:25-15:35 EOD flatten window.
             pt.check_and_close_trades()
             pt.check_option_exits()
             try:
-                vix_now = data.get("regime", {}).get("vix", 15.0) if "data" in locals() else 15.0
+                vix_now = data.get("regime", {}).get("vix", 15.0)
                 pt.check_nifty_option_exits(vix_current=vix_now, cfg=load_config())
             except Exception as ex:
-                print(f"NIFTY exit check failed: {ex}")
+                print(f"  > NIFTY exit check failed: {ex}")
             
         except Exception as e:
-            print(f"Error in automation worker: {e}")
+            ts = datetime.now().strftime('%H:%M:%S')
+            print(f"[{ts}] CRITICAL: Automation worker loop error: {e}")
             traceback.print_exc()
             
         time.sleep(60) # Wake up every minute

@@ -27,9 +27,9 @@ _OPTION_CHAIN_SOURCE: dict[str, str] = {}
 
 def _get_nse_session():
     global _NSE_SESSION, _NSE_SESSION_TS
-    now = time.time()
     # Use lock to prevent race condition when refreshing session
     with _NSE_SESSION_LOCK:
+        now = time.time()
         # Refresh session every 10 minutes or if not exists
         if _NSE_SESSION is None or (now - _NSE_SESSION_TS) > 600:
             headers = {
@@ -543,6 +543,14 @@ _R360_HEADERS = {
     "X-Requested-With": "XMLHttpRequest",
 }
 
+# Research360 uses specific internal names for indices
+_R360_SYMBOL_MAP = {
+    "NIFTY": "NIFTY50",
+    "BANKNIFTY": "NIFTYBANK",
+    "FINNIFTY": "NIFTYFINSERVICE",
+    "MIDCPNIFTY": "NFTMIDSELE",
+}
+
 
 def _get_r360_session() -> requests.Session:
     global _R360_SESSION, _R360_SESSION_TS
@@ -566,10 +574,11 @@ def _get_r360_session() -> requests.Session:
 
 def _r360_expiries(session: requests.Session, symbol: str) -> list[str]:
     import re as _re
+    # Research360 expiries endpoint uses 'symbol' parameter for indices
     r = session.get(
         "https://www.research360.in/fno/option/ajax/optionChainExp.php",
         headers=_R360_HEADERS,
-        params={"table_flag": "optionChain", "stock": symbol},
+        params={"table_flag": "optionChain", "symbol": symbol},
         timeout=15,
     )
     r.raise_for_status()
@@ -650,19 +659,21 @@ def _r360_to_nse_chain(symbol: str, raw: dict, expiry: str) -> dict:
 
 def _option_chain_from_research360(symbol: str) -> dict:
     """Scrape option chain from Research360 PHP AJAX endpoint."""
-    # Research360 uses 'NIFTY', 'BANKNIFTY', 'FINNIFTY' etc. directly
     sym = symbol.upper()
+    # Map to Research360 specific index names if needed
+    r360_sym = _R360_SYMBOL_MAP.get(sym, sym)
+
     session = _get_r360_session()
     if session is None:
         return {"records": {"data": []}}
-    expiries = _r360_expiries(session, sym)
+    expiries = _r360_expiries(session, r360_sym)
     if not expiries:
         return {"records": {"data": []}}
     expiry = expiries[0]
     r = session.post(
         "https://www.research360.in/fno/option/ajax/optionChainApi.php",
         headers=_R360_HEADERS,
-        data={"stock": sym, "expiry": expiry, "showall": "on", "showallnew": "on"},
+        data={"stock": r360_sym, "expiry": expiry, "showall": "on", "showallnew": "on"},
         timeout=30,
     )
     r.raise_for_status()
@@ -769,7 +780,19 @@ def option_chain(symbol: str = "NIFTY") -> dict:
                 print(f"[option_chain {fn.__name__}] failed for {symbol}: {e}")
         return {"records": {"data": []}}
     
-    # 1. Research360 — reliable, no auth needed for index option chains.
+    # 1. Broker/data API (Dhan). More stable than scraping public sites and provides prices.
+    try:
+        data = _option_chain_from_dhan(symbol)
+        if data and data.get("records", {}).get("data"):
+            # Ensure at least some LTPs are non-zero to be valid
+            records = data.get("records", {}).get("data", [])
+            has_prices = any(r.get("CE", {}).get("lastPrice", 0) > 0 or r.get("PE", {}).get("lastPrice", 0) > 0 for r in records)
+            if has_prices:
+                return _save_chain(data)
+    except Exception as e:
+        print(f"[option_chain dhan] failed for {symbol}: {e}")
+
+    # 2. Research360 — reliable fallback for OI, but often lacks LTPs for all strikes.
     try:
         data = _option_chain_from_research360(symbol)
         if data and data.get("records", {}).get("data"):
@@ -777,15 +800,7 @@ def option_chain(symbol: str = "NIFTY") -> dict:
     except Exception as e:
         print(f"[option_chain research360] failed for {symbol}: {e}")
 
-    # 2. Broker/data API (Dhan). More stable than scraping public sites.
-    try:
-        data = _option_chain_from_dhan(symbol)
-        if data and data.get("records", {}).get("data"):
-            return _save_chain(data)
-    except Exception as e:
-        print(f"[option_chain dhan] failed for {symbol}: {e}")
-
-    # 2. Try robust direct fetch first (more reliable than nsepython's per-call session)
+    # 3. Try robust direct fetch (NSE) as third option
     session = _get_nse_session()
     if session:
         for attempt in range(2):
@@ -858,7 +873,36 @@ def option_chain(symbol: str = "NIFTY") -> dict:
     if fallback.get("records", {}).get("data"):
         return fallback
 
-    return _load_cached_chain()
+    data = _load_cached_chain()
+    
+    # Enrichment step for Research360: If LTP is 0, try to patch with Dhan LTPs
+    if data.get("_source") == "research360":
+        try:
+            # We only need LTPs for the near-ATM strikes usually.
+            # Patching the whole chain is expensive, but paper trading needs it.
+            # Try to get underlying price first.
+            spot = data.get("records", {}).get("underlyingValue")
+            if spot:
+                # Use a secondary call to Dhan just for LTPs if available
+                dhan_data = _option_chain_from_dhan(symbol)
+                if dhan_data.get("records", {}).get("data"):
+                    # Create a map of strike+type -> LTP
+                    ltp_map = {}
+                    for row in dhan_data["records"]["data"]:
+                        s = row["strikePrice"]
+                        ltp_map[f"{s}_CE"] = row["CE"].get("lastPrice", 0)
+                        ltp_map[f"{s}_PE"] = row["PE"].get("lastPrice", 0)
+                    
+                    # Apply to Research360 data
+                    for row in data["records"]["data"]:
+                        s = row["strikePrice"]
+                        row["CE"]["lastPrice"] = ltp_map.get(f"{s}_CE", 0)
+                        row["PE"]["lastPrice"] = ltp_map.get(f"{s}_PE", 0)
+                    data["_source"] = "research360+dhan_ltp"
+        except Exception as e:
+            print(f"[option_chain enrichment] failed for {symbol}: {e}")
+
+    return data
 
 
 def get_pcr_max_pain_cached(symbol: str = "NIFTY") -> tuple[float | None, float | None, float | None, bool, bool, float | None, float | None]:
@@ -978,6 +1022,11 @@ def fii_dii_cash(days: int = 10) -> pd.DataFrame:
 
     if "date" in df.columns:
         df["date"] = pd.to_datetime(df["date"], format="%d-%b-%Y", errors="coerce")
+        # Fix #11: Filter by Segment if available to avoid double counting
+        cols = [c.lower() for c in df.columns]
+        if "segment" in cols:
+            seg_col = df.columns[cols.index("segment")]
+            df = df[df[seg_col].str.lower().str.contains("cash", na=False)]
         df = df.sort_values("date").tail(days).reset_index(drop=True)
     else:
         df = df.tail(days).reset_index(drop=True)
@@ -1096,10 +1145,15 @@ def universe_ohlc(tickers: list[str], period: str = "6mo") -> dict[str, pd.DataF
             else:
                 skipped += 1
         elif isinstance(df_dict.columns, pd.MultiIndex):
+            # Dynamic ticker level detection
             ticker_level = 0
-            # Newer yf might ignore group_by='ticker' sometimes and put tickers in level 1
             if 'Close' in df_dict.columns.levels[0] or 'close' in df_dict.columns.levels[0]:
                 ticker_level = 1
+            elif 'Close' in df_dict.columns.levels[1] or 'close' in df_dict.columns.levels[1]:
+                ticker_level = 0
+            else:
+                # Default to looking for tickers in level 0
+                ticker_level = 0
                 
             for yf_t in chunk:
                 sym = yf_t.replace('.NS', '')

@@ -1,26 +1,48 @@
-"""Trade verdict builder from regime, flow, breadth, and data quality."""
+"""Split Trade verdict builder: Directional Stock Picking vs. Nifty Option Selling."""
 from __future__ import annotations
-
 from dataclasses import asdict, dataclass
 
-
 @dataclass
-class TradeVerdict:
-    action: str
+class StockVerdict:
+    action: str  # LONG_ONLY, SHORT_ONLY, WAIT
     tone: str
-    bias: str
     confidence: str
     strategy: str
     top_long: str | None
     top_short: str | None
-    can_trade_equity: bool
-    can_trade_options: bool
+    can_trade: bool
     reasons: list[str]
     blocks: list[str]
 
-    def to_dict(self) -> dict:
-        return asdict(self)
+@dataclass
+class NiftyVerdict:
+    action: str  # OPTION_SELL_DEFINED_RISK, NAKED_OPTION_SELL, WAIT
+    tone: str
+    bias: str
+    confidence: str
+    strategy: str
+    can_trade: bool
+    reasons: list[str]
+    blocks: list[str]
 
+@dataclass
+class CombinedVerdict:
+    stock: StockVerdict
+    nifty: NiftyVerdict
+    
+    def to_dict(self) -> dict:
+        return {
+            "stock": asdict(self.stock),
+            "nifty": asdict(self.nifty),
+            # Keep legacy top-level fields for dashboard compatibility
+            "action": self.stock.action if self.stock.can_trade else self.nifty.action,
+            "strategy": f"Stocks: {self.stock.strategy} | Nifty: {self.nifty.strategy}",
+            "can_trade_equity": self.stock.can_trade,
+            "can_trade_options": self.nifty.can_trade,
+            "blocks": list(set(self.stock.blocks + self.nifty.blocks)),
+            "reasons": list(set(self.stock.reasons + self.nifty.reasons)),
+            "confidence": self.stock.confidence if self.stock.can_trade else self.nifty.confidence,
+        }
 
 def _num(v, default=0.0) -> float:
     try:
@@ -28,8 +50,7 @@ def _num(v, default=0.0) -> float:
     except (TypeError, ValueError):
         return default
 
-
-def build_trade_verdict(data: dict) -> TradeVerdict:
+def build_trade_verdict(data: dict) -> CombinedVerdict:
     regime = data.get("regime", {}) or {}
     flows = data.get("flows", {}) or {}
     structure = data.get("structure", {}) or {}
@@ -38,167 +59,127 @@ def build_trade_verdict(data: dict) -> TradeVerdict:
     freshness = data.get("data_freshness", {}) or {}
     source_errors = data.get("source_errors", []) or []
 
-    regime_name = str(regime.get("name") or "UNKNOWN")
-    bias = str(flows.get("bias") or "NEUTRAL")
+    regime_name = str(regime.get("name") or regime.get("regime") or "UNKNOWN")
+    bias = str(flows.get("bias") or flows.get("smart_money_bias") or "NEUTRAL")
     trend = _num(regime.get("trend_score"))
     adx = _num(regime.get("adx"))
     vix = _num(regime.get("vix"))
-    breadth_raw = regime.get("breadth_pct_above_50dma")
-    breadth = _num(breadth_raw, 50.0)
+    breadth = _num(regime.get("breadth_pct_above_50dma"), 50.0)
 
     pcr = flows.get("pcr_oi")
     max_pain = flows.get("max_pain")
     option_stale = bool(flows.get("pcr_stale")) or bool(flows.get("mp_stale"))
     option_ok = pcr is not None and max_pain is not None and not option_stale
-    data_stale = freshness.get("status") in ("OLD", "MISSING")
+    data_stale = freshness.get("status") in ("OLD", "MISSING") or freshness.get("status") == "MISSING"
 
-    reasons: list[str] = [
+    common_reasons = [
         f"Regime {regime_name}",
         f"Trend {trend:+.0f}/10",
         f"ADX {adx:.1f}",
-        f"Breadth {breadth:.1f}%",
-        f"Bias {bias}",
+        f"VIX {vix:.1f}",
     ]
-    blocks: list[str] = []
+    common_blocks = []
+    if data_stale: common_blocks.append("Market data stale")
+    if source_errors: common_blocks.append("Source errors present")
+    if vix >= 25: common_blocks.append("VIX extreme (>25)")
 
-    if data_stale:
-        blocks.append("Market data old")
-    if source_errors:
-        blocks.append("Data issues present")
-    if not option_ok:
-        blocks.append("Option chain/PCR/max-pain unavailable or stale")
-    if vix >= 24:
-        blocks.append("VIX extreme")
+    top_long = leaders[0].get("symbol") if leaders and isinstance(leaders[0], dict) else None
+    top_short = laggards[0].get("symbol") if laggards and isinstance(laggards[0], dict) else None
 
-    top_long = (
-        leaders[0].get("symbol")
-        if leaders and isinstance(leaders[0], dict)
-        else None
+    # --- 1. DIRECTIONAL STOCK PICKING SYSTEM ---
+    stock_action = "WAIT"
+    stock_strategy = "No clear directional edge for individual stocks."
+    stock_can_trade = False
+    stock_tone = "unclear"
+    stock_conf = "LOW"
+    stock_blocks = list(common_blocks)
+    
+    if not data_stale and vix < 25:
+        if regime_name == "TREND_UP" and trend >= 3 and breadth >= 45:
+            stock_action = "LONG_ONLY"
+            stock_tone = "bull"
+            stock_can_trade = True
+            stock_conf = "HIGH" if bias == "LONG" else "MEDIUM"
+            stock_strategy = "Long A-Grade leaders with RS Slope > 50."
+        elif regime_name == "TREND_DOWN" and trend <= -3 and breadth <= 55:
+            stock_action = "SHORT_ONLY"
+            stock_tone = "bear"
+            stock_can_trade = True
+            stock_conf = "HIGH" if bias == "SHORT" else "MEDIUM"
+            stock_strategy = "Short A-Grade laggards with RS Slope < -50."
+        elif regime_name in ("RANGE_HIGH_VOL", "RANGE_LOW_VOL", "VOL_CONTRACTION"):
+            # Sector rotation within range — directional RS picking valid even without strong trend
+            # if we have strong leaders/laggards.
+            q5_longs = sum(1 for l in leaders if l.get("quintile", 0) == 5)
+            q5_shorts = sum(1 for l in laggards if l.get("quintile", 0) == 5)
+            
+            if trend != 0 or bias != "NEUTRAL" or q5_longs >= 3 or q5_shorts >= 3:
+                # Weighted strength: Q5 count + Bias weight + Trend weight
+                # This allows strong leadership to override a weak index bias
+                long_str = q5_longs + (2 if bias == "LONG" else 0) + (4 if trend > 0 else 0)
+                short_str = q5_shorts + (2 if bias == "SHORT" else 0) + (4 if trend < 0 else 0)
+
+                if q5_longs >= 5 and q5_shorts >= 5:
+                    stock_action = "LONG_AND_SHORT"
+                elif long_str > short_str + 3:
+                    stock_action = "LONG_ONLY"
+                elif short_str > long_str + 3:
+                    stock_action = "SHORT_ONLY"
+                elif long_str > short_str:
+                    stock_action = "LONG_ONLY"
+                elif short_str > long_str:
+                    stock_action = "SHORT_ONLY"
+                else:
+                    stock_action = "LONG_AND_SHORT"
+                
+                stock_tone = "bull" if stock_action == "LONG_ONLY" else ("bear" if stock_action == "SHORT_ONLY" else "mixed")
+                stock_can_trade = True
+                stock_conf = "MEDIUM" if (q5_longs >= 5 or q5_shorts >= 5) else "LOW"
+                stock_strategy = f"Leadership {stock_action}: A-Grade RS candidates prioritized."
+    
+    stock_v = StockVerdict(
+        action=stock_action, tone=stock_tone, confidence=stock_conf,
+        strategy=stock_strategy, top_long=top_long, top_short=top_short,
+        can_trade=stock_can_trade, reasons=list(common_reasons), blocks=stock_blocks
     )
-    top_short = (
-        laggards[0].get("symbol")
-        if laggards and isinstance(laggards[0], dict)
-        else None
+
+    # --- 2. NIFTY OPTIONS SELLING SYSTEM ---
+    nifty_action = "WAIT"
+    nifty_strategy = "Waiting for fresh option chain / low VIX."
+    nifty_can_trade = False
+    nifty_tone = "range"
+    nifty_conf = "LOW"
+    nifty_blocks = list(common_blocks)
+    if not option_ok: nifty_blocks.append("Option chain stale/missing")
+
+    if not data_stale and vix < 25 and option_ok:
+        nifty_can_trade = True
+        # Logic for Naked vs. Defined Risk
+        if regime_name in ("TREND_UP", "TREND_DOWN") and abs(trend) >= 4:
+            # Strong trend -> Naked selling (higher gamma/delta risk ok)
+            nifty_action = "NAKED_OPTION_SELL"
+            nifty_conf = "HIGH" if (trend > 0 and bias == "LONG") or (trend < 0 and bias == "SHORT") else "MEDIUM"
+            nifty_tone = "bull" if trend > 0 else "bear"
+            side = "PUTS" if trend > 0 else "CALLS"
+            nifty_strategy = f"Naked {side} selling with SL (Aggressive Trend)."
+        elif regime_name in ("RANGE_HIGH_VOL", "RANGE_LOW_VOL", "VOL_CONTRACTION"):
+            # Range-bound -> Defined risk (Iron Condor / Iron Fly)
+            nifty_action = "OPTION_SELL_DEFINED_RISK"
+            nifty_conf = "MEDIUM"
+            nifty_strategy = structure.get("primary") or "Sell premium via Iron Condor/Fly (Range)."
+        else:
+            # Default to Naked if we have a clear bias even without strong trend
+            if bias in ("LONG", "SHORT"):
+                nifty_action = "NAKED_OPTION_SELL"
+                nifty_conf = "MEDIUM"
+                side = "PUTS" if bias == "LONG" else "CALLS"
+                nifty_strategy = f"Naked {side} selling basis Smart Money Bias."
+
+    nifty_v = NiftyVerdict(
+        action=nifty_action, tone=nifty_tone, bias=bias, confidence=nifty_conf,
+        strategy=nifty_strategy, can_trade=nifty_can_trade, 
+        reasons=list(common_reasons) + [f"PCR {pcr}", f"MaxPain {max_pain}"], 
+        blocks=nifty_blocks
     )
-    strategy = structure.get("primary") or "No clear setup"
 
-    if data_stale:
-        return TradeVerdict(
-            action="NO_TRADE_DATA_STALE",
-            tone="unclear",
-            bias=bias,
-            confidence="LOW",
-            strategy="No trade until market data refreshes.",
-            top_long=None,
-            top_short=None,
-            can_trade_equity=False,
-            can_trade_options=False,
-            reasons=reasons,
-            blocks=blocks,
-        )
-
-    if vix >= 24:
-        return TradeVerdict(
-            action="WAIT",
-            tone="bear",
-            bias=bias,
-            confidence="HIGH",
-            strategy="Stay flat; volatility is too high for fresh paper entries.",
-            top_long=None,
-            top_short=None,
-            can_trade_equity=False,
-            can_trade_options=False,
-            reasons=reasons,
-            blocks=blocks,
-        )
-
-    mixed_bear = trend <= -3 and breadth >= 60
-    mixed_bull = trend >= 3 and breadth <= 40
-    if mixed_bear or mixed_bull:
-        side = "index weak, breadth strong" if mixed_bear else "index firm, breadth weak"
-        return TradeVerdict(
-            action="WAIT",
-            tone="range",
-            bias=bias,
-            confidence="MEDIUM",
-            strategy=f"Mixed tape ({side}). Skip index direction; take only manual A-grade stock setups.",
-            top_long=top_long,
-            top_short=None if mixed_bear else top_short,
-            can_trade_equity=False,
-            can_trade_options=False,
-            reasons=reasons + [side],
-            blocks=blocks,
-        )
-
-    if regime_name == "TREND_UP" and trend >= 4 and breadth >= 50 and bias != "SHORT":
-        return TradeVerdict(
-            action="LONG_ONLY",
-            tone="bull",
-            bias=bias,
-            confidence="HIGH" if bias == "LONG" else "MEDIUM",
-            strategy="Long A-grade leaders only; no shorts.",
-            top_long=top_long,
-            top_short=None,
-            can_trade_equity=True,
-            can_trade_options=False,
-            reasons=reasons,
-            blocks=blocks,
-        )
-
-    if regime_name == "TREND_DOWN" and trend <= -4 and breadth <= 50 and bias != "LONG":
-        return TradeVerdict(
-            action="SHORT_ONLY",
-            tone="bear",
-            bias=bias,
-            confidence="HIGH" if bias == "SHORT" else "MEDIUM",
-            strategy="Short A-grade laggards only; no longs.",
-            top_long=None,
-            top_short=top_short,
-            can_trade_equity=True,
-            can_trade_options=False,
-            reasons=reasons,
-            blocks=blocks,
-        )
-
-    if regime_name in ("RANGE_LOW_VOL", "RANGE_HIGH_VOL", "VOL_CONTRACTION"):
-        if option_ok:
-            return TradeVerdict(
-                action="OPTION_SELL_DEFINED_RISK",
-                tone="range",
-                bias=bias,
-                confidence="HIGH" if regime_name == "VOL_CONTRACTION" else "MEDIUM",
-                strategy=strategy,
-                top_long=None,
-                top_short=None,
-                can_trade_equity=False,
-                can_trade_options=True,
-                reasons=reasons + [f"PCR {pcr}", f"Max pain {max_pain}"],
-                blocks=[b for b in blocks if not b.startswith("Option chain")],
-            )
-        return TradeVerdict(
-            action="WAIT",
-            tone="range",
-            bias=bias,
-            confidence="MEDIUM",
-            strategy="Wait. Range regime needs fresh option chain before selling premium.",
-            top_long=None,
-            top_short=None,
-            can_trade_equity=False,
-            can_trade_options=False,
-            reasons=reasons,
-            blocks=blocks,
-        )
-
-    return TradeVerdict(
-        action="WAIT",
-        tone="unclear",
-        bias=bias,
-        confidence="LOW",
-        strategy="No clean edge. Wait.",
-        top_long=top_long,
-        top_short=top_short,
-        can_trade_equity=False,
-        can_trade_options=False,
-        reasons=reasons,
-        blocks=blocks,
-    )
+    return CombinedVerdict(stock=stock_v, nifty=nifty_v)

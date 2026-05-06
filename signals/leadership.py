@@ -35,15 +35,18 @@ def _slope(series: pd.Series, n: int = 20) -> float:
 
 def rank_universe(stock_data: dict[str, pd.DataFrame], bench_df: pd.DataFrame) -> list[StockRank]:
     ranks: list[StockRank] = []
-    bench_close = bench_df["close"]
+    bench_close = bench_df["close"].dropna()
     for sym, df in stock_data.items():
-        if df is None or df.empty or len(df) < 50:
+        if df is None or df.empty:
             continue
-        rs = _rs_line(df["close"], bench_close)
+        valid_close = df["close"].dropna()
+        if len(valid_close) < 50:
+            continue
+        rs = _rs_line(valid_close, bench_close)
         slope = _slope(rs, 20)
-        sma50 = df["close"].rolling(50).mean().iloc[-1]
-        px = float(df["close"].iloc[-1])
-        if pd.isna(sma50):
+        sma50 = valid_close.rolling(50).mean().iloc[-1]
+        px = float(valid_close.iloc[-1])
+        if pd.isna(sma50) or pd.isna(px):
             continue
         pct_vs = 100 * (px / float(sma50) - 1)
         ranks.append(StockRank(sym, round(slope * 1e4, 2), round(pct_vs, 2), 0, bool(px > sma50)))
@@ -62,7 +65,7 @@ def rank_universe(stock_data: dict[str, pd.DataFrame], bench_df: pd.DataFrame) -
             r.quintile = 4
         elif slope > 30 and vs_dma > 5:
             r.quintile = 3
-        elif slope > 10 or vs_dma > 2:
+        elif slope > 10 and vs_dma > 2:
             r.quintile = 2
         elif slope < -100 and vs_dma < -20:
             r.quintile = 5
@@ -70,7 +73,7 @@ def rank_universe(stock_data: dict[str, pd.DataFrame], bench_df: pd.DataFrame) -
             r.quintile = 4
         elif slope < -30 and vs_dma < -5:
             r.quintile = 3
-        elif slope < -10 or vs_dma < -2:
+        elif slope < -10 and vs_dma < -2:
             r.quintile = 2
         else:
             r.quintile = 1

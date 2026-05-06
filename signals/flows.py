@@ -75,9 +75,14 @@ def fii_dii_5d_net() -> dict[str, float]:
 def sector_relative_strength(sector_data: dict[str, pd.DataFrame], lookback: int = 5) -> list[tuple[str, float]]:
     out = []
     for name, df in sector_data.items():
-        if df is None or df.empty or len(df) < lookback + 1:
+        if df is None or df.empty:
             continue
-        ret = 100 * (df["close"].iloc[-1] / df["close"].iloc[-lookback - 1] - 1)
+        valid_close = df["close"].dropna()
+        if len(valid_close) < lookback + 1:
+            continue
+        ret = 100 * (valid_close.iloc[-1] / valid_close.iloc[-lookback - 1] - 1)
+        if pd.isna(ret) or np.isinf(ret):
+            continue
         out.append((name, round(float(ret), 2)))
     return sorted(out, key=lambda x: x[1], reverse=True)
 

@@ -53,8 +53,8 @@ def _adx(df: pd.DataFrame, n: int = 14) -> float:
     atr = tr.ewm(alpha=1 / n, adjust=False).mean()
     plus_di = 100 * pd.Series(plus_dm, index=df.index).ewm(alpha=1 / n, adjust=False).mean() / atr
     minus_di = 100 * pd.Series(minus_dm, index=df.index).ewm(alpha=1 / n, adjust=False).mean() / atr
-    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
-    return float(dx.ewm(alpha=1 / n, adjust=False).mean().iloc[-1])
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, 1e-9)
+    return float(dx.ewm(alpha=1 / n, adjust=False).mean().fillna(0).iloc[-1])
 
 
 def _cmp(a: float, b: float, neutral_band: float = 0.0015) -> int:
