@@ -594,39 +594,62 @@ def _r360_to_nse_chain(symbol: str, raw: dict, expiry: str) -> dict:
         col0 = strikePrice
         col1 = CE openInterest
         col2 = PE openInterest
-        col3 = PE_OI / CE_OI per strike (PCR ratio — not LTP)
+        col3 = PE_OI / CE_OI per strike (PCR ratio)
         col4 = CE OI change (vs previous day)
         col5 = PE OI change (vs previous day)
 
-    LTP is NOT in datahc; it is only available for ~10 ATM strikes via
-    graphc/graphp arrays. We leave lastPrice = 0 since PCR/MaxPain only
-    require OI values.
+    LTP for ~10 near-ATM strikes is available via graphprice/graphc/graphp
+    arrays returned in the same response. We extract these and patch the
+    matching records so that strategy resolution gets real premiums.
     """
     datahc = raw.get("datahc") or []
+
+    # Build LTP lookup: strike -> CE/PE last price
+    # graphprice: list of ~10 near-ATM strikes
+    # graphc:     CE LTP for each strike in graphprice (same index)
+    # graphp:     PE LTP for each strike in graphprice (same index)
+    graphprice = raw.get("graphprice") or []
+    graphc_arr = raw.get("graphc") or []
+    graphp_arr = raw.get("graphp") or []
+    ltp_ce: dict[float, float] = {}
+    ltp_pe: dict[float, float] = {}
+    for i, s in enumerate(graphprice):
+        key = float(s)
+        if i < len(graphc_arr) and graphc_arr[i] is not None:
+            try:
+                ltp_ce[key] = float(graphc_arr[i])
+            except (TypeError, ValueError):
+                pass
+        if i < len(graphp_arr) and graphp_arr[i] is not None:
+            try:
+                ltp_pe[key] = float(graphp_arr[i])
+            except (TypeError, ValueError):
+                pass
+
     records = []
     for row in datahc:
         if len(row) < 3:
             continue
-        strike = row[0]
+        strike = float(row[0])
         ce_oi = int(row[1]) if row[1] else 0
         pe_oi = int(row[2]) if row[2] else 0
         ce_oi_chg = int(row[4]) if len(row) > 4 and row[4] else 0
         pe_oi_chg = int(row[5]) if len(row) > 5 and row[5] else 0
         records.append({
-            "strikePrice": float(strike),
+            "strikePrice": strike,
             "expiryDate": expiry,
             "CE": {
                 "openInterest": ce_oi,
                 "changeinOpenInterest": ce_oi_chg,
                 "totalTradedVolume": 0,
-                "lastPrice": 0.0,
+                "lastPrice": ltp_ce.get(strike, 0.0),
                 "impliedVolatility": 0.0,
             },
             "PE": {
                 "openInterest": pe_oi,
                 "changeinOpenInterest": pe_oi_chg,
                 "totalTradedVolume": 0,
-                "lastPrice": 0.0,
+                "lastPrice": ltp_pe.get(strike, 0.0),
                 "impliedVolatility": 0.0,
             },
         })
@@ -641,6 +664,7 @@ def _r360_to_nse_chain(symbol: str, raw: dict, expiry: str) -> dict:
         pcr_value = None
 
     max_pain = raw.get("max_pain")
+    lot_size = raw.get("lot_size")  # R360 returns the actual exchange lot size
 
     return {
         "records": {
@@ -653,6 +677,7 @@ def _r360_to_nse_chain(symbol: str, raw: dict, expiry: str) -> dict:
         "_r360_pcr": pcr_value,
         "_r360_max_pain": max_pain,
         "_r360_spot": underlying,
+        "_r360_lot_size": lot_size,
     }
 
 
@@ -780,19 +805,16 @@ def option_chain(symbol: str = "NIFTY") -> dict:
                 print(f"[option_chain {fn.__name__}] failed for {symbol}: {e}")
         return {"records": {"data": []}}
     
-    # 1. Broker/data API (Dhan). More stable than scraping public sites and provides prices.
+    # 1. Dhan (preferred: has full data including LTPs when user has API access).
     try:
         data = _option_chain_from_dhan(symbol)
         if data and data.get("records", {}).get("data"):
-            # Ensure at least some LTPs are non-zero to be valid
-            records = data.get("records", {}).get("data", [])
-            has_prices = any(r.get("CE", {}).get("lastPrice", 0) > 0 or r.get("PE", {}).get("lastPrice", 0) > 0 for r in records)
-            if has_prices:
-                return _save_chain(data)
+            return _save_chain(data)
     except Exception as e:
         print(f"[option_chain dhan] failed for {symbol}: {e}")
 
-    # 2. Research360 — reliable fallback for OI, but often lacks LTPs for all strikes.
+    # 2. Research360 — no auth required, provides OI for all strikes + LTP
+    #    for ~10 near-ATM strikes via graphprice/graphc/graphp arrays.
     try:
         data = _option_chain_from_research360(symbol)
         if data and data.get("records", {}).get("data"):

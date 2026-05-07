@@ -198,7 +198,15 @@ def resolve_nifty_structure(setup: NiftyOptionSetup, chain: pd.DataFrame,
         setup.suitable = False
         setup.skip_reason = "Could not find ATM strike"
         return setup
-    
+
+    # Guard: if ALL premiums are 0 the data source has no live prices (after-hours / OI-only).
+    # Do NOT generate phantom zero-premium trades.
+    has_live_prices = (chain["ce_ltp"].sum() + chain["pe_ltp"].sum()) > 0
+    if not has_live_prices:
+        setup.suitable = False
+        setup.skip_reason = "No live option prices (chain source is OI-only — wait for market open)"
+        return setup
+
     wing = setup.wing_width
     resolved_legs = []
     net_credit = 0.0

@@ -401,9 +401,13 @@ def check_option_exits() -> list[dict]:
         open_ops = [t for t in db.get("option_trades", []) if t["status"] == "OPEN"]
         if not open_ops: return []
         price_map = _build_option_price_map(open_ops)
+        settings = db.get("settings", {})
+        auto_close = settings.get("auto_close_eod", True)
+        is_eod = is_eod_window(now_ist)
+        
         for t in open_ops:
             current_net = _option_net_premium(t["legs"], price_map)
-            exit_reason = "EOD_CLOSE" if is_eod_window(now_ist) else None
+            exit_reason = "EOD_CLOSE" if (is_eod and auto_close) else None
             if not exit_reason and current_net is not None:
                 pnl = t.get("net_premium", 0.0) - current_net
                 if pnl <= -abs(t.get("net_premium", 1000)) * 2: exit_reason = "SL_HIT"
@@ -423,9 +427,13 @@ def check_nifty_option_exits(vix_current: float = None, cfg: dict = None) -> lis
         open_nifty = [t for t in db.get("option_trades", []) if t["status"] == "OPEN" and t.get("symbol") == "NIFTY"]
         if not open_nifty: return []
         price_map = _build_option_price_map(open_nifty)
+        settings = db.get("settings", {})
+        auto_close = settings.get("auto_close_eod", True)
+        is_eod = is_eod_window(now_ist)
+
         for t in open_nifty:
             exit_reason = None
-            if is_eod_window(now_ist): exit_reason = "EOD_CUTOFF"
+            if is_eod and auto_close: exit_reason = "EOD_CUTOFF"
             current_net = _option_net_premium(t["legs"], price_map)
             if not exit_reason and current_net is not None:
                 pnl = t.get("net_credit", 0.0) - current_net
@@ -468,8 +476,8 @@ def get_nifty_option_setups(data: dict, cfg: dict = None) -> list[dict]:
     # Check entry window
     in_window, window_reason = is_within_entry_window(cfg)
     
-    # Pick strategy
-    setup = pick_nifty_strategy(regime_name, bias, vix, vix_change, pcr, cfg)
+    # Pick strategy — pass full data dict as first arg (required for verdict lookup)
+    setup = pick_nifty_strategy(data, regime_name, bias, vix, vix_change, pcr, cfg)
     
     if setup is None:
         journal.log_skipped_trade("NIFTY", "NEUTRAL", "LOW", "NO_STRATEGY", regime_name, bias, "options_engine", "No strategy for current regime/bias")
@@ -494,9 +502,18 @@ def get_nifty_option_setups(data: dict, cfg: dict = None) -> list[dict]:
         journal.log_skipped_trade("NIFTY", "NEUTRAL", "MED", "EMPTY_CHAIN", regime_name, bias, "options_engine", "Empty option chain")
         return setups
 
-    # Resolve strikes
-    lot_size = nifty_cfg.get("lot_size", {}).get("NIFTY", 75)
-    strike_step = nifty_cfg.get("strike_step", {}).get("NIFTY", 50)
+    # Read lot_size/strike_step from the correct 'options' config section
+    options_cfg = cfg.get("options", {})
+    lot_size = (
+        nifty_cfg.get("lot_size", {}).get("NIFTY")
+        or options_cfg.get("lot_size", {}).get("NIFTY")
+        or 75
+    )
+    strike_step = (
+        nifty_cfg.get("strike_step", {}).get("NIFTY")
+        or options_cfg.get("strike_step", {}).get("NIFTY")
+        or 50
+    )
     setup = resolve_nifty_structure(setup, chain, spot, lot_size, strike_step)
     
     setup.entry_window_ok = in_window
@@ -533,6 +550,9 @@ def check_and_close_trades() -> list[dict]:
 
     closed = []
     with atomic_db_update() as db:
+        settings = db.get("settings", {})
+        auto_close = settings.get("auto_close_eod", True) # Default to True if missing
+        
         open_trades = [t for t in db["trades"] if t["status"] == "OPEN"]
         if not open_trades: return []
 
@@ -549,14 +569,17 @@ def check_and_close_trades() -> list[dict]:
             if any(k not in trade for k in ["sl_price", "tgt_price", "direction"]):
                 continue
 
+            # Respect EOD close setting
+            eod_trigger = is_eod and auto_close
+
             if direction == "LONG":
                 if ltp <= trade["sl_price"]: exit_reason = "SL_HIT"
                 elif ltp >= trade["tgt_price"]: exit_reason = "TARGET_HIT"
-                elif is_eod: exit_reason = "EOD_CLOSE"
+                elif eod_trigger: exit_reason = "EOD_CLOSE"
             else:
                 if ltp >= trade["sl_price"]: exit_reason = "SL_HIT"
                 elif ltp <= trade["tgt_price"]: exit_reason = "TARGET_HIT"
-                elif is_eod: exit_reason = "EOD_CLOSE"
+                elif eod_trigger: exit_reason = "EOD_CLOSE"
 
             if exit_reason:
                 trade["exit_price"] = ltp

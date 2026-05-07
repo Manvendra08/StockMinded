@@ -2497,8 +2497,22 @@
       </div>
     </section>
 
-    <!-- Capital Modal (MOVED TO PAPER TRADER) -->
-
+    <!-- ═══ OPTION CHAIN ═══ -->
+    <section class="option-chain-section card" style="margin-top:24px;">
+      <div class="card-title" style="justify-content: space-between;">
+        <div style="display:flex; align-items:center; gap:8px;">
+          <span class="icon">⛓️</span> NIFTY Option Chain
+          <span id="chain-source" style="font-size:0.65rem; padding:2px 8px; border-radius:4px; background:var(--glass); border:1px solid var(--glass-border); color:var(--text-muted);"></span>
+        </div>
+        <div id="chain-ts" class="timestamp">Fetching chain...</div>
+      </div>
+      <div class="tbl-wrap" style="max-height: 500px; overflow-y: auto;">
+        <table class="rank-table" id="chain-table" style="font-size: 0.8rem;">
+          <thead id="chain-thead" style="position: sticky; top: 0; background: var(--bg-secondary); z-index: 2;"></thead>
+          <tbody id="chain-tbody"></tbody>
+        </table>
+      </div>
+    </section>
 
   </div>
 
@@ -3038,11 +3052,103 @@ function renderAll(data) {
       try {
         const data = await fetchDashboard('/api/refresh');
         renderAll(data);
+        await loadOptionChain();
       } catch (e) {
         showError(e.message);
       } finally {
         btn.classList.remove('loading');
         btn.disabled = false;
+      }
+    }
+
+    async function loadOptionChain() {
+      const tsEl = document.getElementById('chain-ts');
+      const thead = document.getElementById('chain-thead');
+      const tbody = document.getElementById('chain-tbody');
+      const srcEl = document.getElementById('chain-source');
+      if(!tsEl || !tbody || !thead) return;
+      
+      try {
+        const res = await fetch('/api/option-chain?symbol=NIFTY');
+        if (!res.ok) throw new Error(`Server returned ${res.status}. Restart server to register new route.`);
+        const ct = res.headers.get('content-type') || '';
+        if (!ct.includes('json')) throw new Error('Server returned non-JSON (restart server)');
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+
+        const records = data.records?.data || [];
+        const underlyingPrice = data.records?.underlyingValue || 0;
+        const ts = data.records?.timestamp || new Date().toLocaleString();
+        const source = data._source || 'unknown';
+        
+        tsEl.textContent = `As of: ${ts} · Spot: ${fmt(underlyingPrice)}`;
+        if (srcEl) srcEl.textContent = source;
+
+        // Detect if we have live prices or OI-only data
+        const hasLTP = records.some(r =>
+          (r.CE?.lastPrice || 0) > 0 || (r.PE?.lastPrice || 0) > 0
+        );
+        const hasVol = records.some(r =>
+          (r.CE?.totalTradedVolume || 0) > 0 || (r.PE?.totalTradedVolume || 0) > 0
+        );
+
+        // Adaptive column headers
+        const ceCol2Label = hasVol ? 'Vol' : 'OI Chg';
+        const ceCol3Label = hasLTP ? 'LTP' : 'IV';
+        const peCol1Label = hasLTP ? 'LTP' : 'IV';
+        const peCol2Label = hasVol ? 'Vol' : 'OI Chg';
+
+        thead.innerHTML = `
+          <tr>
+            <th colspan="3" style="text-align:center; border-bottom:1px solid var(--glass-border); background:rgba(239,68,68,0.05); color:var(--accent-red);">CALLS (CE)</th>
+            <th rowspan="2" style="text-align:center; border-left:1px solid var(--glass-border); border-right:1px solid var(--glass-border);">STRIKE</th>
+            <th colspan="3" style="text-align:center; border-bottom:1px solid var(--glass-border); background:rgba(16,185,129,0.05); color:var(--accent-green);">PUTS (PE)</th>
+          </tr>
+          <tr>
+            <th>OI</th>
+            <th>${ceCol2Label}</th>
+            <th>${ceCol3Label}</th>
+            <th>${peCol1Label}</th>
+            <th>${peCol2Label}</th>
+            <th>OI</th>
+          </tr>
+        `;
+
+        // Filter for strikes near the money (+/- 400 points)
+        const atm = Math.round(underlyingPrice / 50) * 50;
+        const filtered = records.filter(r => Math.abs(r.strikePrice - atm) <= 400);
+
+        tbody.innerHTML = filtered.map(r => {
+          const ce = r.CE || {};
+          const pe = r.PE || {};
+          const isAtm = r.strikePrice === atm;
+
+          // Adaptive cell values
+          const ceCol2 = hasVol ? (ce.totalTradedVolume || 0).toLocaleString()
+                               : (ce.changeinOpenInterest || 0).toLocaleString();
+          const ceCol3 = hasLTP ? fmt(ce.lastPrice) : fmt(ce.impliedVolatility);
+          const peCol1 = hasLTP ? fmt(pe.lastPrice) : fmt(pe.impliedVolatility);
+          const peCol2 = hasVol ? (pe.totalTradedVolume || 0).toLocaleString()
+                               : (pe.changeinOpenInterest || 0).toLocaleString();
+
+          // Color OI Change: positive = green, negative = red
+          const ceChgCls = !hasVol ? ((ce.changeinOpenInterest || 0) > 0 ? 'up' : (ce.changeinOpenInterest || 0) < 0 ? 'down' : 'muted') : 'muted';
+          const peChgCls = !hasVol ? ((pe.changeinOpenInterest || 0) > 0 ? 'up' : (pe.changeinOpenInterest || 0) < 0 ? 'down' : 'muted') : 'muted';
+
+          return `
+            <tr style="${isAtm ? 'background:rgba(59, 130, 246, 0.1); font-weight:700;' : ''}">
+              <td class="muted">${(ce.openInterest || 0).toLocaleString()}</td>
+              <td class="${ceChgCls}">${ceCol2}</td>
+              <td>${ceCol3}</td>
+              <td style="text-align:center; font-family:var(--mono); border-left:1px solid var(--glass-border); border-right:1px solid var(--glass-border); font-weight:800; color:var(--text-primary);">${r.strikePrice}</td>
+              <td>${peCol1}</td>
+              <td class="${peChgCls}">${peCol2}</td>
+              <td class="muted">${(pe.openInterest || 0).toLocaleString()}</td>
+            </tr>
+          `;
+        }).join('');
+      } catch (e) {
+        tsEl.textContent = 'Failed to load chain: ' + e.message;
       }
     }
 
@@ -3369,6 +3475,7 @@ function renderAll(data) {
       try {
         const data = await fetchDashboard();
         renderAll(data);
+        await loadOptionChain();
         document.getElementById('loading-screen').classList.add('hidden');
         document.getElementById('dashboard').style.display = 'block';
         // start intraday after main data loaded

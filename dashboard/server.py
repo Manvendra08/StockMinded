@@ -570,6 +570,26 @@ def api_refresh():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/option-chain")
+def api_option_chain():
+    symbol = request.args.get("symbol", "NIFTY")
+    try:
+        raw = feed.option_chain(symbol)
+        # Inject timestamp if the source didn't provide one (e.g. Research360)
+        records = raw.get("records", {})
+        if not records.get("timestamp"):
+            records["timestamp"] = datetime.now().strftime("%d-%b-%Y %H:%M:%S")
+        # Use default=str to handle any non-serializable edge cases
+        import json as _json
+        return app.response_class(
+            _json.dumps(raw, default=str),
+            mimetype="application/json"
+        )
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/intraday")
 def api_intraday():
     """Live intraday snapshot: LTP, day OHLC, change%, volume for watchlist."""
