@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import json
 import msvcrt
+import os
 import contextlib
 import threading
 import traceback
-from datetime import datetime, date, time, timezone, timedelta
+import time
+from datetime import datetime, date, timezone, timedelta
+import datetime as dt_mod # Use this for the time class if needed, or just datetime.time
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +35,9 @@ from ops.journal import Journal
 from config.loader import load_config
 
 DATA_FILE = Path(__file__).parent / "paper_trades.json"
+LOCK_FILE = DATA_FILE.with_suffix(".json.lock")
+BAK_FILE = DATA_FILE.with_suffix(".json.bak")
+TMP_FILE = DATA_FILE.with_suffix(".json.tmp")
 
 DEFAULT_SETTINGS = {
     "capital_per_trade": 500000.0,
@@ -48,9 +54,13 @@ DEFAULT_SETTINGS = {
 
 @contextlib.contextmanager
 def atomic_db_update():
-    """Transaction-style database update with Windows cross-process locking."""
+    """Transaction-style database update with Windows cross-process locking and retries."""
     DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
     
+    # Ensure lock file exists
+    if not LOCK_FILE.exists():
+        LOCK_FILE.touch()
+
     if not DATA_FILE.exists():
         with open(DATA_FILE, "w", encoding='utf-8') as f:
             json.dump({
@@ -63,25 +73,83 @@ def atomic_db_update():
                 "version": 1,
             }, f, indent=2)
 
-    with open(DATA_FILE, "r+", encoding='utf-8') as f:
+    locked = False
+    lock_f = None
+    for attempt in range(10): # Increased retries
         try:
-            msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
-            db = json.load(f)
-            yield db
-            f.seek(0)
-            f.truncate()
-            json.dump(db, f, indent=2, default=str)
-            f.flush()
-            import os
-            os.fsync(f.fileno())
-        finally:
-            f.seek(0)
-            msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+            lock_f = open(LOCK_FILE, "r+")
+            # Try to acquire lock on the lock file
+            msvcrt.locking(lock_f.fileno(), msvcrt.LK_NBLCK, 1)
+            locked = True
+            
+            db = None
+            # Try to load primary
+            if DATA_FILE.exists():
+                try:
+                    with open(DATA_FILE, "r", encoding='utf-8') as f:
+                        db = json.load(f)
+                except (json.JSONDecodeError, ValueError) as e:
+                    print(f"⚠️ Primary DB corrupted: {e}. Trying backup...")
+            
+            # Try to load backup if primary failed
+            if db is None and BAK_FILE.exists():
+                try:
+                    with open(BAK_FILE, "r", encoding='utf-8') as f:
+                        db = json.load(f)
+                        print("✅ Recovered from backup.")
+                except Exception as e:
+                    print(f"❌ Backup also corrupted: {e}")
 
-MARKET_OPEN = time(9, 15)
-MARKET_CLOSE = time(15, 30)
-EOD_WINDOW_START = time(15, 25)
-EOD_WINDOW_END = time(15, 35)
+            # Fallback to empty if both failed
+            if db is None:
+                print("⚠️ Initializing new DB.")
+                db = {
+                    "trades": [],
+                    "option_trades": [],
+                    "daily_summaries": [],
+                    "strategy_notes": [],
+                    "settings": DEFAULT_SETTINGS.copy(),
+                    "cumulative_pnl": 0.0,
+                    "version": 1,
+                }
+
+            yield db
+            
+            # Write to TMP first
+            with open(TMP_FILE, "w", encoding='utf-8') as f:
+                json.dump(db, f, indent=2, default=str)
+                f.flush()
+                os.fsync(f.fileno())
+            
+            # Create backup before replacing
+            if DATA_FILE.exists():
+                if BAK_FILE.exists():
+                    os.remove(BAK_FILE)
+                os.rename(DATA_FILE, BAK_FILE)
+            
+            # Atomic rename
+            os.rename(TMP_FILE, DATA_FILE)
+            break # Success
+        except (OSError, IOError) as e:
+            if attempt < 9:
+                time.sleep(0.1 * (attempt + 1))
+                continue
+            else:
+                raise
+        finally:
+            if locked and lock_f:
+                try:
+                    lock_f.seek(0)
+                    msvcrt.locking(lock_f.fileno(), msvcrt.LK_UNLCK, 1)
+                except: pass
+            if lock_f:
+                try: lock_f.close()
+                except: pass
+
+MARKET_OPEN = dt_mod.time(9, 15)
+MARKET_CLOSE = dt_mod.time(15, 30)
+EOD_WINDOW_START = dt_mod.time(15, 25)
+EOD_WINDOW_END = dt_mod.time(15, 35)
 
 def is_market_open(now: datetime | None = None) -> bool:
     """True only on Mon-Fri between 09:15 and 15:30 IST."""
@@ -105,11 +173,12 @@ def is_eod_window(now: datetime | None = None) -> bool:
 
 def _load_db() -> dict:
     """Load the full trade database (Read Only)."""
-    if DATA_FILE.exists():
-        try:
-            return json.loads(DATA_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            pass
+    for path in [DATA_FILE, BAK_FILE]:
+        if path.exists():
+            try:
+                return json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
     return {
         "trades": [],
         "option_trades": [],
@@ -297,11 +366,13 @@ def enter_option_structure(structure_name: str, resolved_legs: list, underlying:
     if not is_market_open(): return {"error": "Market closed"}
     with atomic_db_update() as db:
         if "option_trades" not in db: db["option_trades"] = []
-        open_ops = [t for t in db["option_trades"] if t["status"] == "OPEN"]
+        open_ops = [t for t in db.get("option_trades", []) if t.get("status") == "OPEN"]
         max_ops = cfg.get("options", {}).get("max_concurrent_structures", 4)
         if len(open_ops) >= max_ops: return {"error": f"Max concurrent options structures ({max_ops}) reached"}
         
         net_premium = sum((leg.premium * leg.lots * leg.lot_size) * (1 if leg.side == "SELL" else -1) for leg in resolved_legs)
+        if net_premium <= 0:
+            return {"error": "Non-credit structure (0 premium likely due to missing LTP data)"}
         trade = {
             "id": _next_id(db),
             "symbol": underlying,
@@ -339,7 +410,7 @@ def enter_nifty_option_structure(setup, resolved_legs: list, cfg: dict) -> dict:
         if "option_trades" not in db: db["option_trades"] = []
         nifty_cfg = cfg.get("nifty_options", {})
         max_nifty = nifty_cfg.get("max_nifty_structures", 2)
-        open_nifty = [t for t in db["option_trades"] if t["status"] == "OPEN" and t.get("symbol") == "NIFTY"]
+        open_nifty = [t for t in db["option_trades"] if t.get("status") == "OPEN" and t.get("symbol") == "NIFTY"]
         if len(open_nifty) >= max_nifty:
             journal.log_skipped_trade("NIFTY", "NEUTRAL", "MED", "MAX_TRADES", "UNKNOWN", "NEUTRAL", "options_gate", "Max concurrent NIFTY structures reached")
             return {"error": f"Max concurrent NIFTY structures reached"}
@@ -398,7 +469,7 @@ def check_option_exits() -> list[dict]:
     if not is_market_open(now_ist) and not is_eod_window(now_ist): return []
     closed = []
     with atomic_db_update() as db:
-        open_ops = [t for t in db.get("option_trades", []) if t["status"] == "OPEN"]
+        open_ops = [t for t in db.get("option_trades", []) if t.get("status") == "OPEN"]
         if not open_ops: return []
         price_map = _build_option_price_map(open_ops)
         settings = db.get("settings", {})
@@ -424,7 +495,7 @@ def check_nifty_option_exits(vix_current: float = None, cfg: dict = None) -> lis
     if not is_market_open(now_ist) and not is_eod_window(now_ist): return []
     closed = []
     with atomic_db_update() as db:
-        open_nifty = [t for t in db.get("option_trades", []) if t["status"] == "OPEN" and t.get("symbol") == "NIFTY"]
+        open_nifty = [t for t in db.get("option_trades", []) if t.get("status") == "OPEN" and t.get("symbol") == "NIFTY"]
         if not open_nifty: return []
         price_map = _build_option_price_map(open_nifty)
         settings = db.get("settings", {})
@@ -553,7 +624,7 @@ def check_and_close_trades() -> list[dict]:
         settings = db.get("settings", {})
         auto_close = settings.get("auto_close_eod", True) # Default to True if missing
         
-        open_trades = [t for t in db["trades"] if t["status"] == "OPEN"]
+        open_trades = [t for t in db["trades"] if t.get("status") == "OPEN"]
         if not open_trades: return []
 
         symbols = list(set(t["symbol"] for t in open_trades))
@@ -620,7 +691,7 @@ def close_trade_manual(trade_id: int, reason: str = "MANUAL") -> dict | None:
     """Manually close a specific trade at current LTP."""
     now_ist = _now_ist()
     with atomic_db_update() as db:
-        trade = next((t for t in db["trades"] if t["id"] == trade_id and t["status"] == "OPEN"), None)
+        trade = next((t for t in db["trades"] if t["id"] == trade_id and t.get("status") == "OPEN"), None)
         if not trade: return None
 
         ltp = _get_ltp(trade["symbol"])
@@ -681,13 +752,13 @@ def auto_enter_from_alerts(alerts: list[dict], cfg: dict | None = None) -> list[
         min_val = conf_levels.get(min_conf, 3)
 
         today_symbols = {t["symbol"] for t in db["trades"] if t.get("entry_date") == today_str}
-        all_closed = [t for t in db["trades"] if t["status"] == "CLOSED"]
+        all_closed = [t for t in db["trades"] if t.get("status") == "CLOSED"]
         today_pnl = sum(t.get("pnl", 0) or 0 for t in all_closed if t.get("entry_date") == today_str)
         month_pnl = sum(t.get("pnl", 0) or 0 for t in all_closed if t.get("entry_date", "")[:7] == today_str[:7])
-        open_risk = sum(t.get("risk_rupees", 0) or 0 for t in db["trades"] if t["status"] == "OPEN")
+        open_risk = sum(t.get("risk_rupees", 0) or 0 for t in db["trades"] if t.get("status") == "OPEN")
         
         total_capital = cfg["account"]["capital"]
-        deployed = sum(t.get("capital_deployed", 0) or 0 for t in db["trades"] if t["status"] == "OPEN")
+        deployed = sum(t.get("capital_deployed", 0) or 0 for t in db["trades"] if t.get("status") == "OPEN")
         margin_used_pct = deployed / total_capital if total_capital > 0 else 0
         today_trade_count = len([t for t in db["trades"] if t.get("entry_date") == today_str])
 

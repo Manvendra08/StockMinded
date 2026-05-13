@@ -3081,7 +3081,32 @@ function renderAll(data) {
         const ts = data.records?.timestamp || new Date().toLocaleString();
         const source = data._source || 'unknown';
         
-        tsEl.textContent = `As of: ${ts} · Spot: ${fmt(underlyingPrice)}`;
+        // Extract Expiry Date and determine Day of week
+        let expiryDisplay = "N/A";
+        const expiries = data.records?.expiryDates || [];
+        if (expiries.length > 0) {
+          const expStr = expiries[0];
+          try {
+            // Parse "DD-Mon-YYYY" format
+            const [d, mStr, y] = expStr.split('-');
+            const months = {
+              'Jan':0,'Feb':1,'Mar':2,'Apr':3,'May':4,'Jun':5,
+              'Jul':6,'Aug':7,'Sep':8,'Oct':9,'Nov':10,'Dec':11
+            };
+            const dObj = new Date(parseInt(y), months[mStr], parseInt(d));
+            const dayName = dObj.toLocaleDateString('en-US', { weekday: 'long' });
+            expiryDisplay = `${expStr} (${dayName})`;
+          } catch(e) {
+            expiryDisplay = expStr;
+          }
+        }
+        
+        tsEl.innerHTML = `
+          <div style="display:flex; flex-direction:column; gap:4px;">
+            <div>As of: <span style="color:var(--text-primary); font-weight:600;">${ts}</span> · Spot: <span style="color:var(--text-primary); font-weight:600;">${fmt(underlyingPrice)}</span></div>
+            <div>Expiry: <span style="color:var(--accent-blue); font-weight:700;">${expiryDisplay}</span></div>
+          </div>
+        `;
         if (srcEl) srcEl.textContent = source;
 
         // Detect if we have live prices or OI-only data

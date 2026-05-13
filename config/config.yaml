@@ -116,8 +116,8 @@ nifty_options:
   intraday_entry_start: "09:45"
   intraday_entry_end: "14:30"
   intraday_exit_by: "15:15"
-  # Positional window - Mon=0, Tue=1, Wed=2 only
-  positional_entry_days: [0, 1, 2]
+  # Positional window - All weekdays enabled for paper trading (0=Mon, 4=Fri)
+  positional_entry_days: [0, 1, 2, 3, 4]
   positional_exit_expiry_cutoff: "15:15"
   # Max concurrent NIFTY structures
   max_nifty_structures: 2

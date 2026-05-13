@@ -207,7 +207,7 @@ def is_within_entry_window(cfg: dict = None, now: datetime = None) -> Tuple[bool
     
     Returns: (is_valid, reason)
     - Intraday mode: 09:45-14:30
-    - Positional mode: Mon-Wed only, 09:45-14:30
+    - Positional mode: entries only during first 3 days of contract (Wed-Fri for Tuesday expiry)
     """
     from datetime import timezone, timedelta
     if cfg is None:
@@ -238,12 +238,12 @@ def is_within_entry_window(cfg: dict = None, now: datetime = None) -> Tuple[bool
     if not (entry_start <= current_time <= entry_end):
         return False, f"Outside entry window ({entry_start_str}-{entry_end_str})"
     
-    # Positional mode: Mon-Wed only (0=Mon, 2=Wed)
+    # Positional mode: check allowed days from config (all weekdays enabled for paper trading)
     if mode == "positional":
-        allowed_days = nifty_cfg.get("positional_entry_days", [0, 1, 2])
+        allowed_days = nifty_cfg.get("positional_entry_days", [0, 1, 2, 3, 4])
         if now.weekday() not in allowed_days:
             day_names = ["Mon", "Tue", "Wed", "Thu", "Fri"]
-            return False, f"Positional mode: entries only Mon-Wed (today: {day_names[now.weekday()]})"
+            return False, f"Positional mode: entry not allowed today ({day_names[now.weekday()]})"
     
     return True, "Valid entry window"
 

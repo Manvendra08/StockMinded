@@ -689,51 +689,6 @@ body::before {
   margin-top: 10px;
   flex-wrap: wrap;
 }
-.ticker-strip {
-  background: var(--bg-secondary);
-  border-bottom: 1px solid var(--glass-border);
-  padding: 8px 0;
-  overflow: hidden;
-  position: sticky;
-  top: 52px; /* Height of index-bar */
-  z-index: 1000;
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-}
-.ticker-inner {
-  display: flex;
-  gap: 32px;
-  padding: 0 20px;
-  animation: ticker-scroll 90s linear infinite;
-  white-space: nowrap;
-  will-change: transform;
-  width: max-content;
-}
-.ticker-strip:hover .ticker-inner {
-  animation-play-state: paused;
-}
-@keyframes ticker-scroll {
-  0% { transform: translateX(0); }
-  100% { transform: translateX(-50%); }
-}
-.ticker-item {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  font-family: var(--mono);
-  font-size: 0.8rem;
-}
-.ticker-sym { font-weight: 700; color: var(--text-primary); }
-.ticker-price { font-weight: 600; }
-.ticker-chg { font-size: 0.72rem; }
-.ticker-range-dot {
-  width: 9px; height: 9px; border-radius: 50%;
-  display: inline-block;
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08);
-}
-.ticker-range-dot.low { background: var(--accent-red); }
-.ticker-range-dot.mid { background: var(--text-muted); }
-.ticker-range-dot.high { background: var(--accent-green); }
 
 </style>
 </head>
@@ -744,17 +699,12 @@ body::before {
 <!-- Index bar (Moved to top) -->
 <div class="index-bar" id="index-bar"></div>
 
-<!-- Global Ticker (Moved to top) -->
-<div class="ticker-strip" id="ticker-strip">
-  <div class="ticker-inner" id="ticker-inner">Loading Ticker…</div>
-</div>
 
 
 <div class="container">
   <!-- Header -->
   <header class="header">
     <div class="header-left">
-      <a href="/" class="dash-back-btn">← Dashboard</a>
       <div class="brand">
         <div class="brand-logo">P</div>
         <div>
@@ -762,6 +712,7 @@ body::before {
           <div class="brand-sub">Strategy Simulation Engine</div>
         </div>
       </div>
+      <a href="/" class="dash-back-btn" style="margin-left: 20px;">← Dashboard</a>
     </div>
 
     <div class="header-actions">
@@ -1515,7 +1466,7 @@ async function loadOpen() {
       const upnl = t.unrealized_pnl;
       const upct = t.unrealized_pct;
       const cmp = t.current_price;
-      const time = (t.entry_time||'').slice(11,16);
+      const ts = (t.entry_time||'').slice(8,10) + '/' + (t.entry_time||'').slice(5,7) + ' ' + (t.entry_time||'').slice(11,16);
       return `<tr>
         <td><div class="sym-cell">
           ${t.symbol}
@@ -1528,7 +1479,7 @@ async function loadOpen() {
         <td>${t.qty}</td>
         <td>${colorPnl(upnl)}</td>
         <td class="${cls(upct)}">${upct!=null ? sign(upct)+fmt(upct)+'%' : '—'}</td>
-        <td class="muted" style="font-size:0.75rem">${time}</td>
+        <td class="muted" style="font-size:0.72rem; line-height:1.2;">${ts}</td>
         <td><span class="conf-badge conf-${t.confidence}" style="cursor:help" onclick="showEvidence(${t.id})" title="Click to view entry evidence">${t.confidence}</span></td>
         <td><button class="close-btn" onclick="closePosition(${t.id}, this)">✕ Close</button></td>
       </tr>`;
@@ -1571,7 +1522,7 @@ async function loadHistory() {
       const pctCell = (pct==null) ? '<span class="muted">—</span>'
                                   : `<span class="${cls(pct)}">${sign(pct)}${fmt(pct)}%</span>`;
       return `<tr>
-        <td class="muted" style="font-size:0.75rem">${t.entry_date}</td>
+        <td class="muted" style="font-size:0.72rem">${t.entry_date.slice(8,10)}/${t.entry_date.slice(5,7)}</td>
         <td><div class="sym-cell">${t.symbol}</div></td>
         <td><span class="dir-badge dir-${t.direction.toLowerCase()}">${t.direction}</span></td>
         <td>${fmt(t.entry_price)}</td>
@@ -1580,7 +1531,10 @@ async function loadHistory() {
         <td>${pnlCell}</td>
         <td>${pctCell}</td>
         <td><span class="exit-badge exit-${t.exit_reason}">${(t.exit_reason||'').replace('_',' ')}</span></td>
-        <td class="muted" style="font-size:0.72rem">${(t.entry_time||'').slice(11,19)}<br>${(t.exit_time||'').slice(11,19)}</td>
+        <td class="muted" style="font-size:0.72rem; line-height:1.2;">
+          ${(t.entry_time||'').slice(8,10)}/${(t.entry_time||'').slice(5,7)} ${(t.entry_time||'').slice(11,16)}<br>
+          ${(t.exit_time||'').slice(8,10)}/${(t.exit_time||'').slice(5,7)} ${(t.exit_time||'').slice(11,16)}
+        </td>
         <td><span class="conf-badge conf-${t.confidence}">${t.confidence}</span></td>
       </tr>`;
     }).join('');
@@ -1952,7 +1906,7 @@ async function loadOptions() {
         <td><span class="badge ${t.structure.includes('BULL') ? 'badge-green' : (t.structure.includes('BEAR') ? 'badge-red' : 'badge-blue')}">${t.structure}</span></td>
         <td style="font-family:var(--mono); font-size:0.85rem; line-height:1.4;">${legsHtml}</td>
         <td>${fmtInr(t.net_premium)}</td>
-        <td class="muted">${t.entry_date} ${t.entry_time.split(' ')[1]}</td>
+        <td class="muted" style="font-size:0.72rem;">${t.entry_date.slice(8,10)}/${t.entry_date.slice(5,7)} ${t.entry_time.split(' ')[1].slice(0,5)}</td>
         <td><span class="badge ${t.status==='OPEN' ? 'badge-amber' : 'badge-green'}">${t.status}</span></td>
       </tr>`;
     });
@@ -2016,6 +1970,7 @@ async function renderIndexBar() {
       { label: 'BANK NIFTY', value: fmt(d.banknifty.close), change: d.banknifty.change_pct },
       { label: 'INDIA VIX', value: fmt(d.regime.vix), change: d.regime.vix_5d_change_pct, suffix: ' (5d)' },
       { label: 'ADX', value: fmt(d.regime.adx), change: null },
+      { label: 'Option Chain', value: 'Live', link: '/option-chain' }
     ];
     
     document.getElementById('index-bar').innerHTML = items.map(i => `
@@ -2024,6 +1979,7 @@ async function renderIndexBar() {
         <div class="value-wrap">
           <span class="value">${i.value}</span>
           ${i.change != null ? `<span class="change ${changeClass(i.change)}">${i.change > 0 ? '+' : ''}${fmt(i.change)}%${i.suffix || ''}</span>` : ''}
+          ${i.link ? `<a href="${i.link}" style="margin-left:8px; font-size:0.7rem; color:var(--accent-blue);">View</a>` : ''}
         </div>
         ${subline ? `<div class="subline">${subline}</div>` : ''}
       </div>
@@ -2065,7 +2021,6 @@ async function renderTicker() {
 async function loadAll() {
   await Promise.all([
     renderIndexBar(),
-    renderTicker(),
     loadSettings(),
     loadStats(),
     loadOpen(),

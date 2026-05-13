@@ -10,7 +10,8 @@ import os
 import sys
 import traceback
 from dataclasses import asdict
-from datetime import datetime, date, time, timezone, timedelta
+from datetime import datetime, date, timezone, timedelta
+import datetime as dt_mod
 from pathlib import Path
 
 # Ensure project root is on sys.path so signal imports work
@@ -254,7 +255,7 @@ def _run_engine() -> dict:
         now_ist = datetime.now(ist)
         # Shift logical day so that 'today' rolls over at 6:00 AM IST instead of midnight
         logical_date = (now_ist - timedelta(hours=6)).date()
-        start_ist = datetime.combine(logical_date, time(6, 0), tzinfo=ist)
+        start_ist = datetime.combine(logical_date, dt_mod.time(6, 0), tzinfo=ist)
         start_utc = start_ist.astimezone(timezone.utc).replace(tzinfo=None)
         skip_rows = journal.get_skipped_trades(limit=50, since_date=start_utc.isoformat())
 
@@ -1218,11 +1219,16 @@ def _automation_worker():
                                             if "error" not in res:
                                                 print(f"  > Auto-entered Option Structure: {sym} {struct.name}")
                                                 pnl_sign = "Credit" if res["net_premium"] >= 0 else "Debit"
+                                                
+                                                # Handle None values for formatting
+                                                ivr_disp = f"{ivr:.0f}" if ivr is not None else "N/A"
+                                                vix_disp = f"{vix:.1f}" if vix is not None else "N/A"
+                                                
                                                 msg = (
                                                     f"*[AUTO-EXECUTED OPTIONS]*\n"
                                                     f"*{sym}* `{struct.name}`\n"
                                                     f"Net {pnl_sign}: ₹{abs(res['net_premium']):,.0f}\n"
-                                                    f"Regime: `{regime_name}` | Bias: `{bias}` | IVR: `{ivr:.0f}` | VIX: `{vix:.1f}`"
+                                                    f"Regime: `{regime_name}` | Bias: `{bias}` | IVR: `{ivr_disp}` | VIX: `{vix_disp}`"
                                                 )
                                                 Alerter(token, chat_id).send(msg)
                                 except Exception as sym_err:
