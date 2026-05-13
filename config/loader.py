@@ -6,10 +6,7 @@ import yaml
 
 # Required env vars that must be non-empty for production use.
 # Keys are the var names; values are the config dot-paths for context.
-_REQUIRED_ENV_VARS = [
-    "TELEGRAM_BOT_TOKEN",
-    "TELEGRAM_CHAT_ID",
-]
+_REQUIRED_ENV_VARS = []
 
 
 def _expand(value, _missing: list | None = None):
@@ -55,8 +52,8 @@ def load_config(path: str | None = None) -> dict:
             "Set them in your .env file or shell before starting."
         )
 
-    if missing:
-        print(f"[config] WARNING: undefined env vars (non-critical): {', '.join(missing)}")
+    # if missing:
+    #     print(f"[config] WARNING: undefined env vars (non-critical): {', '.join(missing)}")
 
     return cfg
 

@@ -913,6 +913,11 @@ def generate_eod_summary(target_date: str | None = None) -> dict:
         losers = [t for t in closed_today if (t.get("pnl") or 0) < 0]
         total_pnl = sum(t.get("pnl", 0) or 0 for t in closed_today)
         
+        sl_hits = len([t for t in closed_today if t.get("exit_reason") == "SL_HIT"])
+        target_hits = len([t for t in closed_today if t.get("exit_reason") == "TARGET_HIT"])
+        eod_exits = len([t for t in closed_today if t.get("exit_reason") == "EOD_CLOSE"])
+        win_rate = round((len(winners) / max(len(closed_today), 1)) * 100, 1)
+
         summary = {
             "date": today,
             "generated_at": _now_ist().strftime("%Y-%m-%d %H:%M:%S IST"),
@@ -920,10 +925,24 @@ def generate_eod_summary(target_date: str | None = None) -> dict:
             "closed": len(closed_today),
             "winners": len(winners),
             "losers": len(losers),
+            "win_rate": win_rate,
+            "sl_hits": sl_hits,
+            "target_hits": target_hits,
+            "eod_exits": eod_exits,
             "total_pnl": round(total_pnl, 2),
             "trades": closed_today,
-            "cumulative_pnl": round(db.get("cumulative_pnl", 0) + total_pnl, 2)
+            "cumulative_pnl": round(db.get("cumulative_pnl", 0) + total_pnl, 2),
+            "analysis": {
+                "what_went_right": [],
+                "what_went_wrong": [],
+                "patterns": []
+            },
+            "corrections": []
         }
+        
+        # Remove existing summary for the same date to avoid duplicates
+        db["daily_summaries"] = [s for s in db.get("daily_summaries", []) if s.get("date") != today]
+        
         db["cumulative_pnl"] = summary["cumulative_pnl"]
         db["daily_summaries"].append(summary)
         return summary
@@ -943,3 +962,15 @@ def get_stats() -> dict:
 def get_open_trades() -> list[dict]: return [t for t in _load_db()["trades"] if t["status"] == "OPEN"]
 def get_all_trades(limit: int = 50) -> list[dict]: return list(reversed(_load_db()["trades"][-limit:]))
 def get_daily_summaries(limit: int = 30) -> list[dict]: return list(reversed(_load_db()["daily_summaries"][-limit:]))
+
+def get_strategy_notes() -> list[dict]:
+    db = _load_db()
+    notes = db.get("strategy_notes", [])
+    if not notes:
+        for s in db.get("daily_summaries", []):
+            if s.get("corrections"):
+                notes.append({"date": s["date"], "corrections": s["corrections"]})
+    return list(reversed(notes))
+
+def get_learned_filters() -> list[dict]:
+    return _load_db().get("learned_filters", [])

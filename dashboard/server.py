@@ -935,8 +935,6 @@ def api_paper_strategy_notes():
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
-
-
 @app.route("/api/paper/skipped")
 def api_paper_skipped():
     """Return skipped trade reasons for an IST date (default: today)."""
