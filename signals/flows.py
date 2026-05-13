@@ -1,6 +1,7 @@
 """Money flow: FII/DII, sector rotation, option chain PCR + max pain."""
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -82,7 +83,9 @@ def fii_dii_5d_net() -> tuple[dict[str, float], bool]:
     return {k: round(v, 2) for k, v in out.items()}, False
 
 
-def sector_relative_strength(sector_data: dict[str, pd.DataFrame], lookback: int = 5) -> list[tuple[str, float]]:
+def sector_relative_strength(
+    sector_data: dict[str, pd.DataFrame], lookback: int = 5
+) -> list[tuple[str, float]]:
     out = []
     for name, df in sector_data.items():
         if df is None or df.empty:
@@ -97,7 +100,23 @@ def sector_relative_strength(sector_data: dict[str, pd.DataFrame], lookback: int
     return sorted(out, key=lambda x: x[1], reverse=True)
 
 
-def pcr_and_max_pain(symbol: str = "NIFTY") -> tuple[float | None, float | None, float | None]:
+def pcr_and_max_pain(
+    symbol: str = "NIFTY",
+) -> tuple[float | None, float | None, float | None]:
+    """Compute PCR (OI), PCR (volume) and max-pain from raw option chain.
+
+    .. deprecated::
+        This function duplicates logic already handled by
+        ``feed.get_pcr_max_pain_cached()``, which is the canonical source
+        used by :func:`snapshot`.  New code should call
+        ``feed.get_pcr_max_pain_cached()`` directly and this function will
+        be removed in a future cleanup.
+    """
+    warnings.warn(
+        "pcr_and_max_pain() is deprecated. Use feed.get_pcr_max_pain_cached() instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     try:
         raw = feed.option_chain(symbol)
         data = raw.get("records", {}).get("data", [])
@@ -140,7 +159,11 @@ def pcr_and_max_pain(symbol: str = "NIFTY") -> tuple[float | None, float | None,
     return pcr_oi, pcr_vol, max_pain
 
 
-def _bias(fii_dii: dict[str, float], pcr_oi: float | None, fii_dii_stale: bool = False) -> str:
+def _bias(
+    fii_dii: dict[str, float],
+    pcr_oi: float | None,
+    fii_dii_stale: bool = False,
+) -> str:
     """Compute smart-money bias.  Stale FII/DII data does not contribute a score."""
     score = 0
     if not fii_dii_stale:
@@ -161,7 +184,9 @@ def _bias(fii_dii: dict[str, float], pcr_oi: float | None, fii_dii_stale: bool =
     return "NEUTRAL"
 
 
-def snapshot(sector_data: dict[str, pd.DataFrame], index_symbol: str = "NIFTY") -> FlowSnapshot:
+def snapshot(
+    sector_data: dict[str, pd.DataFrame], index_symbol: str = "NIFTY"
+) -> FlowSnapshot:
     fii_dii, fii_dii_stale = fii_dii_5d_net()
     rs = sector_relative_strength(sector_data, lookback=5)
     top_in = rs[:3]

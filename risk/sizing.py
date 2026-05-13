@@ -13,8 +13,41 @@ class SizeResult:
     notes: str = ""
 
 
-def directional_size(capital: float, per_trade_pct: float, entry: float, stop: float,
-                     lot_size: int = 1) -> SizeResult:
+def directional_size(
+    capital: float,
+    per_trade_pct: float,
+    entry: float,
+    stop: float,
+    lot_size: int = 1,
+    *,
+    direction: str = "LONG",
+) -> SizeResult:
+    """Size a directional trade by risk budget / stop-distance.
+
+    Args:
+        capital: Total account capital in rupees.
+        per_trade_pct: Fraction of capital to risk per trade (e.g. 0.01).
+        entry: Entry price.
+        stop: Stop-loss price.
+        lot_size: Minimum tradeable lot (1 for equities).
+        direction: "LONG" or "SHORT".  Used to validate stop placement.
+
+    Raises:
+        ValueError: If stop is on the wrong side of entry for the given
+            direction (e.g. stop > entry for a LONG trade).
+    """
+    # --- Direction-aware stop validation (P2 fix) ---
+    if direction.upper() == "LONG" and stop >= entry:
+        raise ValueError(
+            f"Invalid stop for LONG trade: stop ({stop}) must be below entry ({entry}). "
+            "Check whether entry and stop were passed in the wrong order."
+        )
+    if direction.upper() == "SHORT" and stop <= entry:
+        raise ValueError(
+            f"Invalid stop for SHORT trade: stop ({stop}) must be above entry ({entry}). "
+            "Check whether entry and stop were passed in the wrong order."
+        )
+
     risk_budget = capital * per_trade_pct
     per_unit_risk = abs(entry - stop)
     if per_unit_risk <= 0:
@@ -30,8 +63,12 @@ def directional_size(capital: float, per_trade_pct: float, entry: float, stop: f
     )
 
 
-def option_structure_size(capital: float, per_trade_pct: float, max_loss_per_lot: float,
-                          lot_size: int) -> SizeResult:
+def option_structure_size(
+    capital: float,
+    per_trade_pct: float,
+    max_loss_per_lot: float,
+    lot_size: int,
+) -> SizeResult:
     """max_loss_per_lot = ₹ max loss for 1 lot of the structure (already in rupees)."""
     risk_budget = capital * per_trade_pct
     if max_loss_per_lot <= 0:
