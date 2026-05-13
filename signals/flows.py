@@ -20,6 +20,7 @@ class FlowSnapshot:
     smart_money_bias: str   # LONG | SHORT | NEUTRAL
     pcr_stale: bool = False
     mp_stale: bool = False
+    fii_dii_stale: bool = False   # True when FII/DII data fetch failed
     pcr_updated_at: float | None = None
     mp_updated_at: float | None = None
     notes: str = ""
@@ -36,6 +37,7 @@ class FlowSnapshot:
             "smart_money_bias": self.smart_money_bias,
             "pcr_stale": self.pcr_stale,
             "mp_stale": self.mp_stale,
+            "fii_dii_stale": self.fii_dii_stale,
             "pcr_updated_at": self.pcr_updated_at,
             "mp_updated_at": self.mp_updated_at,
             "notes": self.notes,
@@ -43,25 +45,32 @@ class FlowSnapshot:
         }
 
 
-def fii_dii_5d_net() -> dict[str, float]:
+def fii_dii_5d_net() -> tuple[dict[str, float], bool]:
+    """Return (net_cr_dict, stale).
+
+    *stale* is True whenever the fetch failed or returned no usable rows,
+    meaning the zeros in the dict are placeholders, not real data.
+    """
+    zero = {"fii": 0.0, "dii": 0.0}
     try:
-        df = feed.fii_dii_cash(days=10)  # get more rows since each date has 2 rows (FII + DII)
-    except Exception:
-        return {"fii": 0.0, "dii": 0.0}
-    out = {"fii": 0.0, "dii": 0.0}
+        df = feed.fii_dii_cash(days=10)
+    except Exception as e:
+        print(f"[flows] FII/DII fetch failed: {e}")
+        return zero, True
+
     if df.empty:
-        return out
-    # nse_fiidii returns: category, date, buyValue, sellValue, netValue
-    # category values: 'DII', 'FII/FPI'
+        return zero, True
+
+    out = {"fii": 0.0, "dii": 0.0}
     cols = {c.lower(): c for c in df.columns}
     cat_col = cols.get("category") or cols.get("clienttype")
     net_col = cols.get("netvalue") or cols.get("net")
     if not cat_col or not net_col:
-        return out
+        return zero, True
+
     for _, row in df.iterrows():
         c = str(row[cat_col]).strip().lower()
         raw_val = row[net_col]
-        # netValue may be string with commas like "2,966.89"
         if isinstance(raw_val, str):
             raw_val = raw_val.replace(",", "")
         v = float(raw_val) if pd.notna(raw_val) else 0.0
@@ -69,7 +78,8 @@ def fii_dii_5d_net() -> dict[str, float]:
             out["fii"] += v
         elif "dii" in c:
             out["dii"] += v
-    return {k: round(v, 2) for k, v in out.items()}
+
+    return {k: round(v, 2) for k, v in out.items()}, False
 
 
 def sector_relative_strength(sector_data: dict[str, pd.DataFrame], lookback: int = 5) -> list[tuple[str, float]]:
@@ -130,16 +140,18 @@ def pcr_and_max_pain(symbol: str = "NIFTY") -> tuple[float | None, float | None,
     return pcr_oi, pcr_vol, max_pain
 
 
-def _bias(fii_dii: dict[str, float], pcr_oi: float | None) -> str:
+def _bias(fii_dii: dict[str, float], pcr_oi: float | None, fii_dii_stale: bool = False) -> str:
+    """Compute smart-money bias.  Stale FII/DII data does not contribute a score."""
     score = 0
-    net = fii_dii.get("fii", 0) + fii_dii.get("dii", 0)
-    if net > 500:
-        score += 1
-    elif net < -500:
-        score -= 1
+    if not fii_dii_stale:
+        net = fii_dii.get("fii", 0) + fii_dii.get("dii", 0)
+        if net > 500:
+            score += 1
+        elif net < -500:
+            score -= 1
     if pcr_oi is not None:
         if pcr_oi > 1.3:
-            score += 1       # put writers dominant → bullish
+            score += 1
         elif pcr_oi < 0.7:
             score -= 1
     if score >= 1:
@@ -150,20 +162,23 @@ def _bias(fii_dii: dict[str, float], pcr_oi: float | None) -> str:
 
 
 def snapshot(sector_data: dict[str, pd.DataFrame], index_symbol: str = "NIFTY") -> FlowSnapshot:
-    fii_dii = fii_dii_5d_net()
+    fii_dii, fii_dii_stale = fii_dii_5d_net()
     rs = sector_relative_strength(sector_data, lookback=5)
     top_in = rs[:3]
     top_out = rs[-3:][::-1] if len(rs) >= 3 else []
-    notes = ""
+    notes_parts = []
+    if fii_dii_stale:
+        notes_parts.append("FII/DII data unavailable; bias computed from PCR only")
+
     try:
         pcr_oi, pcr_vol, mp, pcr_stale, mp_stale, pcr_updated_at, mp_updated_at = feed.get_pcr_max_pain_cached(index_symbol)
         if pcr_oi is None and mp is None and (pcr_stale or mp_stale):
-            notes = "Option chain unavailable; PCR/max-pain unavailable"
+            notes_parts.append("Option chain unavailable; PCR/max-pain unavailable")
     except Exception as e:
         pcr_oi, pcr_vol, mp = None, None, None
         pcr_stale, mp_stale = True, True
         pcr_updated_at, mp_updated_at = None, None
-        notes = f"Option chain unavailable: {e}"
+        notes_parts.append(f"Option chain unavailable: {e}")
 
     return FlowSnapshot(
         fii_dii_5d_net_cr=fii_dii,
@@ -172,11 +187,12 @@ def snapshot(sector_data: dict[str, pd.DataFrame], index_symbol: str = "NIFTY") 
         pcr_oi=pcr_oi,
         pcr_vol=pcr_vol,
         max_pain=mp,
-        smart_money_bias=_bias(fii_dii, pcr_oi),
+        smart_money_bias=_bias(fii_dii, pcr_oi, fii_dii_stale=fii_dii_stale),
         pcr_stale=pcr_stale,
         mp_stale=mp_stale,
+        fii_dii_stale=fii_dii_stale,
         pcr_updated_at=pcr_updated_at,
         mp_updated_at=mp_updated_at,
-        notes=notes,
+        notes="; ".join(notes_parts),
         option_source=feed.option_chain_source(index_symbol),
     )

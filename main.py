@@ -7,11 +7,20 @@ Usage:
 """
 from __future__ import annotations
 
+import signal
 import sys
 import traceback
 from datetime import datetime
 
-from config.loader import load_config, load_universe
+try:
+    from apscheduler.schedulers.blocking import BlockingScheduler
+    from apscheduler.triggers.cron import CronTrigger
+    from pytz import timezone as pytz_timezone
+    _SCHEDULER_AVAILABLE = True
+except ImportError:
+    _SCHEDULER_AVAILABLE = False
+
+from config.loader import load_config, load_universe, load_sector_map
 from data import feed
 from signals import regime as regime_mod
 from signals import flows as flows_mod
@@ -27,6 +36,7 @@ def run_dashboard(cfg: dict) -> None:
 
     universe = load_universe(cfg)
     sectors = cfg["sectors"]
+    sector_map = load_sector_map(cfg)
 
     try:
         stock_data = feed.universe_ohlc(universe, period="6mo")
@@ -41,7 +51,9 @@ def run_dashboard(cfg: dict) -> None:
     bench = feed.ohlc_cached("NIFTY", period="1y")
     ranks = lead_mod.rank_universe(stock_data, bench)
     inflow_syms = [s for s, _ in flow_snap.top_inflow_sectors]
-    longs, shorts = lead_mod.a_grade(ranks, inflow_sectors=inflow_syms, sector_map=None)
+    # Pass sector_map so a_grade() can filter leaders/laggards by inflow sectors.
+    # load_sector_map() returns {} on failure, which gracefully skips the filter.
+    longs, shorts = lead_mod.a_grade(ranks, inflow_sectors=inflow_syms, sector_map=sector_map or None)
 
     structure = sm.plan_for(regime_snap.regime)
 
@@ -67,7 +79,6 @@ def run_health(cfg: dict) -> None:
         checks.append(f"❌ VIX: {e}")
 
     try:
-        # Use the cached version which now raises RuntimeError on total failure
         pcr_oi, pcr_vol, mp, stale, _, updated_at, _ = feed.get_pcr_max_pain_cached("NIFTY")
         checks.append(f"✅ PCR (OI): {pcr_oi} (Updated: {updated_at})")
     except Exception as e:
@@ -83,13 +94,12 @@ def run_health(cfg: dict) -> None:
 
 
 def run_schedule(cfg: dict) -> None:
-    import signal
-    import sys
-    from apscheduler.schedulers.blocking import BlockingScheduler
-    from apscheduler.triggers.cron import CronTrigger
-    from pytz import timezone
+    if not _SCHEDULER_AVAILABLE:
+        raise RuntimeError(
+            "APScheduler / pytz not installed. Run: pip install apscheduler pytz"
+        )
 
-    ist = timezone("Asia/Kolkata")
+    ist = pytz_timezone("Asia/Kolkata")
     sched = BlockingScheduler(timezone=ist)
 
     s = cfg["schedule_ist"]
@@ -106,16 +116,15 @@ def run_schedule(cfg: dict) -> None:
     hh, mm = map(int, s["morning_dashboard"].split(":"))
     sched.add_job(_h("dashboard", run_dashboard), CronTrigger(hour=hh, minute=mm, day_of_week="mon-fri"))
     print(f"Scheduler started (IST). Morning dashboard @ {s['morning_dashboard']}.  Ctrl-C to stop.")
-    
-    # Add graceful shutdown handler
+
     def _shutdown_handler(signum, frame):
         print("\nShutting down scheduler gracefully...")
         sched.shutdown(wait=False)
         sys.exit(0)
-    
+
     signal.signal(signal.SIGINT, _shutdown_handler)
     signal.signal(signal.SIGTERM, _shutdown_handler)
-    
+
     try:
         sched.start()
     except (KeyboardInterrupt, SystemExit):
