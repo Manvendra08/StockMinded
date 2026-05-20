@@ -26,6 +26,7 @@ class FlowSnapshot:
     mp_updated_at: float | None = None
     notes: str = ""
     option_source: str | None = None
+    ai_sentiment: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -43,6 +44,7 @@ class FlowSnapshot:
             "mp_updated_at": self.mp_updated_at,
             "notes": self.notes,
             "option_source": self.option_source,
+            "ai_sentiment": self.ai_sentiment,
         }
 
 
@@ -205,6 +207,14 @@ def snapshot(
         pcr_updated_at, mp_updated_at = None, None
         notes_parts.append(f"Option chain unavailable: {e}")
 
+    # AI Sentiment Analysis
+    ai_sentiment = None
+    try:
+        from data import ai_scraper
+        ai_sentiment = ai_scraper.get_market_news_sentiment()
+    except Exception as e:
+        print(f"[flows.snapshot] AI sentiment failed: {e}")
+
     return FlowSnapshot(
         fii_dii_5d_net_cr=fii_dii,
         top_inflow_sectors=top_in,
@@ -220,4 +230,5 @@ def snapshot(
         mp_updated_at=mp_updated_at,
         notes="; ".join(notes_parts),
         option_source=feed.option_chain_source(index_symbol),
+        ai_sentiment=ai_sentiment,
     )

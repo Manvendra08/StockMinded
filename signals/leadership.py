@@ -59,21 +59,21 @@ def rank_universe(stock_data: dict[str, pd.DataFrame], bench_df: pd.DataFrame) -
     for r in ranks:
         slope = r.rs_slope_20d
         vs_dma = r.pct_vs_50dma
-        if slope > 100 and vs_dma > 20:
+        if slope > 20 and vs_dma > 10:
             r.quintile = 5
-        elif slope > 60 and vs_dma > 10:
+        elif slope > 10 and vs_dma > 5:
             r.quintile = 4
-        elif slope > 30 and vs_dma > 5:
+        elif slope > 5 and vs_dma > 2:
             r.quintile = 3
-        elif slope > 10 and vs_dma > 2:
+        elif slope > 0 and vs_dma > 0:
             r.quintile = 2
-        elif slope < -100 and vs_dma < -20:
+        elif slope < -20 and vs_dma < -10:
             r.quintile = 5
-        elif slope < -60 and vs_dma < -10:
+        elif slope < -10 and vs_dma < -5:
             r.quintile = 4
-        elif slope < -30 and vs_dma < -5:
+        elif slope < -5 and vs_dma < -2:
             r.quintile = 3
-        elif slope < -10 and vs_dma < -2:
+        elif slope < 0 and vs_dma < 0:
             r.quintile = 2
         else:
             r.quintile = 1

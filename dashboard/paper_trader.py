@@ -49,8 +49,49 @@ DEFAULT_SETTINGS = {
     "max_new_entries_per_cycle": 5,
     "regime_filter": True,
     "telegram_bot_token": "",
-    "telegram_chat_id": ""
+    "telegram_chat_id": "",
+    # ── Risk Gate (Guardrails) overrides ──────────────────────────
+    "rg_daily_stop_pct": 0.02,       # 2% of capital = daily loss limit
+    "rg_monthly_stop_pct": 0.06,     # 6% of capital = monthly loss limit
+    "rg_concurrent_open_pct": 0.03,  # 3% of capital = max simultaneous open risk
+    "rg_margin_util_cap": 0.60,      # 60% margin utilisation ceiling
+    "rg_correlation_max": 0.70,      # max RS correlation with existing position
 }
+
+def _load_db() -> dict:
+    """Load the full trade database (Read Only)."""
+    for path in [DATA_FILE, BAK_FILE]:
+        if path.exists():
+            try:
+                return json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+    return {
+        "trades": [],
+        "option_trades": [],
+        "daily_summaries": [],
+        "strategy_notes": [],
+        "settings": DEFAULT_SETTINGS.copy(),
+        "cumulative_pnl": 0.0,
+        "version": 1,
+    }
+
+def _save_db(db: dict) -> None:
+    """Save the trade database to disk."""
+    DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(TMP_FILE, "w", encoding='utf-8') as f:
+        json.dump(db, f, indent=2, default=str)
+        f.flush()
+        os.fsync(f.fileno())
+    
+    # Create backup before replacing
+    if DATA_FILE.exists():
+        if BAK_FILE.exists():
+            os.remove(BAK_FILE)
+        os.rename(DATA_FILE, BAK_FILE)
+    
+    # Atomic rename
+    os.rename(TMP_FILE, DATA_FILE)
 
 @contextlib.contextmanager
 def atomic_db_update():
@@ -82,53 +123,11 @@ def atomic_db_update():
             msvcrt.locking(lock_f.fileno(), msvcrt.LK_NBLCK, 1)
             locked = True
             
-            db = None
-            # Try to load primary
-            if DATA_FILE.exists():
-                try:
-                    with open(DATA_FILE, "r", encoding='utf-8') as f:
-                        db = json.load(f)
-                except (json.JSONDecodeError, ValueError) as e:
-                    print(f"⚠️ Primary DB corrupted: {e}. Trying backup...")
-            
-            # Try to load backup if primary failed
-            if db is None and BAK_FILE.exists():
-                try:
-                    with open(BAK_FILE, "r", encoding='utf-8') as f:
-                        db = json.load(f)
-                        print("✅ Recovered from backup.")
-                except Exception as e:
-                    print(f"❌ Backup also corrupted: {e}")
-
-            # Fallback to empty if both failed
-            if db is None:
-                print("⚠️ Initializing new DB.")
-                db = {
-                    "trades": [],
-                    "option_trades": [],
-                    "daily_summaries": [],
-                    "strategy_notes": [],
-                    "settings": DEFAULT_SETTINGS.copy(),
-                    "cumulative_pnl": 0.0,
-                    "version": 1,
-                }
+            db = _load_db()
 
             yield db
             
-            # Write to TMP first
-            with open(TMP_FILE, "w", encoding='utf-8') as f:
-                json.dump(db, f, indent=2, default=str)
-                f.flush()
-                os.fsync(f.fileno())
-            
-            # Create backup before replacing
-            if DATA_FILE.exists():
-                if BAK_FILE.exists():
-                    os.remove(BAK_FILE)
-                os.rename(DATA_FILE, BAK_FILE)
-            
-            # Atomic rename
-            os.rename(TMP_FILE, DATA_FILE)
+            _save_db(db)
             break # Success
         except (OSError, IOError) as e:
             if attempt < 9:
@@ -171,23 +170,6 @@ def is_eod_window(now: datetime | None = None) -> bool:
     t = n.timetz().replace(tzinfo=None)
     return EOD_WINDOW_START <= t <= EOD_WINDOW_END
 
-def _load_db() -> dict:
-    """Load the full trade database (Read Only)."""
-    for path in [DATA_FILE, BAK_FILE]:
-        if path.exists():
-            try:
-                return json.loads(path.read_text(encoding="utf-8"))
-            except Exception:
-                continue
-    return {
-        "trades": [],
-        "option_trades": [],
-        "daily_summaries": [],
-        "strategy_notes": [],
-        "settings": DEFAULT_SETTINGS.copy(),
-        "cumulative_pnl": 0.0,
-        "version": 1,
-    }
 
 def get_settings() -> dict:
     """Return current paper trader settings."""
@@ -203,7 +185,10 @@ def save_settings(new_settings: dict) -> dict:
             db["settings"] = DEFAULT_SETTINGS.copy()
         for k, v in new_settings.items():
             if k in DEFAULT_SETTINGS:
-                if k in ("capital_per_trade", "sl_pct", "tgt_pct"):
+                if k in ("capital_per_trade", "sl_pct", "tgt_pct",
+                          "rg_daily_stop_pct", "rg_monthly_stop_pct",
+                          "rg_concurrent_open_pct", "rg_margin_util_cap",
+                          "rg_correlation_max"):
                     db["settings"][k] = float(v)
                 elif k in ("max_trades_per_day", "max_new_entries_per_cycle"):
                     db["settings"][k] = int(v)
@@ -370,6 +355,11 @@ def enter_option_structure(structure_name: str, resolved_legs: list, underlying:
         max_ops = cfg.get("options", {}).get("max_concurrent_structures", 4)
         if len(open_ops) >= max_ops: return {"error": f"Max concurrent options structures ({max_ops}) reached"}
         
+        # Prevent SL infinite loops: max 1 entry per structure per symbol per day
+        today_str = date.today().isoformat()
+        todays_trades = [t for t in db["option_trades"] if t.get("symbol") == underlying and t.get("structure") == structure_name and t.get("entry_date") == today_str]
+        if todays_trades: return {"error": f"Already traded {structure_name} for {underlying} today"}
+
         net_premium = sum((leg.premium * leg.lots * leg.lot_size) * (1 if leg.side == "SELL" else -1) for leg in resolved_legs)
         if net_premium <= 0:
             return {"error": "Non-credit structure (0 premium likely due to missing LTP data)"}
@@ -411,9 +401,12 @@ def enter_nifty_option_structure(setup, resolved_legs: list, cfg: dict) -> dict:
         nifty_cfg = cfg.get("nifty_options", {})
         max_nifty = nifty_cfg.get("max_nifty_structures", 2)
         open_nifty = [t for t in db["option_trades"] if t.get("status") == "OPEN" and t.get("symbol") == "NIFTY"]
-        if len(open_nifty) >= max_nifty:
-            journal.log_skipped_trade("NIFTY", "NEUTRAL", "MED", "MAX_TRADES", "UNKNOWN", "NEUTRAL", "options_gate", "Max concurrent NIFTY structures reached")
-            return {"error": f"Max concurrent NIFTY structures reached"}
+        if len(open_nifty) > 0: return {"error": "NIFTY option structure already open"}
+        
+        # Prevent SL infinite loops: max 1 entry per structure today
+        today_str = date.today().isoformat()
+        todays_trades = [t for t in db["option_trades"] if t.get("symbol") == "NIFTY" and t.get("structure") == setup.strategy and t.get("entry_date") == today_str]
+        if todays_trades: return {"error": f"Already traded {setup.strategy} for NIFTY today"}
         
         net_credit = sum((l.premium * l.lots * l.lot_size) * (1 if l.side == "SELL" else -1) for l in resolved_legs)
         if net_credit <= 0:
@@ -619,16 +612,25 @@ def check_and_close_trades() -> list[dict]:
 
     if not market_open and not is_eod: return []
 
+    # 1. READ open symbols first OUTSIDE the lock/transaction to avoid holding it during network calls
+    db = _load_db()
+    open_trades = [t for t in db.get("trades", []) if t.get("status") == "OPEN"]
+    if not open_trades: return []
+
+    symbols = list(set(t["symbol"] for t in open_trades))
+    
+    # 2. FETCH prices OUTSIDE the lock
+    prices = _get_ltp_batch(symbols)
+
     closed = []
+    # 3. Enter transaction lock ONLY for local fast DB mutations
     with atomic_db_update() as db:
         settings = db.get("settings", {})
         auto_close = settings.get("auto_close_eod", True) # Default to True if missing
         
-        open_trades = [t for t in db["trades"] if t.get("status") == "OPEN"]
+        # Reload open trades from the locked db copy to ensure fresh transaction state
+        open_trades = [t for t in db.get("trades", []) if t.get("status") == "OPEN"]
         if not open_trades: return []
-
-        symbols = list(set(t["symbol"] for t in open_trades))
-        prices = _get_ltp_batch(symbols)
 
         for trade in open_trades:
             ltp = prices.get(trade["symbol"])
@@ -738,10 +740,32 @@ def auto_enter_from_alerts(alerts: list[dict], cfg: dict | None = None) -> list[
     if now_ist.hour == 15 and now_ist.minute >= 15: return []
 
     if cfg is None: cfg = load_config()
-    guardrails = Guardrails(cfg)
+
+    # Merge UI-saved risk gate overrides into a copy of cfg so Guardrails
+    # picks them up without touching the global config file.
+    _saved = get_settings()
+    _risk_override = dict(cfg.get("risk", {}))
+    _risk_override["daily_stop_pct"]      = _saved.get("rg_daily_stop_pct",      _risk_override.get("daily_stop_pct", 0.02))
+    _risk_override["monthly_stop_pct"]    = _saved.get("rg_monthly_stop_pct",    _risk_override.get("monthly_stop_pct", 0.06))
+    _risk_override["concurrent_open_pct"] = _saved.get("rg_concurrent_open_pct", _risk_override.get("concurrent_open_pct", 0.03))
+    _risk_override["margin_util_cap"]     = _saved.get("rg_margin_util_cap",     _risk_override.get("margin_util_cap", 0.60))
+    _risk_override["correlation_max"]     = _saved.get("rg_correlation_max",     _risk_override.get("correlation_max", 0.70))
+    _cfg_override = {**cfg, "risk": _risk_override}
+    guardrails = Guardrails(_cfg_override)
     journal = Journal(cfg["paths"]["journal_db"])
     today_str = date.today().isoformat()
     entered = []
+
+    # Pre-fetch LTP for any alerts that lack entry_price/stop OUTSIDE the lock
+    missing_symbols = []
+    for alert in alerts:
+        ep = alert.get("entry_price")
+        if ep is None or ep <= 0:
+            missing_symbols.append(alert.get("symbol"))
+    if missing_symbols:
+        prefetched_prices = _get_ltp_batch(list(set(missing_symbols)))
+    else:
+        prefetched_prices = {}
 
     with atomic_db_update() as db:
         settings = db.get("settings", DEFAULT_SETTINGS.copy())
@@ -805,24 +829,12 @@ def auto_enter_from_alerts(alerts: list[dict], cfg: dict | None = None) -> list[
                 journal.log_skipped_trade(sym, direction, conf, "DUPLICATE_TODAY", regime, flow_bias, "daily_dedup", f"Already traded {sym}")
                 continue
 
-            proposed_risk = alert.get("risk_rupees", 0) or 0
-            gate_result = guardrails.check_new_trade(
-                proposed_risk=proposed_risk,
-                open_risk=open_risk,
-                day_pnl=today_pnl,
-                month_pnl=month_pnl,
-                margin_used_pct=margin_used_pct
-            )
-            if not gate_result.ok:
-                journal.log_skipped_trade(sym, direction, conf, "RISK_GATE", regime, flow_bias, "; ".join(gate_result.reasons), f"Risk: ₹{proposed_risk:,.0f}")
-                continue
-
             entry_price = alert.get("entry_price")
             stop = alert.get("stop")
 
             # Fallback for missing prices (common for stock alerts)
             if entry_price is None or entry_price <= 0:
-                entry_price = _get_ltp(sym)
+                entry_price = prefetched_prices.get(sym) or _get_ltp(sym)
                 if entry_price is None or entry_price <= 0:
                     journal.log_skipped_trade(sym, direction, conf, "PRICE_ERROR", regime, flow_bias, "LTP_FETCH_FAILED", f"Could not get LTP for {sym}")
                     continue
@@ -837,7 +849,18 @@ def auto_enter_from_alerts(alerts: list[dict], cfg: dict | None = None) -> list[
                 alert["stop"] = stop
 
             if entry_price > 0 and stop > 0 and entry_price != stop:
-                size_result = directional_size(total_capital, cfg["risk"]["per_trade_pct"], entry_price, stop, 1)
+                try:
+                    size_result = directional_size(
+                        total_capital, 
+                        cfg["risk"]["per_trade_pct"], 
+                        entry_price, 
+                        stop, 
+                        1, 
+                        direction=direction
+                    )
+                except ValueError as ve:
+                    journal.log_skipped_trade(sym, direction, conf, "PRICE_ERROR", regime, flow_bias, "INVALID_STOP_RELATION", str(ve))
+                    continue
                 
                 # Cap quantity by Capital per Trade setting (Notional cap)
                 capital_cap = settings.get("capital_per_trade", 500000.0)
@@ -847,12 +870,24 @@ def auto_enter_from_alerts(alerts: list[dict], cfg: dict | None = None) -> list[
                 
                 if final_qty > 0:
                     alert["qty"] = final_qty
-                    alert["risk_rupees"] = round(final_qty * abs(entry_price - stop), 2)
+                    proposed_risk = round(final_qty * abs(entry_price - stop), 2)
+                    alert["risk_rupees"] = proposed_risk
                 else:
                     journal.log_skipped_trade(sym, direction, conf, "SIZE_ERROR", regime, flow_bias, "ZERO_QTY", f"Size calculation returned 0 for {sym}")
                     continue
             else:
                 journal.log_skipped_trade(sym, direction, conf, "PRICE_ERROR", regime, flow_bias, "INVALID_PRICES", f"Entry: {entry_price}, Stop: {stop}")
+                continue
+
+            gate_result = guardrails.check_new_trade(
+                proposed_risk=proposed_risk,
+                open_risk=open_risk,
+                day_pnl=today_pnl,
+                month_pnl=month_pnl,
+                margin_used_pct=margin_used_pct
+            )
+            if not gate_result.ok:
+                journal.log_skipped_trade(sym, direction, conf, "RISK_GATE", regime, flow_bias, "; ".join(gate_result.reasons), f"Risk: ₹{proposed_risk:,.0f}")
                 continue
 
             sl_pct = settings.get("sl_pct", 2.0)
@@ -863,7 +898,6 @@ def auto_enter_from_alerts(alerts: list[dict], cfg: dict | None = None) -> list[
                 tgt_price = round(entry_price * (1 - tgt_pct / 100), 2)
 
             new_id = max([t["id"] for t in db["trades"]] + [0]) + 1
-            final_qty = alert.get("qty", 0)
             new_trade = {
                 "id": new_id, "symbol": sym, "direction": direction, "status": "OPEN",
                 "entry_price": entry_price, "qty": final_qty,
@@ -871,7 +905,8 @@ def auto_enter_from_alerts(alerts: list[dict], cfg: dict | None = None) -> list[
                 "sl_price": stop, "sl_pct": sl_pct,
                 "tgt_price": tgt_price, "tgt_pct": tgt_pct,
                 "entry_time": now_ist.strftime("%Y-%m-%d %H:%M:%S"),
-                "entry_date": today_str, "confidence": conf, "risk_rupees": alert.get("risk_rupees", 0),
+                "entry_date": today_str, "confidence": conf, "risk_rupees": proposed_risk,
+                "planned_risk": alert.get("planned_risk", proposed_risk),
                 "source_regime": regime, "flow_bias": flow_bias, "hold_minutes": None
             }
 
@@ -906,46 +941,135 @@ def generate_eod_summary(target_date: str | None = None) -> dict:
     check_and_close_trades()
 
     with atomic_db_update() as db:
-        day_trades = [t for t in db["trades"] if t.get("entry_date") == today]
-        closed_today = [t for t in day_trades if t["status"] == "CLOSED"]
-        
-        winners = [t for t in closed_today if (t.get("pnl") or 0) > 0]
-        losers = [t for t in closed_today if (t.get("pnl") or 0) < 0]
-        total_pnl = sum(t.get("pnl", 0) or 0 for t in closed_today)
-        
-        sl_hits = len([t for t in closed_today if t.get("exit_reason") == "SL_HIT"])
-        target_hits = len([t for t in closed_today if t.get("exit_reason") == "TARGET_HIT"])
-        eod_exits = len([t for t in closed_today if t.get("exit_reason") == "EOD_CLOSE"])
-        win_rate = round((len(winners) / max(len(closed_today), 1)) * 100, 1)
+        if "daily_summaries" not in db:
+            db["daily_summaries"] = []
 
-        summary = {
-            "date": today,
-            "generated_at": _now_ist().strftime("%Y-%m-%d %H:%M:%S IST"),
-            "total_trades": len(day_trades),
-            "closed": len(closed_today),
-            "winners": len(winners),
-            "losers": len(losers),
-            "win_rate": win_rate,
-            "sl_hits": sl_hits,
-            "target_hits": target_hits,
-            "eod_exits": eod_exits,
-            "total_pnl": round(total_pnl, 2),
-            "trades": closed_today,
-            "cumulative_pnl": round(db.get("cumulative_pnl", 0) + total_pnl, 2),
-            "analysis": {
-                "what_went_right": [],
-                "what_went_wrong": [],
-                "patterns": []
-            },
-            "corrections": []
-        }
+        def _calc_day_summary(day: str) -> dict:
+            day_trades = [t for t in db.get("trades", []) if t.get("entry_date") == day]
+            closed_today = [t for t in day_trades if t["status"] == "CLOSED"]
+            winners = [t for t in closed_today if (t.get("pnl") or 0) > 0]
+            losers = [t for t in closed_today if (t.get("pnl") or 0) < 0]
+            total_pnl = sum(t.get("pnl", 0) or 0 for t in closed_today)
+            
+            sl_hits = len([t for t in closed_today if t.get("exit_reason") == "SL_HIT"])
+            target_hits = len([t for t in closed_today if t.get("exit_reason") == "TARGET_HIT"])
+            eod_exits = len([t for t in closed_today if t.get("exit_reason") == "EOD_CLOSE"])
+            win_rate = round((len(winners) / max(len(closed_today), 1)) * 100, 1)
+
+            return {
+                "date": day,
+                "generated_at": _now_ist().strftime("%Y-%m-%d %H:%M:%S IST"),
+                "total_trades": len(day_trades),
+                "closed": len(closed_today),
+                "winners": len(winners),
+                "losers": len(losers),
+                "win_rate": win_rate,
+                "sl_hits": sl_hits,
+                "target_hits": target_hits,
+                "eod_exits": eod_exits,
+                "total_pnl": round(total_pnl, 2),
+                "trades": closed_today,
+                "cumulative_pnl": 0.0,
+                "analysis": {
+                    "what_went_right": [],
+                    "what_went_wrong": [],
+                    "patterns": []
+                },
+                "corrections": _generate_corrections(closed_today, db.get("daily_summaries", []))
+            }
+
+        # 1. Identify all unique trade dates in db["trades"] and db["option_trades"]
+        all_trade_dates = set()
+        for t in db.get("trades", []):
+            if t.get("entry_date"):
+                all_trade_dates.add(t["entry_date"])
+        for t in db.get("option_trades", []):
+            if t.get("entry_date"):
+                all_trade_dates.add(t["entry_date"])
+
+        # Ensure 'today' is in the set
+        all_trade_dates.add(today)
+
+        # 2. Check for missing summaries and generate them
+        existing_dates = {s["date"] for s in db["daily_summaries"]}
+        for d in sorted(all_trade_dates):
+            if d not in existing_dates or d == today:
+                summary = _calc_day_summary(d)
+                db["daily_summaries"] = [s for s in db["daily_summaries"] if s["date"] != d]
+                db["daily_summaries"].append(summary)
+
+        # 3. Sort daily_summaries chronologically
+        db["daily_summaries"].sort(key=lambda x: x["date"])
+
+        # 4. Recompute cumulative_pnl sequentially across all summaries
+        running_pnl = 0.0
+        for s in db["daily_summaries"]:
+            running_pnl += s["total_pnl"]
+            s["cumulative_pnl"] = round(running_pnl, 2)
+
+        db["cumulative_pnl"] = round(running_pnl, 2)
+
+        # Return the summary for target today
+        today_summary = next((s for s in db["daily_summaries"] if s["date"] == today), None)
+        if not today_summary:
+            today_summary = _calc_day_summary(today)
+            today_summary["cumulative_pnl"] = db["cumulative_pnl"]
         
-        # Remove existing summary for the same date to avoid duplicates
-        db["daily_summaries"] = [s for s in db.get("daily_summaries", []) if s.get("date") != today]
-        
-        db["cumulative_pnl"] = summary["cumulative_pnl"]
-        db["daily_summaries"].append(summary)
-        return summary
+        return today_summary
+
+def _generate_corrections(today_trades: list[dict], history: list[dict]) -> list[str]:
+    """Generate strategy corrections based on today's result + recent history."""
+    corrections = []
+
+    if not today_trades:
+        return ["No trades to analyze. Consider lowering confidence threshold if signals were present but not taken."]
+
+    winners = [t for t in today_trades if (t.get("pnl") or 0) > 0]
+    losers = [t for t in today_trades if (t.get("pnl") or 0) < 0]
+    sl_hits = [t for t in today_trades if t.get("exit_reason") == "SL_HIT"]
+
+    win_rate = len(winners) / len(today_trades) * 100 if today_trades else 0
+
+    # SL too tight?
+    if len(sl_hits) >= 3:
+        corrections.append("WIDEN SL: 3+ SL hits today. Consider 2.5% SL instead of 2%.")
+
+    # Win rate corrections
+    if win_rate < 40 and len(today_trades) >= 3:
+        corrections.append("REDUCE TRADES: Low win rate. Only take HIGH confidence signals tomorrow.")
+    elif win_rate >= 70:
+        corrections.append("MAINTAIN: Strategy working. Keep current parameters.")
+
+    # Check for missed targets (EOD exits that were in profit)
+    eod_profitable = [t for t in today_trades if t.get("exit_reason") == "EOD_CLOSE" and (t.get("pnl") or 0) > 0]
+    if eod_profitable:
+        corrections.append(f"TRAIL STOP: {len(eod_profitable)} trade(s) exited at EOD with profit — implement trailing SL to lock gains.")
+
+    # Directional bias check
+    long_trades = [t for t in today_trades if t["direction"] == "LONG"]
+    short_trades = [t for t in today_trades if t["direction"] == "SHORT"]
+    long_losses = sum(1 for t in long_trades if (t.get("pnl") or 0) < 0)
+    short_losses = sum(1 for t in short_trades if (t.get("pnl") or 0) < 0)
+
+    if long_losses >= 2 and len(long_trades) >= 2:
+        corrections.append("REDUCE LONGS: Long bias failing. Check if regime has shifted bearish.")
+    if short_losses >= 2 and len(short_trades) >= 2:
+        corrections.append("REDUCE SHORTS: Short bias failing. Check if regime has shifted bullish.")
+
+    # Check recent history for systemic issues
+    if len(history) >= 3:
+        last_3 = history[-3:]
+        losing_days = sum(1 for s in last_3 if s.get("total_pnl", 0) < 0)
+        if losing_days >= 3:
+            corrections.append("PAUSE TRADING: 3 consecutive losing days. Review strategy fundamentals before continuing.")
+        avg_win_rate = sum(s.get("win_rate", 0) for s in last_3) / 3
+        if avg_win_rate < 35:
+            corrections.append("OVERHAUL SIGNALS: 3-day average win rate below 35%. Tighten entry criteria aggressively.")
+
+    if not corrections:
+        corrections.append("No corrections needed. System performing within parameters.")
+
+    return corrections
 
 def get_stats() -> dict:
     db = _load_db()

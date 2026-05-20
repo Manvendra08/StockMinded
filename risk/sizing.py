@@ -37,12 +37,12 @@ def directional_size(
             direction (e.g. stop > entry for a LONG trade).
     """
     # --- Direction-aware stop validation (P2 fix) ---
-    if direction.upper() == "LONG" and stop >= entry:
+    if direction.upper() == "LONG" and stop > entry:
         raise ValueError(
             f"Invalid stop for LONG trade: stop ({stop}) must be below entry ({entry}). "
             "Check whether entry and stop were passed in the wrong order."
         )
-    if direction.upper() == "SHORT" and stop <= entry:
+    if direction.upper() == "SHORT" and stop < entry:
         raise ValueError(
             f"Invalid stop for SHORT trade: stop ({stop}) must be above entry ({entry}). "
             "Check whether entry and stop were passed in the wrong order."

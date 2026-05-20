@@ -2305,6 +2305,12 @@
           <div class="card-title" style="margin-bottom: 12px;"><span class="icon">💰</span> Money Flows</div>
           <div class="bias-indicator" id="bias-indicator" style="padding: 10px; margin-bottom: 12px; font-size: 0.9rem;">—</div>
           <div class="flow-stats" id="flow-stats"></div>
+          <div id="ai-sentiment-container" style="margin-top: 12px; padding: 12px; border-radius: var(--radius-sm); background: rgba(255,255,255,0.03); border: 1px solid var(--glass-border); font-size: 0.8rem; display:none;">
+            <div style="font-weight:700; color:var(--text-secondary); margin-bottom:6px; display:flex; align-items:center; gap:6px;">
+              <span>🤖</span> AI Market Sentiment
+            </div>
+            <div id="ai-sentiment-text" style="color:var(--text-primary); line-height:1.4; font-weight: 500;">—</div>
+          </div>
         </div>
       </div>
 
@@ -2793,6 +2799,136 @@
       ${s.html || `<div class="fs-value ${s.cls || ''}">${s.value}</div>`}
     </div>
   `).join('');
+
+      // Render AI Sentiment
+      const aiContainer = document.getElementById('ai-sentiment-container');
+      const aiText = document.getElementById('ai-sentiment-text');
+      if (aiContainer && aiText) {
+        if (f.ai_sentiment) {
+          let parsed = f.ai_sentiment;
+          if (typeof parsed === 'string') {
+            try {
+              parsed = JSON.parse(parsed);
+            } catch (e) {
+              try {
+                parsed = Function('"use strict";return (' + parsed + ')')();
+              } catch (e2) {}
+            }
+          }
+          
+          if (typeof parsed === 'object' && parsed !== null) {
+            const formatItem = (item) => {
+              if (!item) return '';
+              if (typeof item === 'string') return item;
+              if (typeof item === 'object') {
+                const ticker = item.ticker || item.symbol || item.stock || item.name;
+                const rationale = item.rationale || item.idea || item.reason || item.action || item.description;
+                if (ticker && rationale) {
+                  return `<strong>${ticker}</strong>: ${rationale}`;
+                }
+                if (ticker) return `<strong>${ticker}</strong>`;
+                if (rationale) return rationale;
+                return Object.entries(item).map(([k, v]) => `<strong>${k}</strong>: ${v}`).join(' | ');
+              }
+              return String(item);
+            };
+
+            // Helper to recursively find a key value
+            const findValue = (obj, keysToFind) => {
+              // 1. Check direct keys
+              for (const k of Object.keys(obj)) {
+                if (keysToFind.some(tk => k.toLowerCase().includes(tk))) {
+                  const val = obj[k];
+                  if (val && typeof val === 'object' && !Array.isArray(val)) {
+                    // Try to search deeper inside the nested object
+                    const subVal = findValue(val, keysToFind);
+                    if (subVal) return subVal;
+                  }
+                  if (val && (typeof val === 'string' || typeof val === 'number')) {
+                    return String(val);
+                  }
+                }
+              }
+              // 2. Fallback to any string value that matches
+              for (const v of Object.values(obj)) {
+                if (v && typeof v === 'object' && !Array.isArray(v)) {
+                  const subVal = findValue(v, keysToFind);
+                  if (subVal) return subVal;
+                }
+              }
+              return null;
+            };
+
+            // Look specifically for overall sentiment value first
+            let sent = findValue(parsed, ['overall_market_sentiment', 'overall_sentiment', 'verdict', 'outlook']);
+            if (!sent) {
+              sent = findValue(parsed, ['sentiment']);
+            }
+            
+            let just = findValue(parsed, ['justification', 'reason', 'summary', 'explanation', 'content']);
+            
+            if (sent) {
+              const tone = sent.toLowerCase().includes('bull') ? 'bull' : (sent.toLowerCase().includes('bear') ? 'bear' : 'range');
+              
+              // Extract Catalysts & Trade Ideas safely
+              const catalysts = parsed.top_catalysts || parsed.catalysts;
+              const ideas = parsed.actionable_trade_ideas || parsed.trade_ideas || parsed.ideas;
+              
+              let html = `
+                <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+                  <span class="decision-pill ${tone}" style="display:inline-block; padding: 4px 10px; font-size:0.75rem; font-weight:700; border-radius:4px;">${sent.toUpperCase()}</span>
+                </div>
+                ${just ? `<div style="font-size:0.8rem; color:var(--text-secondary); line-height:1.4; margin-bottom: 12px; font-style: italic;">"${just}"</div>` : ''}
+              `;
+              
+              if (Array.isArray(catalysts) && catalysts.length > 0) {
+                html += `
+                  <div style="margin-top: 10px; border-top: 1px solid rgba(255,255,255,0.05); padding-top: 8px;">
+                    <div style="font-weight: 700; font-size: 0.75rem; color: #3b82f6; text-transform: uppercase; margin-bottom: 4px; display: flex; align-items: center; gap: 4px;">
+                      <span>⚡</span> Key Catalysts
+                    </div>
+                    <ul style="margin: 0; padding-left: 14px; color: var(--text-primary); font-size: 0.75rem; line-height: 1.4;">
+                      ${catalysts.map(c => `<li style="margin-bottom: 4px;">${formatItem(c)}</li>`).join('')}
+                    </ul>
+                  </div>
+                `;
+              }
+              
+              if (Array.isArray(ideas) && ideas.length > 0) {
+                html += `
+                  <div style="margin-top: 10px; border-top: 1px solid rgba(255,255,255,0.05); padding-top: 8px;">
+                    <div style="font-weight: 700; font-size: 0.75rem; color: #10b981; text-transform: uppercase; margin-bottom: 4px; display: flex; align-items: center; gap: 4px;">
+                      <span>🎯</span> Actionable Ideas / Hot Stocks
+                    </div>
+                    <ul style="margin: 0; padding-left: 14px; color: var(--text-primary); font-size: 0.75rem; line-height: 1.4; font-weight: 600;">
+                      ${ideas.map(i => `<li style="margin-bottom: 4px; color: #e2e8f0;">${formatItem(i)}</li>`).join('')}
+                    </ul>
+                  </div>
+                `;
+              }
+              
+              aiText.innerHTML = html;
+            } else {
+              aiText.innerHTML = Object.entries(parsed)
+                .map(([k, v]) => {
+                  if (Array.isArray(v)) {
+                    return `<div style="margin-bottom:4px;"><strong>${k}:</strong><ul style="margin:4px 0 4px 16px; padding:0; list-style-type:disc;">${v.map(item => `<li>${item}</li>`).join('')}</ul></div>`;
+                  }
+                  if (typeof v === 'object' && v !== null) {
+                    return `<div style="margin-bottom:4px;"><strong>${k}:</strong> ${JSON.stringify(v)}</div>`;
+                  }
+                  return `<div style="margin-bottom:4px;"><strong>${k}:</strong> ${v}</div>`;
+                })
+                .join('');
+            }
+          } else {
+            aiText.textContent = parsed;
+          }
+          aiContainer.style.display = 'block';
+        } else {
+          aiContainer.style.display = 'none';
+        }
+      }
     }
 
     function renderSectors(d) {
@@ -3269,7 +3405,7 @@ function renderAll(data) {
         console.error('Failed to poll telegram status', e);
       }
     }
-    setInterval(pollTelegramStatus, 30000);
+    setInterval(pollTelegramStatus, 900000); // 15 min — status rarely changes
     pollTelegramStatus();
 
     // ── INTRADAY ────────────────────────────────────────────────────

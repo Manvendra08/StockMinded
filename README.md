@@ -11,7 +11,7 @@ Capital target: ₹70L · 5%/month · max −6% monthly / −2% daily drawdown.
 python -m venv .venv
 .venv\Scripts\activate        # Windows
 pip install -r requirements.txt
-cp .env.example .env          # fill Telegram + broker keys
+cp .env.example .env          # fill Telegram, broker, and GOOGLE_API_KEY
 ```
 
 Edit `config/config.yaml` for capital, universe, schedule.
@@ -28,7 +28,7 @@ python main.py schedule        # cron loop: daily 08:45 IST alert
 
 ```
 config/      config.yaml + loader
-data/        feed.py  (yfinance + nsepython)
+data/        feed.py (yfinance + nsepython) + ai_scraper.py (ScrapeGraphAI SaaS/Local)
 signals/     regime · flows · leadership · structure_map
 risk/        sizing · guardrails
 ops/         journal (SQLite) · alerts (Telegram)
@@ -40,7 +40,7 @@ main.py      CLI entry
 | Signal | File | Output |
 |---|---|---|
 | Regime | `signals/regime.py` | 1 of 6 regimes + VIX/ADX/trend/breadth |
-| Flows | `signals/flows.py` | FII/DII 5d, top inflow/outflow sectors, PCR, max-pain, bias |
+| Flows | `signals/flows.py` | FII/DII 5d, top inflow/outflow sectors, PCR, max-pain, bias, AI news sentiment |
 | Leadership | `signals/leadership.py` | A-grade long/short lists via 20d RS-line quintiles |
 | Structure | `signals/structure_map.py` | Regime → primary/secondary trade structure |
 

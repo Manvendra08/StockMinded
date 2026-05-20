@@ -120,6 +120,8 @@ def _run_engine() -> dict:
     # NIFTY close for header
     try:
         nifty_df = feed.ohlc_cached("NIFTY", period="1mo")
+        if not nifty_df.empty:
+            nifty_df = nifty_df.dropna(subset=["close"])
     except Exception as e:
         nifty_df = pd.DataFrame()
         source_errors.append(f"Nifty feed failed: {e}")
@@ -131,6 +133,8 @@ def _run_engine() -> dict:
     # BankNifty
     try:
         bn_df = feed.ohlc_cached("BANKNIFTY", period="1mo")
+        if not bn_df.empty:
+            bn_df = bn_df.dropna(subset=["close"])
     except Exception as e:
         bn_df = pd.DataFrame()
         source_errors.append(f"BankNifty feed failed: {e}")
@@ -213,6 +217,7 @@ def _run_engine() -> dict:
             "mp_updated_at": flow_snap.mp_updated_at,
             "notes": getattr(flow_snap, "notes", ""),
             "option_source": getattr(flow_snap, "option_source", None),
+            "ai_sentiment": getattr(flow_snap, "ai_sentiment", None),
         },
         "leaders": [
             {"symbol": r.symbol, "rs_slope": max(-150.0, min(150.0, r.rs_slope_20d)), "pct_vs_50dma": r.pct_vs_50dma, "quintile": r.quintile}
@@ -310,8 +315,12 @@ def _run_engine() -> dict:
             return obj.isoformat()
         if isinstance(obj, (np.integer,)):
             return int(obj)
-        if isinstance(obj, (np.floating,)):
-            return float(obj)
+        if isinstance(obj, (np.floating, float)):
+            val = float(obj)
+            import math
+            if math.isnan(val) or math.isinf(val):
+                return None
+            return val
         if isinstance(obj, (np.bool_,)):
             return bool(obj)
         if isinstance(obj, (list, tuple)):
@@ -389,6 +398,7 @@ def _generate_trade_alerts(data: dict) -> list[dict]:
     if (now_ist.hour, now_ist.minute) >= (14, 45):
         allow_longs = False
         allow_shorts = False
+        can_trade_options = False
     
     # 2. VIX Filter
     if vix > 24:
@@ -974,6 +984,22 @@ def api_paper_skipped():
                 "by_gate": by_gate,
             },
         })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/paper/skipped/clear", methods=["POST"])
+def api_paper_skipped_clear():
+    """Clear skipped trades older than N days."""
+    try:
+        data = request.json or {}
+        days = data.get("days")
+        if days is None:
+            return jsonify({"error": "Missing days"}), 400
+        
+        cfg = load_config()
+        journal = Journal(cfg["paths"]["journal_db"])
+        count = journal.clear_skipped_trades(int(days))
+        return jsonify({"success": True, "deleted": count})
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500

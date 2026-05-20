@@ -112,6 +112,11 @@ def classify(index_symbol: str = "NIFTY", stock_universe_data: dict | None = Non
     idx = feed.ohlc_cached(index_symbol, period="2y")
     vix = feed.ohlc_cached("INDIAVIX", period="3mo")
 
+    if idx is not None and not idx.empty:
+        idx = idx.dropna(subset=["close"])
+    if vix is not None and not vix.empty:
+        vix = vix.dropna(subset=["close"])
+
     if idx is None or idx.empty or vix is None or vix.empty:
         return RegimeSnapshot(
             regime=Regime.RANGE_LOW_VOL,

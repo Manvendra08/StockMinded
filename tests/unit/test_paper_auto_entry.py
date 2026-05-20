@@ -13,6 +13,28 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from dashboard.paper_trader import auto_enter_from_alerts, _load_db, _save_db, DATA_FILE
 
 
+@pytest.fixture(autouse=True)
+def mock_atomic_db_update(tmp_path):
+    """Globally patch atomic_db_update and DATA_FILE to avoid msvcrt lock file issues in tests and prevent leaks."""
+    import contextlib
+    import dashboard.paper_trader
+
+    test_db = tmp_path / "paper_trades_test.json"
+    with patch("dashboard.paper_trader.DATA_FILE", test_db), \
+         patch("dashboard.paper_trader.LOCK_FILE", test_db.with_suffix(".lock")), \
+         patch("dashboard.paper_trader.BAK_FILE", test_db.with_suffix(".bak")), \
+         patch("dashboard.paper_trader.TMP_FILE", test_db.with_suffix(".tmp")):
+
+        @contextlib.contextmanager
+        def mock_update():
+            db = dashboard.paper_trader._load_db()
+            yield db
+            dashboard.paper_trader._save_db(db)
+
+        with patch("dashboard.paper_trader.atomic_db_update", side_effect=mock_update):
+            yield
+
+
 @pytest.fixture
 def mock_db_empty(tmp_path):
     """Mock empty database."""
@@ -120,7 +142,7 @@ class TestAutoEntryRiskGates:
         # 3% of 7M = 210,000 concurrent risk cap
         mock_db_empty["trades"] = [
             {
-                "id": 1, "symbol": "TEST1", "status": "OPEN", "risk_rupees": 200000,
+                "id": 1, "symbol": "TEST1", "status": "OPEN", "risk_rupees": 208000,
             }
         ]
         
@@ -183,12 +205,9 @@ class TestAutoEntryRiskGates:
 class TestSizingIntegration:
     """Test that sizing module is used correctly."""
 
-    @patch("dashboard.paper_trader._get_ltp")
     @patch("dashboard.paper_trader.is_market_open", return_value=True)
-    def test_sizing_calculates_qty_from_stop(self, mock_market_open, mock_ltp, mock_db_empty, mock_config, valid_alert):
+    def test_sizing_calculates_qty_from_stop(self, mock_market_open, mock_db_empty, mock_config, valid_alert):
         """Position size should be calculated from stop distance."""
-        mock_ltp.return_value = 2500.0
-        
         # Alert with wide stop should result in smaller position
         valid_alert["entry_price"] = 2500.0
         valid_alert["stop"] = 2400.0  # 4% stop
@@ -242,7 +261,7 @@ class TestSkippedTradeLogging:
             # Should have logged skipped trade
             mock_journal.log_skipped_trade.assert_called_once()
             call_args = mock_journal.log_skipped_trade.call_args
-            assert call_args[1]["skip_reason"] == "CONFIDENCE_FILTER"
+            assert call_args[0][3] == "CONFIDENCE_FILTER"
 
     @patch("dashboard.paper_trader.Journal")
     @patch("dashboard.paper_trader._get_ltp")
@@ -268,5 +287,5 @@ class TestSkippedTradeLogging:
             
             mock_journal.log_skipped_trade.assert_called_once()
             call_args = mock_journal.log_skipped_trade.call_args
-            assert call_args[1]["skip_reason"] == "RISK_GATE"
-            assert "Daily stop" in call_args[1]["risk_gate"]
+            assert call_args[0][3] == "RISK_GATE"
+            assert "Daily stop" in call_args[0][6]

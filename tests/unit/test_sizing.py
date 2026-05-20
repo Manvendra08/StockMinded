@@ -22,7 +22,7 @@ class TestDirectionalSize:
 
     def test_negative_stop_distance_returns_invalid(self):
         # stop above entry (short side) — abs handles it
-        result = directional_size(capital=1_000_000, per_trade_pct=0.0075, entry=490.0, stop=500.0)
+        result = directional_size(capital=1_000_000, per_trade_pct=0.0075, entry=490.0, stop=500.0, direction="SHORT")
         assert result.qty > 0
 
     def test_risk_rupees_matches_capital_pct(self):

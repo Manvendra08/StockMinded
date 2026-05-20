@@ -21,7 +21,8 @@ Results are logged to SQLite journal and sent as Telegram alerts. Optionally dri
 ```
 main.py
   ├── config/loader.py        → YAML loading with env var expansion
-  ├── data/feed.py            → Data pipeline (yfinance + nsepython)
+  ├── data/feed.py            → Data pipeline (yfinance + nsepython + AI fallback)
+  ├── data/ai_scraper.py      → AI extraction (SaaS + Local ScrapeGraphAI)
   ├── signals/                → 4-signal computation
   │   ├── regime.py           → Market state classifier
   │   ├── flows.py            → FII/DII, PCR, sector analysis
@@ -44,6 +45,7 @@ main.py
 1. **Data ingestion** (`data/feed.py`):
    - OHLC: yfinance (via `YF_SYMBOL` mapping for NSE indices/stocks)
    - Option chain, FII/DII, VIX: nsepython
+   - AI Scraper Fallbacks (`data/ai_scraper.py`): ScrapeGraphAI hybrid integration using SaaS API (scrapegraph-py) with a local fallback (SmartScraperGraph/SearchGraph using Gemini). Used when nsepython/Research360 feeds fail.
    - Caching: `_OHLC_CACHE` with 120s bucket window
 
 2. **Signal computation** (`signals/*`):
@@ -70,6 +72,7 @@ main.py
 - `broker`: provider + credentials (env vars: `${BROKER_API_KEY}`, etc.)
 - `universe_fo_sample`: 20 liquid F&O stocks for analysis
 - `sectors`: 11 NIFTY sector indices
+- `scrapegraphai`: enabled flag, model ("google_genai/gemini-1.5-flash"), api_key, and saas_api_key
 
 **Loader** (`config/loader.py`): replaces `${ENV_VAR}` in YAML via `_expand()` from `os.getenv()`.
 
@@ -311,8 +314,10 @@ CREATE TABLE trades (
 
 ## Testing
 
-No formal test suite yet. For validation:
-- `python main.py dashboard` → 4 signals compute, check terminal output for data fetch counts
+No formal integration tests yet, but a unit test suite has been established:
+- Run AI Scraper unit tests: `pytest tests/test_ai_scraper.py -v`
+- Run regime/alert/etc:
+  - `python main.py dashboard` → 4 signals compute, check terminal output for data fetch counts
 - `python dashboard/server.py` → server starts on :5050, test endpoints manually or via `/api/dashboard`
 - Verify A-GRADE LONGS / SHORTS tables populate on dashboard (requires ≥50-bar data for each symbol)
 - Telegram: `/api/test-telegram` sends ping, Alerter prints `[ALERT:SENT]` or `[ALERT:FAIL]`
@@ -326,7 +331,8 @@ No formal test suite yet. For validation:
 
 - **No API auth**: Dashboard endpoints public, no password. Add auth before production.
 - **Parquet → Pickle**: Switched cache format to avoid pyarrow dep; old `.parquet` files ignored. Delete `data/cache/ohlc/` to force fresh download.
-- **nsepython fragile**: Depends on NSE HTML structure. If feeds break, check nsepython version or use fallback mock data.
+- **nsepython fragile**: Depends on NSE HTML structure. If feeds break, checks falls back to ScrapeGraphAI SaaS/Local extraction.
+- **AI Latency**: ScrapeGraphAI calls (SaaS/Local) are significantly slower than direct REST API calls. They are only invoked as secondary fallback paths.
 - **IST-only**: All times hardcoded to Asia/Kolkata. Multi-timezone would need refactor.
 - **Paper trades only**: No real broker integration yet. Phase 3 will add live execution via Kite/Dhan/Fyers.
 

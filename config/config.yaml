@@ -91,6 +91,12 @@ data_sources:
   local_files:
     option_chain: "./data/manual/option_chain_NIFTY.csv"
 
+  scrapegraphai:
+    enabled: true
+    model: "google_genai/gemini-2.5-flash-lite"
+    api_key: "${GOOGLE_API_KEY}"
+    saas_api_key: "${SCRAPEGRAPHAI_API_KEY}"
+
 options:
   enabled: true
   underlyings: [NIFTY, BANKNIFTY]
@@ -115,7 +121,7 @@ nifty_options:
   # Intraday window
   intraday_entry_start: "09:45"
   intraday_entry_end: "14:30"
-  intraday_exit_by: "15:15"
+  intraday_exit_by: "15:25"
   # Positional window - All weekdays enabled for paper trading (0=Mon, 4=Fri)
   positional_entry_days: [0, 1, 2, 3, 4]
   positional_exit_expiry_cutoff: "15:15"

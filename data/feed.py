@@ -4,6 +4,7 @@ from __future__ import annotations
 import datetime as dt
 import io
 import json
+import logging
 import threading
 import time
 from functools import lru_cache
@@ -12,6 +13,8 @@ from typing import Optional
 
 import pandas as pd
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 
 CACHE_DIR = Path(__file__).parent.parent / "data/cache"
@@ -25,30 +28,71 @@ _DHAN_OC_CACHE: dict[str, tuple[float, dict]] = {}
 _DHAN_MASTER_CACHE: pd.DataFrame | None = None
 _OPTION_CHAIN_SOURCE: dict[str, str] = {}
 
+def _create_retry_session(retries=5, backoff_factor=1, status_forcelist=(500, 502, 503, 504)):
+    session = requests.Session()
+    retry = Retry(
+        total=retries,
+        read=retries,
+        connect=retries,
+        backoff_factor=backoff_factor,
+        status_forcelist=status_forcelist,
+        allowed_methods=["HEAD", "GET", "OPTIONS", "POST"],
+        raise_on_status=False
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
+
+
 def _get_nse_session():
     global _NSE_SESSION, _NSE_SESSION_TS
-    # Use lock to prevent race condition when refreshing session
     with _NSE_SESSION_LOCK:
         now = time.time()
-        # Refresh session every 10 minutes or if not exists
         if _NSE_SESSION is None or (now - _NSE_SESSION_TS) > 600:
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Accept-Encoding": "gzip, deflate",
-                "Connection": "keep-alive"
-            }
-            _NSE_SESSION = requests.Session()
-            _NSE_SESSION.headers.update(headers)
-            try:
-                # Hit pages that set NSE cookies used by option-chain APIs.
-                _NSE_SESSION.get("https://www.nseindia.com", timeout=10)
-                _NSE_SESSION.get("https://www.nseindia.com/market-data/live-equity-market", timeout=10)
-                _NSE_SESSION.get("https://www.nseindia.com/option-chain", timeout=10)
-                _NSE_SESSION_TS = now
-            except Exception as e:
-                print(f"[_get_nse_session] failed: {e}")
+            success = False
+            for attempt in range(3):
+                try:
+                    # Leverage curl_cffi for robust browser TLS/JA3 impersonation
+                    try:
+                        from curl_cffi import requests as curl_requests
+                        session = curl_requests.Session(impersonate="chrome120")
+                    except ImportError:
+                        session = _create_retry_session(retries=5, backoff_factor=1)
+                    
+                    headers = {
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                        "Accept": "*/*",
+                        "Accept-Language": "en-US,en;q=0.9",
+                        "Accept-Encoding": "gzip, deflate, br",
+                        "Connection": "keep-alive",
+                        "Referer": "https://www.nseindia.com/",
+                    }
+                    session.headers.update(headers)
+                    
+                    # Some versions of NSE block if you don't have the cookies from the main page.
+                    # We hit the main page first.
+                    r = session.get("https://www.nseindia.com", timeout=15)
+                    # If home page fails, try a slightly different approach
+                    if r.status_code != 200:
+                        headers["User-Agent"] = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+                        session.headers.update(headers)
+                        r = session.get("https://www.nseindia.com", timeout=15)
+                    
+                    r.raise_for_status()
+                    # Optional: hit a market data page to solidify the session
+                    session.get("https://www.nseindia.com/market-data/live-equity-market", timeout=10)
+                    
+                    _NSE_SESSION = session
+                    _NSE_SESSION_TS = now
+                    success = True
+                    logging.getLogger(__name__).debug("[_get_nse_session] session warmed up")
+                    break
+                except Exception as e:
+                    print(f"[_get_nse_session] warm-up attempt {attempt+1} failed: {type(e).__name__}: {e}")
+                    time.sleep(2 * (attempt + 1))
+            
+            if not success:
                 _NSE_SESSION = None
     return _NSE_SESSION
 
@@ -538,8 +582,8 @@ _R360_HEADERS = {
     ),
     "Accept": "*/*",
     "Accept-Language": "en-US,en;q=0.9",
-    "Referer": "https://www.research360.in/future-and-options/option-chain",
-    "Origin": "https://www.research360.in",
+    "Referer": "https://beta.research360.in/future-and-options/option-chain",
+    "Origin": "https://beta.research360.in",
     "X-Requested-With": "XMLHttpRequest",
 }
 
@@ -557,17 +601,23 @@ def _get_r360_session() -> requests.Session:
     with _R360_SESSION_LOCK:
         now = time.time()
         if _R360_SESSION is None or (now - _R360_SESSION_TS) > 1800:
-            s = requests.Session()
-            s.headers.update(_R360_HEADERS)
-            try:
-                s.get(
-                    "https://www.research360.in/future-and-options/option-chain",
-                    timeout=15,
-                )
-                _R360_SESSION = s
-                _R360_SESSION_TS = now
-            except Exception as e:
-                print(f"[r360 session] failed: {e}")
+            success = False
+            for attempt in range(3):
+                try:
+                    s = _create_retry_session(retries=5, backoff_factor=0.5)
+                    s.headers.update(_R360_HEADERS)
+                    s.get(
+                        "https://beta.research360.in/future-and-options/option-chain",
+                        timeout=15,
+                    )
+                    _R360_SESSION = s
+                    _R360_SESSION_TS = now
+                    success = True
+                    break
+                except Exception as e:
+                    print(f"[r360 session] attempt {attempt+1} failed: {type(e).__name__}: {e}")
+                    time.sleep(2 * (attempt + 1))
+            if not success:
                 _R360_SESSION = None
     return _R360_SESSION
 
@@ -576,7 +626,7 @@ def _r360_expiries(session: requests.Session, symbol: str) -> list[str]:
     import re as _re
     # Research360 expiries endpoint uses 'symbol' parameter for indices
     r = session.get(
-        "https://www.research360.in/fno/option/ajax/optionChainExp.php",
+        "https://beta.research360.in/fno/option/ajax/optionChainExp.php",
         headers=_R360_HEADERS,
         params={"table_flag": "optionChain", "symbol": symbol},
         timeout=15,
@@ -685,28 +735,38 @@ def _r360_to_nse_chain(symbol: str, raw: dict, expiry: str) -> dict:
 def _option_chain_from_research360(symbol: str) -> dict:
     """Scrape option chain from Research360 PHP AJAX endpoint."""
     sym = symbol.upper()
-    # Map to Research360 specific index names if needed
     r360_sym = _R360_SYMBOL_MAP.get(sym, sym)
 
-    session = _get_r360_session()
-    if session is None:
-        return {"records": {"data": []}}
-    expiries = _r360_expiries(session, r360_sym)
-    if not expiries:
-        return {"records": {"data": []}}
-    expiry = expiries[0]
-    r = session.post(
-        "https://www.research360.in/fno/option/ajax/optionChainApi.php",
-        headers=_R360_HEADERS,
-        data={"stock": r360_sym, "expiry": expiry, "showall": "on", "showallnew": "on"},
-        timeout=30,
-    )
-    r.raise_for_status()
-    raw = r.json()
-    data = _r360_to_nse_chain(sym, raw, expiry)
-    if not data.get("records", {}).get("data"):
-        return {"records": {"data": []}}
-    return data
+    for attempt in range(3):
+        session = _get_r360_session()
+        if session is None:
+            return {"records": {"data": []}}
+        
+        try:
+            expiries = _r360_expiries(session, r360_sym)
+            if not expiries:
+                return {"records": {"data": []}}
+            
+            expiry = expiries[0]
+            r = session.post(
+                "https://beta.research360.in/fno/option/ajax/optionChainApi.php",
+                headers=_R360_HEADERS,
+                data={"stock": r360_sym, "expiry": expiry, "showall": "on", "showallnew": "on"},
+                timeout=30,
+            )
+            r.raise_for_status()
+            raw = r.json()
+            data = _r360_to_nse_chain(sym, raw, expiry)
+            if data.get("records", {}).get("data"):
+                return data
+        except Exception as e:
+            print(f"[option_chain research360] attempt {attempt+1} failed: {type(e).__name__}: {e}")
+            global _R360_SESSION
+            with _R360_SESSION_LOCK:
+                _R360_SESSION = None # Force new session on next attempt
+            time.sleep(1 * (attempt + 1))
+            
+    return {"records": {"data": []}}
 
 
 def _option_chain_from_local_file(symbol: str) -> dict:
@@ -895,6 +955,16 @@ def option_chain(symbol: str = "NIFTY") -> dict:
     if fallback.get("records", {}).get("data"):
         return fallback
 
+    # AI Fallback (Resilient but slower)
+    try:
+        from data import ai_scraper
+        ai_data = ai_scraper.get_option_chain_fallback(symbol)
+        if ai_data and ai_data.get("records", {}).get("data"):
+            ai_data["_source"] = "ai_scraper"
+            return _save_chain(ai_data)
+    except Exception as e:
+        print(f"[option_chain ai_scraper] failed for {symbol}: {e}")
+
     data = _load_cached_chain()
     
     # Enrichment step for Research360: If LTP is 0, try to patch with Dhan LTPs
@@ -1024,14 +1094,76 @@ def get_pcr_max_pain_cached(symbol: str = "NIFTY") -> tuple[float | None, float 
     return None, None, None, True, True, None, None
 
 
+def _get_persistent_fii_dii_cache() -> tuple[Optional[list[dict]], float]:
+    """Retrieve cached FII/DII data and its timestamp from a persistent local file."""
+    import json
+    cache_file = CACHE_DIR / "fii_dii_cache.json"
+    if cache_file.exists():
+        try:
+            with open(cache_file, "r") as f:
+                data = json.load(f)
+                return data.get("data"), data.get("timestamp", 0.0)
+        except Exception:
+            pass
+    return None, 0.0
+
+
+def _set_persistent_fii_dii_cache(data: list[dict], timestamp: float) -> None:
+    """Save FII/DII data and its timestamp to a persistent local file."""
+    import json
+    cache_file = CACHE_DIR / "fii_dii_cache.json"
+    try:
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(cache_file, "w") as f:
+            json.dump({"data": data, "timestamp": timestamp}, f)
+    except Exception:
+        pass
+
+
 def fii_dii_cash(days: int = 10) -> pd.DataFrame:
     """FII/DII cash market net buy/sell, last N sessions."""
+    import time
+    now = time.time()
+    
+    # Check persistent cache (valid for 1 hour)
+    cached_data, cached_ts = _get_persistent_fii_dii_cache()
+    if cached_data is not None and (now - cached_ts) < 3600:
+        logging.getLogger(__name__).info(f"Returning cached FII/DII data (age: {round(now - cached_ts)}s)")
+        return pd.DataFrame(cached_data)
+
     try:
         from nsepython import nse_fiidii
+        # Monkeypatch nsepython to avoid 'logger' NameError in their except blocks
+        import nsepython.rahu as nse_rahu
+        if not hasattr(nse_rahu, 'logger'):
+            nse_rahu.logger = logging.getLogger('nsepython')
     except ImportError as e:
         raise RuntimeError("nsepython not installed or nse_fiidii not available") from e
 
-    raw = nse_fiidii()
+    raw = None
+    for attempt in range(5):
+        try:
+            raw = nse_fiidii()
+            if raw is not None and not (isinstance(raw, pd.DataFrame) and raw.empty):
+                break
+        except Exception as e:
+            print(f"[feed.fii_dii_cash] attempt {attempt+1} failed: {type(e).__name__}: {e}")
+            time.sleep(2 * (attempt + 1))
+    
+    # AI Fallback
+    if raw is None or (isinstance(raw, pd.DataFrame) and raw.empty):
+        try:
+            from data import ai_scraper
+            ai_raw = ai_scraper.get_fii_dii_fallback()
+            if ai_raw:
+                raw = pd.DataFrame(ai_raw)
+                raw["_source"] = "ai_scraper"
+        except Exception as e:
+            print(f"[feed.fii_dii_cash] AI fallback failed: {e}")
+    
+    if raw is None:
+        return pd.DataFrame()
+
     if isinstance(raw, pd.DataFrame):
         df = raw
     elif isinstance(raw, list):
@@ -1042,8 +1174,24 @@ def fii_dii_cash(days: int = 10) -> pd.DataFrame:
     if df.empty:
         return df
 
+    # Save to persistent cache
+    try:
+        # Convert date to string to keep it JSON serializable
+        serializable_df = df.copy()
+        if "date" in serializable_df.columns:
+            serializable_df["date"] = serializable_df["date"].astype(str)
+        serializable_data = serializable_df.to_dict(orient="records")
+        _set_persistent_fii_dii_cache(serializable_data, now)
+    except Exception as e:
+        print(f"[feed.fii_dii_cash] Failed to cache FII/DII data: {e}")
+
     if "date" in df.columns:
-        df["date"] = pd.to_datetime(df["date"], format="%d-%b-%Y", errors="coerce")
+        parsed_dates = pd.to_datetime(df["date"], format="%d-%b-%Y", errors="coerce")
+        if parsed_dates.isna().all() and not df["date"].isna().all():
+            parsed_dates = pd.to_datetime(df["date"], errors="coerce")
+        elif parsed_dates.isna().any():
+            parsed_dates = parsed_dates.fillna(pd.to_datetime(df["date"], errors="coerce"))
+        df["date"] = parsed_dates
         # Fix #11: Filter by Segment if available to avoid double counting
         cols = [c.lower() for c in df.columns]
         if "segment" in cols:
@@ -1144,13 +1292,13 @@ def universe_ohlc(tickers: list[str], period: str = "6mo") -> dict[str, pd.DataF
     
     for chunk in chunks:
         try:
-            df_dict = yf.download(tickers=" ".join(chunk), period=period, group_by='ticker', threads=True, progress=False)
+            df_dict = yf.download(tickers=" ".join(chunk), period=period, group_by='ticker', threads=False, progress=False)
             time.sleep(1) # rate limit spacing
         except Exception as e:
             print(f"yfinance batch download failed, retrying once: {e}")
             time.sleep(2)
             try:
-                df_dict = yf.download(tickers=" ".join(chunk), period=period, group_by='ticker', threads=True, progress=False)
+                df_dict = yf.download(tickers=" ".join(chunk), period=period, group_by='ticker', threads=False, progress=False)
             except Exception:
                 failed += len(chunk)
                 continue

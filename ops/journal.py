@@ -131,3 +131,17 @@ class Journal:
         rows = cur.fetchall()
         cols = [desc[0] for desc in cur.description]
         return [dict(zip(cols, row)) for row in rows]
+
+    def clear_skipped_trades(self, older_than_days: int) -> int:
+        """Clear skipped trades older than N days."""
+        from datetime import timedelta
+        threshold = datetime.now(timezone.utc) - timedelta(days=older_than_days)
+        threshold_utc = threshold.replace(tzinfo=None).isoformat()
+        
+        cur = self.conn.execute(
+            "DELETE FROM skipped_trades WHERE ts < ?",
+            (threshold_utc,)
+        )
+        self.conn.commit()
+        return cur.rowcount
+

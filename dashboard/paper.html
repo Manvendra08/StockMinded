@@ -990,16 +990,23 @@ body::before {
             <span class="dot dot-amber"></span>
             Skip Log Today
           </div>
-          <button class="btn btn-ghost btn-sm" onclick="loadSkipped()">
-            <span class="btn-text">↻ Refresh</span>
-          </button>
+          <div style="display: flex; align-items: center; gap: 6px;">
+            <input type="number" id="skip-days-old" min="0" max="365" class="input-sm" style="width:60px;" value="30" title="Delete older than N days">
+            <span style="font-size:0.75rem; color:var(--text-secondary);">days old</span>
+            <button class="btn btn-danger btn-sm" onclick="clearSkipped()">
+              <span class="btn-text">Clear</span>
+            </button>
+            <button class="btn btn-ghost btn-sm" onclick="loadSkipped()">
+              <span class="btn-text">↻ Refresh</span>
+            </button>
+          </div>
         </div>
         <div id="skip-summary" style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px;"></div>
         <div id="skip-gate-summary" style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px;"></div>
         <div class="tbl-wrap" style="max-height: 400px; overflow-y: auto;">
           <table class="tbl">
             <thead><tr>
-              <th>Time</th>
+              <th>Date</th>
               <th>Symbol</th>
               <th>Dir</th>
               <th>Conf</th>
@@ -1092,6 +1099,56 @@ body::before {
         </div>
       </div>
 
+      <!-- Risk Gate Panel -->
+      <div class="card">
+        <div class="section-title" style="margin-bottom:18px;"><span class="icon">🛡️</span> Risk Gate (Guardrails)</div>
+        <div style="font-size:0.75rem; color:var(--text-muted); margin-bottom:16px; padding:10px; background:rgba(245,158,11,0.07); border:1px solid rgba(245,158,11,0.2); border-radius:var(--radius-sm);">
+          These limits gate every auto-entry. Changes apply on next engine tick (≤2 min).
+        </div>
+        <div class="settings-group">
+
+          <!-- Daily Stop -->
+          <div class="field-row">
+            <span class="field-label">Daily Stop Loss (%)<br><span style="font-weight:400;color:var(--text-muted)">Max daily P&amp;L loss</span></span>
+            <input type="number" id="rg-daily-stop" class="input-sm" step="0.1" min="0.1" max="10" style="width:90px;">
+          </div>
+
+          <!-- Monthly Stop -->
+          <div class="field-row">
+            <span class="field-label">Monthly Stop Loss (%)<br><span style="font-weight:400;color:var(--text-muted)">Max monthly P&amp;L loss</span></span>
+            <input type="number" id="rg-monthly-stop" class="input-sm" step="0.5" min="0.5" max="25" style="width:90px;">
+          </div>
+
+          <!-- Concurrent Open Risk -->
+          <div class="field-row">
+            <span class="field-label">Concurrent Open Risk (%)<br><span style="font-weight:400;color:var(--text-muted)">Max sum of open trade risks</span></span>
+            <input type="number" id="rg-concurrent" class="input-sm" step="0.5" min="0.5" max="50" style="width:90px;">
+          </div>
+
+          <!-- Margin Util Cap -->
+          <div class="field-row">
+            <span class="field-label">Margin Utilisation Cap (%)<br><span style="font-weight:400;color:var(--text-muted)">Block entry above this margin</span></span>
+            <input type="number" id="rg-margin" class="input-sm" step="1" min="10" max="100" style="width:90px;">
+          </div>
+
+          <!-- Correlation Max -->
+          <div class="field-row">
+            <span class="field-label">Max Correlation (0–1)<br><span style="font-weight:400;color:var(--text-muted)">Block if too correlated with open</span></span>
+            <input type="number" id="rg-corr" class="input-sm" step="0.05" min="0" max="1" style="width:90px;">
+          </div>
+
+          <!-- Live preview -->
+          <div id="rg-preview" style="margin-top:6px; padding:10px; background:rgba(59,130,246,0.06); border:1px solid rgba(59,130,246,0.15); border-radius:var(--radius-sm); font-size:0.75rem; color:var(--text-secondary); display:none;">
+          </div>
+
+          <div class="maint-actions" style="justify-content: flex-end; margin-top:4px;">
+            <button class="btn btn-primary btn-sm" onclick="saveSettings(this)">
+              <span class="spin"></span><span class="btn-text">Save Risk Gate</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
       <!-- Data Panel -->
       <div class="card">
         <div class="section-title" style="margin-bottom:18px;"><span class="icon">🧹</span> Data Cleanup</div>
@@ -1178,6 +1235,18 @@ function fmtIstTime(ts) {
     hour: '2-digit',
     minute: '2-digit',
     second: '2-digit'
+  });
+}
+function fmtIstDate(ts) {
+  if (!ts) return '—';
+  let d = new Date(ts);
+  if (Number.isNaN(d.getTime())) d = new Date(ts + 'Z');
+  if (Number.isNaN(d.getTime())) return '—';
+  return d.toLocaleDateString('en-IN', {
+    timeZone: 'Asia/Kolkata',
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric'
   });
 }
 
@@ -1400,11 +1469,23 @@ async function loadSettings() {
     }
     document.getElementById('set-tg-token').value = s.telegram_bot_token || '';
     document.getElementById('set-tg-chat').value = s.telegram_chat_id || '';
+    // Risk Gate fields
+    document.getElementById('rg-daily-stop').value  = ((s.rg_daily_stop_pct      ?? 0.02) * 100).toFixed(2);
+    document.getElementById('rg-monthly-stop').value = ((s.rg_monthly_stop_pct    ?? 0.06) * 100).toFixed(2);
+    document.getElementById('rg-concurrent').value  = ((s.rg_concurrent_open_pct ?? 0.03) * 100).toFixed(2);
+    document.getElementById('rg-margin').value      = ((s.rg_margin_util_cap      ?? 0.60) * 100).toFixed(0);
+    document.getElementById('rg-corr').value        = (s.rg_correlation_max       ?? 0.70).toFixed(2);
+    _updateRgPreview(s);
   } catch(_){}
 }
 
 async function saveSettings(btn) {
   await btnAction(btn, async () => {
+    const rgDaily   = parseFloat(document.getElementById('rg-daily-stop').value)  / 100;
+    const rgMonthly = parseFloat(document.getElementById('rg-monthly-stop').value) / 100;
+    const rgConc    = parseFloat(document.getElementById('rg-concurrent').value)   / 100;
+    const rgMargin  = parseFloat(document.getElementById('rg-margin').value)       / 100;
+    const rgCorr    = parseFloat(document.getElementById('rg-corr').value);
     const body = {
       capital_per_trade: parseFloat(document.getElementById('set-capital').value),
       sl_pct: parseFloat(document.getElementById('set-sl').value),
@@ -1413,7 +1494,13 @@ async function saveSettings(btn) {
       regime_filter: document.getElementById('set-regime').checked,
       auto_close_eod: document.getElementById('set-eod') ? document.getElementById('set-eod').checked : true,
       telegram_bot_token: document.getElementById('set-tg-token').value,
-      telegram_chat_id: document.getElementById('set-tg-chat').value
+      telegram_chat_id: document.getElementById('set-tg-chat').value,
+      // Risk Gate
+      rg_daily_stop_pct:      isNaN(rgDaily)   ? 0.02 : rgDaily,
+      rg_monthly_stop_pct:    isNaN(rgMonthly) ? 0.06 : rgMonthly,
+      rg_concurrent_open_pct: isNaN(rgConc)    ? 0.03 : rgConc,
+      rg_margin_util_cap:     isNaN(rgMargin)  ? 0.60 : rgMargin,
+      rg_correlation_max:     isNaN(rgCorr)    ? 0.70 : rgCorr,
     };
     const r = await fetch('/api/paper/settings', {
       method: 'POST',
@@ -1422,9 +1509,28 @@ async function saveSettings(btn) {
     });
     const d = await r.json();
     if(d.error) { toast('Save failed: ' + d.error, 'err'); return; }
+    _updateRgPreview(d);
     toast('Settings saved successfully.', 'ok');
     loadStats();
   });
+}
+
+function _updateRgPreview(s) {
+  const el = document.getElementById('rg-preview');
+  if (!el) return;
+  const cap = 7000000; // shown as reference; actual from server
+  const daily   = ((s.rg_daily_stop_pct      ?? 0.02) * 100).toFixed(1);
+  const monthly = ((s.rg_monthly_stop_pct    ?? 0.06) * 100).toFixed(1);
+  const conc    = ((s.rg_concurrent_open_pct ?? 0.03) * 100).toFixed(1);
+  const margin  = ((s.rg_margin_util_cap      ?? 0.60) * 100).toFixed(0);
+  const corr    = (s.rg_correlation_max       ?? 0.70).toFixed(2);
+  el.style.display = 'block';
+  el.innerHTML = `
+    <div style="font-weight:600; margin-bottom:6px; color:var(--accent-blue);">Active Limits</div>
+    <div>📅 Daily stop: <b>-${daily}%</b> &nbsp;|&nbsp; 📆 Monthly stop: <b>-${monthly}%</b></div>
+    <div>🔗 Concurrent risk cap: <b>${conc}%</b> of capital</div>
+    <div>📊 Margin cap: <b>${margin}%</b> &nbsp;|&nbsp; 🔄 Correlation max: <b>${corr}</b></div>
+  `;
 }
 
 function exportCSV() {
@@ -1639,31 +1745,13 @@ function renderEOD(s) {
     </div>
 
     <div class="eod-panel">
-      <div class="analysis-block right">
-        <h3>✅ What Went Right</h3>
-        <ul class="analysis-list">
-          ${(analysis.what_went_right||[]).map(x=>`<li>${x}</li>`).join('')}
-        </ul>
-      </div>
-      <div class="analysis-block wrong">
-        <h3>❌ What Went Wrong</h3>
-        <ul class="analysis-list">
-          ${(analysis.what_went_wrong||[]).map(x=>`<li>${x}</li>`).join('')}
-        </ul>
-      </div>
       ${analysis.patterns&&analysis.patterns.length ? `
-      <div class="analysis-block patterns">
+      <div class="analysis-block patterns" style="grid-column: span 2;">
         <h3>◈ Patterns Observed</h3>
         <ul class="analysis-list">
           ${analysis.patterns.map(x=>`<li>${x}</li>`).join('')}
         </ul>
       </div>` : ''}
-      <div class="analysis-block corrections ${analysis.patterns&&analysis.patterns.length?'':'full'}">
-        <h3>⟳ Strategy Corrections</h3>
-        <ul class="analysis-list">
-          ${corrections.map(x=>`<li>${x}</li>`).join('')}
-        </ul>
-      </div>
     </div>
 
     ${s.best_trade||s.worst_trade ? `
@@ -1789,7 +1877,7 @@ async function loadSkipped() {
       if (tbody) {
         tbody.innerHTML = rows.map(r => `
           <tr>
-            <td class="muted" style="font-size:0.72rem">${fmtIstTime(r.ts)}</td>
+            <td class="muted" style="font-size:0.72rem">${fmtIstDate(r.ts)}</td>
             <td><div class="sym-cell">${r.symbol || '—'}</div></td>
             <td><span class="dir-badge dir-${(r.direction||'').toLowerCase()}">${r.direction || '—'}</span></td>
             <td><span class="conf-badge conf-${r.alert_confidence}">${r.alert_confidence || '—'}</span></td>
@@ -1800,6 +1888,25 @@ async function loadSkipped() {
       }
     }
   } catch(_) {}
+}
+
+async function clearSkipped() {
+  const days = document.getElementById('skip-days-old').value;
+  if(days === '' || isNaN(days) || parseInt(days, 10) < 0) return toast('Enter valid number of days', 'err');
+  if(!confirm('Clear skip log records older than ' + days + ' days?')) return;
+  try {
+    const r = await fetch('/api/paper/skipped/clear', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({days: parseInt(days, 10)})
+    });
+    const d = await r.json();
+    if(d.error) return toast(d.error, 'err');
+    toast(`Deleted ${d.deleted} skip log records older than ${days} days`, 'ok');
+    loadSkipped();
+  } catch(e) {
+    toast('Error clearing skip log', 'err');
+  }
 }
 
 function renderVerdictTrace(trace) {
@@ -2168,7 +2275,7 @@ async function pollTelegramStatus() {
     console.error('Failed to poll telegram status', e);
   }
 }
-setInterval(pollTelegramStatus, 30000);
+setInterval(pollTelegramStatus, 900000); // 15 min — status rarely changes
 
 // ── Boot ─────────────────────────────────────────────────────
 (async function boot() {

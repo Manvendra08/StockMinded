@@ -148,10 +148,12 @@ def chain_snapshot(symbol) -> pd.DataFrame:
     if not expiries:
         return pd.DataFrame()
     def parse_exp(s):
-        try:
-            return datetime.strptime(s, "%d-%b-%Y")
-        except:
-            return datetime.max
+        for fmt in ("%d-%b-%Y", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(s, fmt)
+            except:
+                pass
+        return datetime.max
     expiries.sort(key=parse_exp)
     closest_expiry = expiries[0]
     underlying_value = raw.get("records", {}).get("underlyingValue", 0)
@@ -159,6 +161,8 @@ def chain_snapshot(symbol) -> pd.DataFrame:
     tte_days = (parse_exp(closest_expiry).date() - date.today()).days
     t = max(tte_days, 0.5) / 365.0
     r = 0.065
+    vix_annual = 0.15
+
     for rec in records:
         if rec.get("expiryDate") != closest_expiry:
             continue
@@ -172,14 +176,18 @@ def chain_snapshot(symbol) -> pd.DataFrame:
         ce_delta = 0.0
         pe_delta = 0.0
         if underlying_value > 0:
-            if ce_iv <= 0 and ce_ltp > 0:
-                ce_iv = 0.15
-            if pe_iv <= 0 and pe_ltp > 0:
-                pe_iv = 0.15
-            if ce_iv > 0:
-                ce_delta = _bs_delta(underlying_value, strike, t, r, ce_iv, "CE")
-            if pe_iv > 0:
-                pe_delta = _bs_delta(underlying_value, strike, t, r, pe_iv, "PE")
+            if ce_iv <= 0:
+                ce_iv = vix_annual
+            if pe_iv <= 0:
+                pe_iv = vix_annual
+            
+            if ce_ltp <= 0:
+                ce_ltp = round(_bs_price(underlying_value, strike, t, r, ce_iv, "CE"), 2)
+            if pe_ltp <= 0:
+                pe_ltp = round(_bs_price(underlying_value, strike, t, r, pe_iv, "PE"), 2)
+
+            ce_delta = _bs_delta(underlying_value, strike, t, r, ce_iv, "CE")
+            pe_delta = _bs_delta(underlying_value, strike, t, r, pe_iv, "PE")
         rows.append({
             "strike": strike,
             "expiry": closest_expiry,
