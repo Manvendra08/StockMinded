@@ -4,9 +4,11 @@ from pathlib import Path
 from typing import Optional
 import yaml
 
-# Required env vars that must be non-empty for production use.
-# Keys are the var names; values are the config dot-paths for context.
-_REQUIRED_ENV_VARS = []
+# Env vars enforcement.
+# Intentionally left empty: this project is designed to run in "alerts-only /
+# paper trade" modes where missing broker/AI credentials should not crash the
+# app (see fallbacks in ops/alerts.py and data/feed.py / data/ai_scraper.py).
+_REQUIRED_ENV_VARS: list[str] = []
 
 
 def _expand(value, _missing: list | None = None):

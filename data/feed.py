@@ -166,7 +166,8 @@ def _dhan_headers() -> dict | None:
 def _dhan_enabled() -> bool:
     cfg = _broker_cfg()
     ds = _data_sources_cfg().get("dhan", {})
-    return cfg.get("provider") == "dhan" and ds.get("enabled", True) is not False and _dhan_headers() is not None
+    enabled = ds.get("enabled", False) is True
+    return cfg.get("provider") == "dhan" and enabled and _dhan_headers() is not None
 
 
 def _dhan_underlying(symbol: str) -> tuple[int, str] | None:
@@ -470,10 +471,10 @@ def _dhan_to_nse_chain(symbol: str, raw: dict, expiry: str) -> dict:
 
 
 def _option_chain_from_dhan(symbol: str) -> dict:
-    if _data_sources_cfg().get("dhan", {}).get("enabled", True) is False:
+    if not _dhan_enabled():
         return {"records": {"data": []}}
     underlying = _dhan_underlying(symbol)
-    if not underlying or not _dhan_headers():
+    if not underlying:
         return {"records": {"data": []}}
     cached = _DHAN_OC_CACHE.get(symbol)
     if cached and time.time() - cached[0] < 3:
@@ -804,7 +805,7 @@ _OHLC_CACHE_BUCKET = 0
 
 
 def ohlc(symbol: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
-    """Daily/intraday OHLC. Dhan primary, yfinance fallback."""
+    """Daily/intraday OHLC. yfinance primary, Dhan optional."""
     try:
         df = _dhan_ohlc(symbol, period=period, interval=interval)
         if not df.empty:
@@ -974,7 +975,7 @@ def option_chain(symbol: str = "NIFTY") -> dict:
             # Patching the whole chain is expensive, but paper trading needs it.
             # Try to get underlying price first.
             spot = data.get("records", {}).get("underlyingValue")
-            if spot:
+            if spot is not None and spot != 0:
                 # Use a secondary call to Dhan just for LTPs if available
                 dhan_data = _option_chain_from_dhan(symbol)
                 if dhan_data.get("records", {}).get("data"):

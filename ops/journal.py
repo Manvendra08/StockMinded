@@ -133,14 +133,20 @@ class Journal:
         return [dict(zip(cols, row)) for row in rows]
 
     def clear_skipped_trades(self, older_than_days: int) -> int:
-        """Clear skipped trades older than N days."""
+        """Clear skipped trades older than N days.
+
+        Normalizes timestamps to a consistent UTC ISO format to avoid string
+        comparison mismatches between tz-aware and tz-naive values.
+        """
         from datetime import timedelta
         threshold = datetime.now(timezone.utc) - timedelta(days=older_than_days)
-        threshold_utc = threshold.replace(tzinfo=None).isoformat()
-        
+
+        # Store `ts` using datetime.now(timezone.utc).isoformat() elsewhere in this module.
+        threshold_iso = threshold.isoformat()
+
         cur = self.conn.execute(
             "DELETE FROM skipped_trades WHERE ts < ?",
-            (threshold_utc,)
+            (threshold_iso,)
         )
         self.conn.commit()
         return cur.rowcount
