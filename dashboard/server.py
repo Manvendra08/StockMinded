@@ -913,6 +913,19 @@ def api_paper_close(trade_id):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/options/close/<int:trade_id>")
+def api_options_close(trade_id):
+    """Manually close a specific options trade."""
+    try:
+        result = pt.close_option_trade_manual(trade_id, reason="MANUAL")
+        if result is None:
+            return jsonify({"error": f"Option trade {trade_id} not found or already closed"}), 404
+        return jsonify(result)
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/paper/eod-summary")
 def api_paper_eod_summary():
     """Generate EOD P&L summary and analysis."""

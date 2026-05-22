@@ -48,8 +48,19 @@ DEFAULT_SETTINGS = {
     "max_trades_per_day": 8,
     "max_new_entries_per_cycle": 5,
     "regime_filter": True,
+    "auto_close_eod": True,
     "telegram_bot_token": "",
     "telegram_chat_id": "",
+    # ── Option Trades Target & Stoploss ───────────────────────────
+    "options_sl_pct": 125.0,         # Default 125% of net credit
+    "options_tgt_pct": 50.0,         # Default 50% of net credit
+    # ── Smart Exits (Intelligent Option Exit Engine) ──────────────
+    "smart_exits_enabled": True,             # Master toggle
+    "smart_exit_vix_spike_pct": 10.0,        # VIX spike threshold %
+    "smart_exit_delta_threshold": 0.35,      # Net delta danger zone
+    "smart_exit_trail_lock_pct": 30.0,       # Trail lock activation (% of max profit)
+    "smart_exit_trail_floor_pct": 20.0,      # Trail lock floor (% of max profit)
+    "smart_reentry_enabled": False,          # Re-entry (off by default)
     # ── Risk Gate (Guardrails) overrides ──────────────────────────
     "rg_daily_stop_pct": 0.02,       # 2% of capital = daily loss limit
     "rg_monthly_stop_pct": 0.06,     # 6% of capital = monthly loss limit
@@ -188,11 +199,22 @@ def save_settings(new_settings: dict) -> dict:
                 if k in ("capital_per_trade", "sl_pct", "tgt_pct",
                           "rg_daily_stop_pct", "rg_monthly_stop_pct",
                           "rg_concurrent_open_pct", "rg_margin_util_cap",
-                          "rg_correlation_max"):
-                    db["settings"][k] = float(v)
+                          "rg_correlation_max", "options_sl_pct", "options_tgt_pct",
+                          "smart_exit_vix_spike_pct", "smart_exit_delta_threshold",
+                          "smart_exit_trail_lock_pct", "smart_exit_trail_floor_pct"):
+                    if v is not None and str(v).strip() != "":
+                        try:
+                            db["settings"][k] = float(v)
+                        except (ValueError, TypeError):
+                            pass
                 elif k in ("max_trades_per_day", "max_new_entries_per_cycle"):
-                    db["settings"][k] = int(v)
-                elif k in ("trail_sl", "regime_filter"):
+                    if v is not None and str(v).strip() != "":
+                        try:
+                            db["settings"][k] = int(v)
+                        except (ValueError, TypeError):
+                            pass
+                elif k in ("trail_sl", "regime_filter", "auto_close_eod",
+                           "smart_exits_enabled", "smart_reentry_enabled"):
                     db["settings"][k] = bool(v)
                 else:
                     db["settings"][k] = str(v)
@@ -363,6 +385,14 @@ def enter_option_structure(structure_name: str, resolved_legs: list, underlying:
         net_premium = sum((leg.premium * leg.lots * leg.lot_size) * (1 if leg.side == "SELL" else -1) for leg in resolved_legs)
         if net_premium <= 0:
             return {"error": "Non-credit structure (0 premium likely due to missing LTP data)"}
+        # Smart exit metadata
+        short_strikes = [l.strike for l in resolved_legs if l.side == "SELL"]
+        try:
+            from data import feed
+            vix_df = feed.ohlc_cached("INDIAVIX", period="5d")
+            entry_vix = float(vix_df["close"].iloc[-1]) if vix_df is not None and not vix_df.empty else 0.0
+        except Exception:
+            entry_vix = 0.0
         trade = {
             "id": _next_id(db),
             "symbol": underlying,
@@ -374,7 +404,14 @@ def enter_option_structure(structure_name: str, resolved_legs: list, underlying:
             "net_premium": round(net_premium, 2),
             "entry_time": _now_ist().strftime("%Y-%m-%d %H:%M:%S"),
             "entry_date": date.today().isoformat(),
-            "exit_time": None, "exit_reason": None, "pnl": None, "status": "OPEN"
+            "exit_time": None, "exit_reason": None, "pnl": None, "status": "OPEN",
+            # Smart exit tracking
+            "entry_vix": round(entry_vix, 2),
+            "short_strikes": short_strikes,
+            "wing_width": 0.0,
+            "peak_pnl": 0.0,
+            "trailing_lock": False,
+            "reentry_eligible": False,
         }
         db["option_trades"].append(trade)
         return trade
@@ -416,6 +453,14 @@ def enter_nifty_option_structure(setup, resolved_legs: list, cfg: dict) -> dict:
         lot_size = resolved_legs[0].lot_size if resolved_legs else 1
         struct_type = "iron_condor" if "IRON_CONDOR" in setup.strategy else ("bull_put_spread" if "BULL_PUT" in setup.strategy else "bear_call_spread")
         max_loss = calc_structure_max_loss(struct_type, net_credit, setup.wing_width, lot_size)
+        # Smart exit metadata
+        short_strikes = [l.strike for l in resolved_legs if l.side == "SELL"]
+        try:
+            from data import feed
+            vix_df = feed.ohlc_cached("INDIAVIX", period="5d")
+            entry_vix = float(vix_df["close"].iloc[-1]) if vix_df is not None and not vix_df.empty else setup.vix
+        except Exception:
+            entry_vix = setup.vix
         
         trade = {
             "id": _next_id(db), "symbol": "NIFTY", "structure": setup.strategy, "mode": setup.mode,
@@ -423,9 +468,16 @@ def enter_nifty_option_structure(setup, resolved_legs: list, cfg: dict) -> dict:
                 "side": l.side, "type": l.type, "strike": l.strike, "expiry": l.expiry,
                 "qty": l.lots * l.lot_size, "entry_premium": l.premium, "exit_premium": None
             } for l in resolved_legs],
-            "net_credit": round(net_credit, 2), "max_loss_rupees": round(max_loss, 2),
+            "net_credit": round(net_credit, 2), "net_premium": round(net_credit, 2), "max_loss_rupees": round(max_loss, 2),
             "entry_time": now_ist.strftime("%Y-%m-%d %H:%M:%S"), "entry_date": date.today().isoformat(),
-            "status": "OPEN", "pnl": None, "exit_reason": None, "exit_time": None
+            "status": "OPEN", "pnl": None, "exit_reason": None, "exit_time": None,
+            # Smart exit tracking
+            "entry_vix": round(entry_vix, 2),
+            "short_strikes": short_strikes,
+            "wing_width": setup.wing_width,
+            "peak_pnl": 0.0,
+            "trailing_lock": False,
+            "reentry_eligible": False,
         }
         db["option_trades"].append(trade)
         return trade
@@ -457,10 +509,88 @@ def _build_option_price_map(open_ops: list[dict]) -> dict:
         except Exception: continue
     return price_map
 
+def _get_current_vix() -> float:
+    """Fetch current VIX value. Returns 0.0 on failure."""
+    try:
+        from data import feed
+        vix_df = feed.ohlc_cached("INDIAVIX", period="5d")
+        if vix_df is not None and not vix_df.empty:
+            col = "close" if "close" in vix_df.columns else "Close"
+            return float(vix_df[col].iloc[-1])
+    except Exception:
+        pass
+    return 0.0
+
+def _smart_exit_check(t: dict, current_net: float | None, settings: dict, vix_now: float = 0.0) -> str | None:
+    """Run all smart exit signals on a single option trade.
+    
+    Returns exit_reason string or None if no exit triggered.
+    Signals checked in priority order:
+      1. VIX Spike Exit
+      2. Underlying Strike Breach
+      3. Delta Breach (skipped here — needs chain, done in caller)
+      4. Theta Trail Lock
+    """
+    if not settings.get("smart_exits_enabled", True):
+        return None
+    
+    entry_premium = t.get("net_premium") or t.get("net_credit") or 0.0
+    if current_net is None:
+        return None
+    
+    pnl = entry_premium - current_net
+    
+    # 1. VIX Spike Exit
+    entry_vix = t.get("entry_vix", 0.0)
+    vix_threshold = settings.get("smart_exit_vix_spike_pct", 10.0)
+    if entry_vix > 0 and vix_now > 0:
+        from signals.options import check_vix_spike_exit
+        should_exit, _ = check_vix_spike_exit(vix_now, entry_vix, vix_threshold)
+        if should_exit:
+            t["reentry_eligible"] = True
+            return "VIX_SPIKE"
+    
+    # 2. Underlying Strike Breach
+    short_strikes = t.get("short_strikes", [])
+    wing_width = t.get("wing_width", 0.0)
+    if short_strikes and wing_width > 0:
+        try:
+            ltp = _get_ltp(t.get("symbol", "NIFTY"))
+            if ltp and ltp > 0:
+                highest_short = max(short_strikes)
+                lowest_short = min(short_strikes)
+                breach_margin = wing_width * 0.5
+                if ltp > highest_short + breach_margin or ltp < lowest_short - breach_margin:
+                    return "STRIKE_BREACH"
+        except Exception:
+            pass
+    
+    # 3. Theta Trail Lock
+    trail_lock_pct = settings.get("smart_exit_trail_lock_pct", 30.0) / 100.0
+    trail_floor_pct = settings.get("smart_exit_trail_floor_pct", 20.0) / 100.0
+    
+    # Update peak PnL
+    peak_pnl = t.get("peak_pnl", 0.0)
+    if pnl > peak_pnl:
+        t["peak_pnl"] = pnl
+        peak_pnl = pnl
+    
+    lock_threshold = abs(entry_premium) * trail_lock_pct
+    if peak_pnl >= lock_threshold:
+        t["trailing_lock"] = True
+    
+    if t.get("trailing_lock", False):
+        lock_floor = abs(entry_premium) * trail_floor_pct
+        if pnl < lock_floor:
+            return "TRAIL_LOCK"
+    
+    return None
+
 def check_option_exits() -> list[dict]:
     now_ist = _now_ist()
     if not is_market_open(now_ist) and not is_eod_window(now_ist): return []
     closed = []
+    vix_now = _get_current_vix()
     with atomic_db_update() as db:
         open_ops = [t for t in db.get("option_trades", []) if t.get("status") == "OPEN"]
         if not open_ops: return []
@@ -468,17 +598,47 @@ def check_option_exits() -> list[dict]:
         settings = db.get("settings", {})
         auto_close = settings.get("auto_close_eod", True)
         is_eod = is_eod_window(now_ist)
+        smart_enabled = settings.get("smart_exits_enabled", True)
+        
+        # Fetch chain snapshots for delta breach check
+        chain_cache = {}
+        if smart_enabled:
+            from signals.options import chain_snapshot, net_position_delta
+            for sym in {t["symbol"] for t in open_ops}:
+                try:
+                    chain_cache[sym] = chain_snapshot(sym)
+                except Exception:
+                    pass
         
         for t in open_ops:
             current_net = _option_net_premium(t["legs"], price_map)
             exit_reason = "EOD_CLOSE" if (is_eod and auto_close) else None
+            
+            # Smart exits (fire first — structural danger)
+            if not exit_reason:
+                exit_reason = _smart_exit_check(t, current_net, settings, vix_now)
+            
+            # Delta Breach (needs chain data)
+            if not exit_reason and smart_enabled and current_net is not None:
+                chain = chain_cache.get(t.get("symbol"))
+                if chain is not None and not chain.empty:
+                    delta_threshold = settings.get("smart_exit_delta_threshold", 0.35)
+                    nd = net_position_delta(t["legs"], chain)
+                    if nd is not None and abs(nd) > delta_threshold:
+                        t["reentry_eligible"] = True
+                        exit_reason = "DELTA_BREACH"
+            
+            # Flat SL/TGT backup
             if not exit_reason and current_net is not None:
-                pnl = t.get("net_premium", 0.0) - current_net
-                if pnl <= -abs(t.get("net_premium", 1000)) * 2: exit_reason = "SL_HIT"
-                elif pnl >= abs(t.get("net_premium", 1000)) * 0.5: exit_reason = "TGT_HIT"
+                pnl = (t.get("net_premium") or 0.0) - current_net
+                sl_limit = settings.get("options_sl_pct", 125.0) / 100.0
+                tgt_limit = settings.get("options_tgt_pct", 50.0) / 100.0
+                if pnl <= -abs(t.get("net_premium", 1000)) * sl_limit: exit_reason = "SL_HIT"
+                elif pnl >= abs(t.get("net_premium", 1000)) * tgt_limit: exit_reason = "TGT_HIT"
+            
             if exit_reason:
                 t["status"], t["exit_reason"], t["exit_time"] = "CLOSED", exit_reason, now_ist.strftime("%Y-%m-%d %H:%M:%S")
-                t["pnl"] = round(t.get("net_premium", 0.0) - current_net, 2) if current_net is not None else 0.0
+                t["pnl"] = round((t.get("net_premium") or 0.0) - current_net, 2) if current_net is not None else 0.0
                 closed.append(t)
     return closed
 
@@ -487,6 +647,7 @@ def check_nifty_option_exits(vix_current: float = None, cfg: dict = None) -> lis
     now_ist = _now_ist()
     if not is_market_open(now_ist) and not is_eod_window(now_ist): return []
     closed = []
+    vix_now = vix_current or _get_current_vix()
     with atomic_db_update() as db:
         open_nifty = [t for t in db.get("option_trades", []) if t.get("status") == "OPEN" and t.get("symbol") == "NIFTY"]
         if not open_nifty: return []
@@ -494,20 +655,97 @@ def check_nifty_option_exits(vix_current: float = None, cfg: dict = None) -> lis
         settings = db.get("settings", {})
         auto_close = settings.get("auto_close_eod", True)
         is_eod = is_eod_window(now_ist)
+        smart_enabled = settings.get("smart_exits_enabled", True)
+
+        # Fetch chain for delta breach
+        chain = None
+        if smart_enabled:
+            from signals.options import chain_snapshot, net_position_delta
+            try:
+                chain = chain_snapshot("NIFTY")
+            except Exception:
+                pass
 
         for t in open_nifty:
             exit_reason = None
             if is_eod and auto_close: exit_reason = "EOD_CUTOFF"
             current_net = _option_net_premium(t["legs"], price_map)
+            
+            # Smart exits (fire first)
+            if not exit_reason:
+                exit_reason = _smart_exit_check(t, current_net, settings, vix_now)
+            
+            # Delta Breach
+            if not exit_reason and smart_enabled and current_net is not None and chain is not None and not chain.empty:
+                delta_threshold = settings.get("smart_exit_delta_threshold", 0.35)
+                nd = net_position_delta(t["legs"], chain)
+                if nd is not None and abs(nd) > delta_threshold:
+                    t["reentry_eligible"] = True
+                    exit_reason = "DELTA_BREACH"
+            
+            # Flat SL/TGT backup
             if not exit_reason and current_net is not None:
                 pnl = t.get("net_credit", 0.0) - current_net
-                if pnl >= t.get("net_credit", 0) * 0.5: exit_reason = "PROFIT_TAKEN"
-                elif pnl <= -t.get("net_credit", 0) * 1.25: exit_reason = "STOP_LOSS"
+                sl_limit = settings.get("options_sl_pct", 125.0) / 100.0
+                tgt_limit = settings.get("options_tgt_pct", 50.0) / 100.0
+                if pnl >= t.get("net_credit", 0) * tgt_limit: exit_reason = "PROFIT_TAKEN"
+                elif pnl <= -t.get("net_credit", 0) * sl_limit: exit_reason = "STOP_LOSS"
+            
             if exit_reason:
                 t["status"], t["exit_reason"], t["exit_time"] = "CLOSED", exit_reason, now_ist.strftime("%Y-%m-%d %H:%M:%S")
                 t["pnl"] = round(t.get("net_credit", 0.0) - current_net, 2) if current_net is not None else 0.0
                 closed.append(t)
     return closed
+
+def scan_reentry_candidates(data: dict, cfg: dict = None) -> list[dict]:
+    """Scan recently closed eligible trades and re-enter if conditions normalize."""
+    if cfg is None:
+        from config.loader import load_config
+        cfg = load_config()
+    now_ist = _now_ist()
+    if not is_market_open(now_ist): return []
+    
+    db = _load_db()
+    settings = db.get("settings", {})
+    if not settings.get("smart_reentry_enabled", False): return []
+    
+    today_str = date.today().isoformat()
+    eligible = [t for t in db.get("option_trades", []) 
+                if t.get("reentry_eligible") and t.get("status") == "CLOSED" 
+                and t.get("entry_date") == today_str
+                and t.get("exit_reason") in ("VIX_SPIKE", "DELTA_BREACH")]
+    
+    if not eligible: return []
+    
+    # Check if VIX has stabilized
+    vix_now = _get_current_vix()
+    regime = data.get("regime", {})
+    regime_name = regime.get("regime") or regime.get("name") or "UNKNOWN"
+    if regime_name == "VOL_EXPANSION": return []
+    
+    reentered = []
+    for t in eligible:
+        entry_vix = t.get("entry_vix", 0.0)
+        if entry_vix > 0 and vix_now > entry_vix * 1.05:
+            continue  # VIX still elevated
+        
+        # Check we haven't already re-entered this structure today
+        already_today = any(
+            x.get("symbol") == t["symbol"] and x.get("structure") == t.get("structure") 
+            and x.get("entry_date") == today_str and x.get("status") == "OPEN"
+            for x in db.get("option_trades", [])
+        )
+        if already_today: continue
+        
+        # Mark as no longer eligible to prevent loops
+        with atomic_db_update() as db2:
+            for x in db2.get("option_trades", []):
+                if x.get("id") == t["id"]:
+                    x["reentry_eligible"] = False
+        
+        reentered.append({"symbol": t["symbol"], "structure": t.get("structure"), "original_id": t["id"]})
+    
+    return reentered
 
 def get_nifty_option_setups(data: dict, cfg: dict = None) -> list[dict]:
     """
@@ -729,6 +967,37 @@ def close_trade_manual(trade_id: int, reason: str = "MANUAL") -> dict | None:
                 journal.close_trade(jid, ltp, trade["pnl"])
             except Exception as e:
                 print(f"⚠️ Journal close sync failed for trade {jid}: {e}")
+
+        return trade
+
+def close_option_trade_manual(trade_id: int, reason: str = "MANUAL") -> dict | None:
+    """Manually close a specific option trade at current LTP."""
+    now_ist = _now_ist()
+    with atomic_db_update() as db:
+        if "option_trades" not in db: return None
+        trade = next((t for t in db["option_trades"] if t["id"] == trade_id and t.get("status") == "OPEN"), None)
+        if not trade: return None
+
+        trade["status"] = "CLOSED"
+        trade["exit_time"] = now_ist.strftime("%Y-%m-%d %H:%M:%S")
+        trade["exit_reason"] = reason
+
+        # Fetch LTPs to get accurate final premiums
+        price_map = _build_option_price_map([trade])
+        current_net = _option_net_premium(trade["legs"], price_map)
+
+        # Update exit_premium for each leg
+        for leg in trade["legs"]:
+            key = (leg["strike"], leg["expiry"], leg["type"])
+            price = price_map.get(key) if price_map else None
+            leg["exit_premium"] = price
+
+        # Compute PnL
+        entry_net = trade.get("net_premium") or trade.get("net_credit") or 0.0
+        if current_net is not None:
+            trade["pnl"] = round(entry_net - current_net, 2)
+        else:
+            trade["pnl"] = 0.0
 
         return trade
 

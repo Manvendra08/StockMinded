@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import logging
 from typing import Any, Optional
+from datetime import datetime, timezone
 
 from scrapegraphai.graphs import SmartScraperGraph, SearchGraph
 try:
@@ -41,12 +42,17 @@ def _get_ai_config() -> Optional[dict]:
                 saas_api_key = api_key
             api_key = None
 
+        model_tokens = cfg.get("model_tokens")
+        llm_config = {
+            "api_key": api_key,
+            "model": cfg.get("model", "google_genai/gemini-1.5-flash"),
+        }
+        if model_tokens is not None:
+            llm_config["model_tokens"] = model_tokens
+
         return {
             "local": {
-                "llm": {
-                    "api_key": api_key,
-                    "model": cfg.get("model", "google_genai/gemini-1.5-flash"),
-                },
+                "llm": llm_config,
                 "verbose": False,
                 "headless": True,
             } if api_key else None,
@@ -275,9 +281,45 @@ _NOISE_PATTERNS = {
     "things to know", "pre-market", "premarket", "gift nifty",
 }
 
+_LOW_VALUE_TOKENS = {
+    "ai", "market", "markets", "data", "nifty", "banknifty", "india", "vix",
+    "rupee", "stocks", "stock", "share", "shares", "today", "live", "news",
+    "update", "highlights", "buzz", "watch", "preview",
+}
+
 def _is_noise_headline(title: str) -> bool:
     t = title.lower()
     return any(p in t for p in _NOISE_PATTERNS)
+
+
+def _is_low_value_headline(title: str) -> bool:
+    import re as _re
+    tokens = [t for t in _re.findall(r"[a-zA-Z&]+", title.lower()) if t]
+    if len(tokens) < 3:
+        return True
+    low_value_hits = sum(1 for t in tokens if t in _LOW_VALUE_TOKENS)
+    if low_value_hits / max(len(tokens), 1) >= 0.6:
+        return True
+    useful_tokens = [t for t in tokens if t not in _LOW_VALUE_TOKENS]
+    return len(useful_tokens) < max(1, len(tokens) // 3)
+
+
+def _normalize_headline(title: str) -> str:
+    import re as _re
+    cleaned = _re.sub(r"[^a-z0-9 ]", " ", title.lower())
+    return " ".join(cleaned.split())
+
+
+def _dedupe_headlines(headlines: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    seen: set[str] = set()
+    deduped: list[tuple[str, str]] = []
+    for title, pub in headlines:
+        key = _normalize_headline(title)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append((title, pub))
+    return deduped
 
 
 def analyze_sentiment_locally(headlines: list[tuple[str, str]]) -> dict:
@@ -307,6 +349,34 @@ def analyze_sentiment_locally(headlines: list[tuple[str, str]]) -> dict:
         "sink", "drag", "outflow", "slowdown", "falling", "plunging",
         "declining", "worried", "selloff", "panic", "turmoil", "underweight",
     }
+    # Phrase scoring for higher-signal events
+    phrase_scores = {
+        "rate cut": 2,
+        "rate cuts": 2,
+        "rate hike": -2,
+        "rate hikes": -2,
+        "earnings beat": 2,
+        "beats estimates": 2,
+        "misses estimates": -2,
+        "earnings miss": -2,
+        "profit warning": -2,
+        "order win": 2,
+        "order book": 1,
+        "stake sale": -1,
+        "buyback": 2,
+        "dividend": 1,
+        "fund raise": 1,
+        "regulatory action": -2,
+        "sebi action": -2,
+        "rbi policy": 1,
+        "inflation rises": -2,
+        "inflation cools": 2,
+        "rupee weakens": -1,
+        "rupee strengthens": 1,
+        "fii buying": 2,
+        "fii selling": -2,
+    }
+
     # Simple negation prefixes that flip the next word's polarity
     negators = {"no", "not", "fails", "failed", "unlikely", "without", "never"}
 
@@ -329,6 +399,14 @@ def analyze_sentiment_locally(headlines: list[tuple[str, str]]) -> dict:
 
     for title, _pub_date in headlines:
         lower_title = title.lower()
+        phrase_pos = 0
+        phrase_neg = 0
+        for phrase, score in phrase_scores.items():
+            if phrase in lower_title:
+                if score > 0:
+                    phrase_pos += score
+                elif score < 0:
+                    phrase_neg += abs(score)
         words = [w.strip(".,;:?!()\"'") for w in lower_title.split()]
 
         item_pos = 0
@@ -348,6 +426,8 @@ def analyze_sentiment_locally(headlines: list[tuple[str, str]]) -> dict:
                 else:
                     item_neg += 1
 
+        item_pos += phrase_pos
+        item_neg += phrase_neg
         pos_score += item_pos
         neg_score += item_neg
 
@@ -360,15 +440,15 @@ def analyze_sentiment_locally(headlines: list[tuple[str, str]]) -> dict:
                 catalysts.append(f"Bearish: {clean_title}")
 
         # Detect tickers — accumulate net sentiment per ticker
-        headline_direction = 1 if item_pos >= item_neg else -1
+        headline_direction = 1 if item_pos > item_neg else (-1 if item_neg > item_pos else 0)
         upper_title = title.upper()
         title_words_upper = {w.strip(".,;:?!()\"'") for w in upper_title.split()}
 
         for ticker in known_tickers:
-            if ticker in title_words_upper:
+            if ticker in title_words_upper and headline_direction != 0:
                 ticker_sentiment[ticker] = ticker_sentiment.get(ticker, 0) + headline_direction
         for substr, canonical in substring_tickers.items():
-            if substr in upper_title:
+            if substr in upper_title and headline_direction != 0:
                 ticker_sentiment[canonical] = ticker_sentiment.get(canonical, 0) + headline_direction
 
     # Build deduplicated trade ideas: one direction per ticker
@@ -376,7 +456,7 @@ def analyze_sentiment_locally(headlines: list[tuple[str, str]]) -> dict:
     for ticker, net in sorted(ticker_sentiment.items(), key=lambda x: abs(x[1]), reverse=True):
         if len(trade_ideas) >= 3:
             break
-        if net == 0:
+        if net == 0 or abs(net) < 2:
             continue
         side = "LONG" if net > 0 else "SHORT"
         mentions = abs(net)
@@ -403,7 +483,7 @@ def analyze_sentiment_locally(headlines: list[tuple[str, str]]) -> dict:
 
     # Ratio-based scoring: avoids the absolute-threshold scaling problem
     total_signals = pos_score + neg_score
-    if total_signals > 0:
+    if total_signals >= 3:
         ratio = pos_score / total_signals
         if ratio > 0.60:
             sentiment = "BULLISH"
@@ -415,11 +495,17 @@ def analyze_sentiment_locally(headlines: list[tuple[str, str]]) -> dict:
         sentiment = "NEUTRAL"
         ratio = 0.5
 
-    justification = (
-        f"Local Sentiment Engine: analyzed {len(headlines)} headlines. "
-        f"{pos_score} bullish vs {neg_score} bearish signals "
-        f"(ratio {ratio:.0%})."
-    )
+    if total_signals < 3:
+        justification = (
+            f"Local Sentiment Engine: analyzed {len(headlines)} headlines with low signal density. "
+            f"{pos_score} bullish vs {neg_score} bearish signals (ratio {ratio:.0%})."
+        )
+    else:
+        justification = (
+            f"Local Sentiment Engine: analyzed {len(headlines)} headlines. "
+            f"{pos_score} bullish vs {neg_score} bearish signals "
+            f"(ratio {ratio:.0%})."
+        )
 
     return {
         "overall_market_sentiment": sentiment,
@@ -427,6 +513,103 @@ def analyze_sentiment_locally(headlines: list[tuple[str, str]]) -> dict:
         "top_catalysts": catalysts[:3],
         "actionable_trade_ideas": trade_ideas,
     }
+
+
+def fetch_tradingview_news(symbols: list[str] = None) -> list[tuple[str, str]]:
+    """Fetch recent headlines from TradingView news-flow for Indian symbols.
+    
+    Args:
+        symbols: List of NSE symbols (e.g., ["NIFTY", "BANKNIFTY"]). 
+                Fetches from news-flow for primary symbol.
+    
+    Returns:
+        List of (headline, timestamp) tuples from TradingView.
+    """
+    if not symbols:
+        symbols = ["NIFTY"]
+    
+    headlines = []
+    symbol = symbols[0]  # Use primary symbol for news-flow
+    url = f"https://in.tradingview.com/news-flow/?symbol=NSE:{symbol}"
+    
+    try:
+        logger.info(f"Fetching TradingView news-flow for {symbol}...")
+        import urllib.request
+        import json
+        import re
+        from time import time
+        
+        # Use fetch_webpage-style request with modern headers
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "DNT": "1",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1"
+        }
+        
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            html_content = resp.read().decode('utf-8')
+        
+        # Extract news items from DOM using regex patterns
+        # TradingView news items have timestamp, headline, provider in divs/spans
+        # Pattern: capture headline text, timestamp, and provider
+        
+        # Look for script tags containing JSON data (TradingView often embeds data in __INITIAL_STATE__ or similar)
+        script_pattern = r'<script[^>]*>(.*?)</script>'
+        scripts = re.findall(script_pattern, html_content, re.DOTALL)
+        
+        tv_data = None
+        for script in scripts:
+            if "newsflows" in script.lower() or "articles" in script.lower():
+                try:
+                    # Try to extract JSON-like structures
+                    tv_data = script
+                    break
+                except:
+                    continue
+        
+        # Fallback: parse HTML news cards directly
+        # TradingView structure: news items are in divs with data attributes or specific classes
+        news_pattern = r'<div[^>]*class="[^"]*newsItem[^"]*"[^>]*>(.*?)</div>\s*</div>'
+        news_items = re.findall(news_pattern, html_content, re.DOTALL | re.IGNORECASE)
+        
+        # More flexible pattern for TradingView news cards
+        # Look for article links and surrounding content
+        article_pattern = r'<a[^>]*href="([^"]*?/news/[^"]*?)"[^>]*>([^<]*?)</a>'
+        articles = re.findall(article_pattern, html_content)
+        
+        for article_url, headline_text in articles[:20]:
+            headline = headline_text.strip()
+            if (
+                headline
+                and len(headline) > 10
+                and not _is_noise_headline(headline)
+                and not _is_low_value_headline(headline)
+            ):
+                # Extract timestamp from page context or use current time
+                timestamp = datetime.now(timezone.utc).isoformat()
+                headlines.append((headline, timestamp))
+        
+        # If regex parsing didn't work, try a simpler approach
+        if not headlines:
+            # Look for common patterns in TradingView HTML
+            # News cards typically contain: title text, timestamp, provider badge
+            title_pattern = r'<h[1-6][^>]*>([^<]*?(?:india|nifty|banknifty|stock)[^<]*?)</h[1-6]>'
+            titles = re.findall(title_pattern, html_content, re.IGNORECASE)
+            for title in titles[:15]:
+                clean_title = title.strip()
+                if clean_title and not _is_noise_headline(clean_title) and not _is_low_value_headline(clean_title):
+                    headlines.append((clean_title, datetime.now(timezone.utc).isoformat()))
+        
+        logger.info(f"Successfully extracted {len(headlines)} headlines from TradingView")
+        
+    except Exception as e:
+        logger.warning(f"TradingView news fetch failed: {e}. Will use fallback sources.")
+    
+    return headlines
 
 
 def get_market_news_sentiment(query: str = "Nifty BankNifty stock market India today") -> Optional[dict]:
@@ -474,7 +657,7 @@ def get_market_news_sentiment(query: str = "Nifty BankNifty stock market India t
             date_el = item.find("pubDate")
             title = title_el.text.strip() if title_el is not None and title_el.text else ""
             pub_date = date_el.text.strip() if date_el is not None and date_el.text else ""
-            if not title or _is_noise_headline(title):
+            if not title or _is_noise_headline(title) or _is_low_value_headline(title):
                 continue
 
             # Filter stale headlines
@@ -489,6 +672,15 @@ def get_market_news_sentiment(query: str = "Nifty BankNifty stock market India t
 
     except Exception as e:
         logger.error(f"Failed to fetch Google News RSS: {e}")
+
+    # 1b. Fetch TradingView news to supplement Google News
+    try:
+        logger.info("Fetching TradingView news-flow headlines...")
+        tv_headlines = fetch_tradingview_news(["NIFTY", "BANKNIFTY"])
+        headlines.extend(tv_headlines)
+        logger.info(f"Added {len(tv_headlines)} TradingView headlines (total: {len(headlines)})")
+    except Exception as e:
+        logger.error(f"TradingView news fetch failed: {e}")
 
     # Self-healing Fallback: If primary daily-wrap query is 100% filtered out as noise,
     # try high-quality business, corporate, and macroeconomic queries.
@@ -515,7 +707,7 @@ def get_market_news_sentiment(query: str = "Nifty BankNifty stock market India t
                     date_el = item.find("pubDate")
                     title = title_el.text.strip() if title_el is not None and title_el.text else ""
                     pub_date = date_el.text.strip() if date_el is not None and date_el.text else ""
-                    if not title or _is_noise_headline(title):
+                    if not title or _is_noise_headline(title) or _is_low_value_headline(title):
                         continue
                     if pub_date:
                         pub_ts = _parse_rss_date(pub_date)
@@ -530,11 +722,12 @@ def get_market_news_sentiment(query: str = "Nifty BankNifty stock market India t
             except Exception as fe:
                 logger.error(f"Fallback news query '{f_query}' failed: {fe}")
 
+    headlines = _dedupe_headlines(headlines)
     if not headlines:
         fallback = {
             "overall_market_sentiment": "NEUTRAL",
-            "justification": "Google News RSS feed temporarily unavailable or returned no recent results.",
-            "top_catalysts": ["RSS Feed unavailable or no recent articles found"],
+            "justification": "News feed returned no actionable headlines in the last 36 hours.",
+            "top_catalysts": ["Low-quality or duplicate headlines filtered out."],
             "actionable_trade_ideas": [],
         }
         _set_persistent_sentiment_cache(fallback, now, ttl=900.0)

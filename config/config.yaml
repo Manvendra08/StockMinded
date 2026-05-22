@@ -94,6 +94,7 @@ data_sources:
   scrapegraphai:
     enabled: true
     model: "google_genai/gemini-2.5-flash-lite"
+    model_tokens: 8192
     api_key: "${GOOGLE_API_KEY}"
     saas_api_key: "${SCRAPEGRAPHAI_API_KEY}"
 

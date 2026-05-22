@@ -453,3 +453,39 @@ def check_vix_spike_exit(vix_current: float, vix_entry: float, threshold_pct: fl
         return True, f"VIX spiked {change_pct:.1f}% > {threshold_pct}% threshold"
     
     return False, ""
+
+
+def net_position_delta(legs: list, chain: pd.DataFrame) -> Optional[float]:
+    """Compute net delta across all legs of an option trade using live chain data.
+    
+    Args:
+        legs: list of leg dicts with keys: side, type, strike, expiry, qty
+        chain: DataFrame from chain_snapshot() with ce_delta, pe_delta columns
+        
+    Returns: net delta float (per-share normalized) or None if chain data insufficient
+    """
+    if chain is None or chain.empty or not legs:
+        return None
+    
+    net_delta = 0.0
+    matched = 0
+    for leg in legs:
+        strike = leg.get("strike")
+        opt_type = leg.get("type", "CE")
+        side = leg.get("side", "BUY")
+        
+        row = chain[chain["strike"] == strike]
+        if row.empty:
+            continue
+        
+        delta_col = "ce_delta" if opt_type == "CE" else "pe_delta"
+        leg_delta = float(row.iloc[0].get(delta_col, 0.0))
+        
+        # Calculate per-share delta: SELL is -1, BUY is +1
+        sign = 1 if side == "BUY" else -1
+        net_delta += sign * leg_delta
+        matched += 1
+    
+    if matched == 0:
+        return None
+    return round(net_delta, 4)

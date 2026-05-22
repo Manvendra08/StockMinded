@@ -99,12 +99,30 @@ def breadth_pct_above_50dma(stock_data: dict[str, pd.DataFrame]) -> float | None
     for _, df in stock_data.items():
         if df is None or df.empty or len(df) < 50:
             continue
-        sma50 = df["close"].rolling(50).mean().iloc[-1]
-        if pd.isna(sma50):
+        try:
+            col_name = None
+            if "close" in df.columns:
+                col_name = "close"
+            elif "Close" in df.columns:
+                col_name = "Close"
+            elif isinstance(df.columns, pd.MultiIndex):
+                flat_cols = [c[0].lower() if isinstance(c, tuple) else str(c).lower() for c in df.columns]
+                if "close" in flat_cols:
+                    col_idx = flat_cols.index("close")
+                    col_name = df.columns[col_idx]
+            
+            if col_name is None:
+                continue
+                
+            close_series = df[col_name]
+            sma50 = close_series.rolling(50).mean().iloc[-1]
+            if pd.isna(sma50):
+                continue
+            total += 1
+            if close_series.iloc[-1] > sma50:
+                above += 1
+        except Exception:
             continue
-        total += 1
-        if df["close"].iloc[-1] > sma50:
-            above += 1
     return round(100 * above / total, 1) if total else None
 
 

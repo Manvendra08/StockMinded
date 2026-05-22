@@ -1,3 +1,4 @@
+
 """Data feed: OHLC, option chain, FII/DII, VIX. yfinance + nsepython."""
 from __future__ import annotations
 
@@ -575,18 +576,34 @@ _R360_SESSION: requests.Session | None = None
 _R360_SESSION_TS: float = 0
 _R360_SESSION_LOCK = threading.Lock()
 
-_R360_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept": "*/*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Referer": "https://beta.research360.in/future-and-options/option-chain",
-    "Origin": "https://beta.research360.in",
-    "X-Requested-With": "XMLHttpRequest",
-}
+_R360_BASE_URLS = (
+    "https://www.research360.in",
+    "https://beta.research360.in",
+)
+_R360_BASE_URL: str | None = None
+_R360_EXPIRY_PATHS = (
+    "/fno/option/ajax/optionChainExp.php",
+    "/ajax/optionChainExp.php",
+)
+_R360_CHAIN_PATHS = (
+    "/fno/option/ajax/optionChainApi.php",
+    "/ajax/optionChainApi.php",
+)
+
+
+def _r360_headers(base_url: str) -> dict:
+    return {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": f"{base_url}/future-and-options/option-chain",
+        "Origin": base_url,
+        "X-Requested-With": "XMLHttpRequest",
+    }
 
 # Research360 uses specific internal names for indices
 _R360_SYMBOL_MAP = {
@@ -597,44 +614,75 @@ _R360_SYMBOL_MAP = {
 }
 
 
-def _get_r360_session() -> requests.Session:
-    global _R360_SESSION, _R360_SESSION_TS
+def _create_r360_session() -> requests.Session:
+    try:
+        from curl_cffi import requests as curl_requests
+        return curl_requests.Session(impersonate="chrome120")
+    except ImportError:
+        return _create_retry_session(retries=5, backoff_factor=0.5)
+
+
+def _get_r360_session() -> tuple[requests.Session | None, str | None]:
+    global _R360_SESSION, _R360_SESSION_TS, _R360_BASE_URL
     with _R360_SESSION_LOCK:
         now = time.time()
         if _R360_SESSION is None or (now - _R360_SESSION_TS) > 1800:
             success = False
             for attempt in range(3):
-                try:
-                    s = _create_retry_session(retries=5, backoff_factor=0.5)
-                    s.headers.update(_R360_HEADERS)
-                    s.get(
-                        "https://beta.research360.in/future-and-options/option-chain",
-                        timeout=15,
-                    )
-                    _R360_SESSION = s
-                    _R360_SESSION_TS = now
-                    success = True
+                for base_url in _R360_BASE_URLS:
+                    try:
+                        session = _create_r360_session()
+                        session.headers.update(_r360_headers(base_url))
+                        session.get(
+                            f"{base_url}/future-and-options/option-chain",
+                            timeout=15,
+                        )
+                        _R360_SESSION = session
+                        _R360_BASE_URL = base_url
+                        _R360_SESSION_TS = now
+                        success = True
+                        break
+                    except Exception as e:
+                        print(
+                            f"[r360 session] attempt {attempt+1} {base_url} failed: "
+                            f"{type(e).__name__}: {e}"
+                        )
+                        time.sleep(2 * (attempt + 1))
+                if success:
                     break
-                except Exception as e:
-                    print(f"[r360 session] attempt {attempt+1} failed: {type(e).__name__}: {e}")
-                    time.sleep(2 * (attempt + 1))
             if not success:
                 _R360_SESSION = None
-    return _R360_SESSION
+                _R360_BASE_URL = None
+    return _R360_SESSION, _R360_BASE_URL
 
 
-def _r360_expiries(session: requests.Session, symbol: str) -> list[str]:
+def _r360_expiries(session: requests.Session, base_url: str, symbol: str) -> list[str]:
     import re as _re
     # Research360 expiries endpoint uses 'symbol' parameter for indices
-    r = session.get(
-        "https://beta.research360.in/fno/option/ajax/optionChainExp.php",
-        headers=_R360_HEADERS,
-        params={"table_flag": "optionChain", "symbol": symbol},
-        timeout=15,
-    )
-    r.raise_for_status()
-    data = r.json().get("data", "")
-    return _re.findall(r'value="(\d{4}-\d{2}-\d{2})"', data)
+    last_error: Exception | None = None
+    for path in _R360_EXPIRY_PATHS:
+        try:
+            r = session.get(
+                f"{base_url}{path}",
+                headers=_r360_headers(base_url),
+                params={"table_flag": "optionChain", "symbol": symbol},
+                timeout=15,
+            )
+            if r.status_code == 404:
+                continue
+            r.raise_for_status()
+            payload = r.json()
+            data = payload.get("data", "")
+            expiries = _re.findall(r'value="(\d{4}-\d{2}-\d{2})"', data)
+            if expiries:
+                return expiries
+            return []
+        except Exception as exc:
+            last_error = exc
+            continue
+    if last_error is not None:
+        raise last_error
+    return []
 
 
 def _r360_to_nse_chain(symbol: str, raw: dict, expiry: str) -> dict:
@@ -735,36 +783,51 @@ def _r360_to_nse_chain(symbol: str, raw: dict, expiry: str) -> dict:
 
 def _option_chain_from_research360(symbol: str) -> dict:
     """Scrape option chain from Research360 PHP AJAX endpoint."""
+    global _R360_SESSION, _R360_BASE_URL
     sym = symbol.upper()
     r360_sym = _R360_SYMBOL_MAP.get(sym, sym)
 
     for attempt in range(3):
-        session = _get_r360_session()
-        if session is None:
+        session, base_url = _get_r360_session()
+        if session is None or base_url is None:
             return {"records": {"data": []}}
         
         try:
-            expiries = _r360_expiries(session, r360_sym)
-            if not expiries:
-                return {"records": {"data": []}}
-            
-            expiry = expiries[0]
-            r = session.post(
-                "https://beta.research360.in/fno/option/ajax/optionChainApi.php",
-                headers=_R360_HEADERS,
-                data={"stock": r360_sym, "expiry": expiry, "showall": "on", "showallnew": "on"},
-                timeout=30,
-            )
-            r.raise_for_status()
-            raw = r.json()
-            data = _r360_to_nse_chain(sym, raw, expiry)
-            if data.get("records", {}).get("data"):
-                return data
+            last_error: Exception | None = None
+            base_candidates = [base_url] + [url for url in _R360_BASE_URLS if url != base_url]
+            for candidate_base in base_candidates:
+                expiries = _r360_expiries(session, candidate_base, r360_sym)
+                if not expiries:
+                    continue
+
+                expiry = expiries[0]
+                for path in _R360_CHAIN_PATHS:
+                    try:
+                        r = session.post(
+                            f"{candidate_base}{path}",
+                            headers=_r360_headers(candidate_base),
+                            data={"stock": r360_sym, "expiry": expiry, "showall": "on", "showallnew": "on"},
+                            timeout=30,
+                        )
+                        if r.status_code == 404:
+                            continue
+                        r.raise_for_status()
+                        raw = r.json()
+                        data = _r360_to_nse_chain(sym, raw, expiry)
+                        if data.get("records", {}).get("data"):
+                            with _R360_SESSION_LOCK:
+                                _R360_BASE_URL = candidate_base
+                            return data
+                    except Exception as exc:
+                        last_error = exc
+                        continue
+            if last_error is not None:
+                raise last_error
         except Exception as e:
             print(f"[option_chain research360] attempt {attempt+1} failed: {type(e).__name__}: {e}")
-            global _R360_SESSION
             with _R360_SESSION_LOCK:
                 _R360_SESSION = None # Force new session on next attempt
+                _R360_BASE_URL = None
             time.sleep(1 * (attempt + 1))
             
     return {"records": {"data": []}}

@@ -169,3 +169,24 @@ class TestAGrade:
         longs, shorts = a_grade([])
         assert longs == []
         assert shorts == []
+
+
+class TestEarlyBreakoutAndVolume:
+    def test_early_breakout_quintile_assignment(self):
+        # Q5 long setup: 10d slope > 15, 20d slope > 5, 20 DMA proximity between 0% and 6%, above 50 DMA, high volume (RVOL > 1.2)
+        prices = [100.0] * 50 + [101.0, 102.0, 103.0]
+        # Calculate volume list with volume surge on last day
+        vol = [100] * 52 + [300]  # RVOL = 300 / 100 = 3.0
+        
+        # Create stock dataframe with close and volume
+        idx = pd.date_range("2024-01-01", periods=len(prices), freq="B")
+        df = pd.DataFrame({"close": prices, "open": prices, "high": prices, "low": prices, "volume": vol}, index=idx)
+        
+        bench = _bench(n=len(prices))
+        ranks = rank_universe({"EARLY_LONG": df}, bench)
+        assert len(ranks) == 1
+        r = ranks[0]
+        assert r.rvol > 1.2
+        assert r.rs_slope_10d > 0
+        assert r.quintile >= 3  # Triggers early breakout quintile
+

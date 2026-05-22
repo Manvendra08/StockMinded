@@ -690,6 +690,59 @@ body::before {
   flex-wrap: wrap;
 }
 
+/* Option Legs Styles */
+.option-leg-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  font-weight: 500;
+  margin: 2px 4px 2px 0;
+  border: 1px solid transparent;
+}
+.leg-sell {
+  background: rgba(239, 68, 68, 0.08);
+  color: #ef4444;
+  border-color: rgba(239, 68, 68, 0.2);
+}
+.leg-buy {
+  background: rgba(59, 130, 246, 0.08);
+  color: #3b82f6;
+  border-color: rgba(59, 130, 246, 0.2);
+}
+.leg-action {
+  font-weight: 700;
+  font-size: 0.7rem;
+  letter-spacing: 0.5px;
+}
+.badge-call {
+  background: rgba(16, 185, 129, 0.15) !important;
+  color: #10b981 !important;
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+.badge-put {
+  background: rgba(245, 158, 11, 0.15) !important;
+  color: #f59e0b !important;
+  border: 1px solid rgba(245, 158, 11, 0.3);
+}
+.leg-qty {
+  opacity: 0.8;
+}
+.leg-strike {
+  font-weight: 700;
+}
+.leg-premium {
+  font-size: 0.72rem;
+  opacity: 0.85;
+}
+.pnl-cell {
+  font-weight: 700;
+  font-size: 0.9rem;
+}
+
 </style>
 </head>
 <body>
@@ -862,9 +915,11 @@ body::before {
             <th>Symbol</th>
             <th>Structure</th>
             <th>Legs</th>
-            <th>Net Premium</th>
+            <th style="text-align: right;">Net Premium</th>
+            <th style="text-align: right;">P&L</th>
             <th>Time</th>
             <th>Status</th>
+            <th>Exit / Action</th>
           </tr></thead>
           <tbody id="options-tbody"></tbody>
         </table>
@@ -1064,6 +1119,14 @@ body::before {
             <input type="number" id="set-tgt" class="input-sm" step="0.1">
           </div>
           <div class="field-row">
+            <span class="field-label">Option Stop Loss %<br><span style="font-weight:400;color:var(--text-muted)">Default 125% of premium</span></span>
+            <input type="number" id="set-options-sl" class="input-sm" step="5" placeholder="e.g. 125">
+          </div>
+          <div class="field-row">
+            <span class="field-label">Option Target %<br><span style="font-weight:400;color:var(--text-muted)">Default 50% of premium</span></span>
+            <input type="number" id="set-options-tgt" class="input-sm" step="5" placeholder="e.g. 50">
+          </div>
+          <div class="field-row">
             <span class="field-label">Min. Confidence</span>
             <select id="set-conf" class="input-sm">
               <option value="LOW">LOW</option>
@@ -1078,6 +1141,30 @@ body::before {
           <div class="field-row">
             <span class="field-label">Auto-close trades at EOD (15:25 IST)</span>
             <input type="checkbox" id="set-eod" style="width:20px;height:20px;cursor:pointer;">
+          </div>
+          <div class="field-row" style="margin-top:10px; border-top:1px solid var(--glass-border); padding-top:15px;">
+            <span class="field-label">🧠 Enable Smart Exits<br><span style="font-weight:400;color:var(--text-muted)">VIX spike, delta breach, trail lock, strike breach</span></span>
+            <input type="checkbox" id="set-smart-exits" style="width:20px;height:20px;cursor:pointer;">
+          </div>
+          <div class="field-row">
+            <span class="field-label">VIX Spike Exit %<br><span style="font-weight:400;color:var(--text-muted)">Exit if VIX jumps >N% from entry</span></span>
+            <input type="number" id="set-vix-spike" class="input-sm" step="1" placeholder="e.g. 10">
+          </div>
+          <div class="field-row">
+            <span class="field-label">Delta Breach Threshold<br><span style="font-weight:400;color:var(--text-muted)">Exit if |net delta| > threshold</span></span>
+            <input type="number" id="set-delta-thresh" class="input-sm" step="0.05" placeholder="e.g. 0.35">
+          </div>
+          <div class="field-row">
+            <span class="field-label">Trail Lock Activation %<br><span style="font-weight:400;color:var(--text-muted)">Lock profit after N% of max earned</span></span>
+            <input type="number" id="set-trail-lock" class="input-sm" step="5" placeholder="e.g. 30">
+          </div>
+          <div class="field-row">
+            <span class="field-label">Trail Lock Floor %<br><span style="font-weight:400;color:var(--text-muted)">Exit if profit drops below N%</span></span>
+            <input type="number" id="set-trail-floor" class="input-sm" step="5" placeholder="e.g. 20">
+          </div>
+          <div class="field-row">
+            <span class="field-label">Enable Smart Re-Entry<br><span style="font-weight:400;color:var(--text-muted)">Auto re-enter after VIX/delta exit (risky)</span></span>
+            <input type="checkbox" id="set-smart-reentry" style="width:20px;height:20px;cursor:pointer;">
           </div>
           <div class="field-row" style="margin-top:10px; border-top:1px solid var(--glass-border); padding-top:15px;">
             <span class="field-label">Telegram Token</span>
@@ -1462,6 +1549,8 @@ async function loadSettings() {
     document.getElementById('set-capital').value = s.capital_per_trade;
     document.getElementById('set-sl').value = s.sl_pct;
     document.getElementById('set-tgt').value = s.tgt_pct;
+    document.getElementById('set-options-sl').value = s.options_sl_pct !== undefined ? s.options_sl_pct : 125;
+    document.getElementById('set-options-tgt').value = s.options_tgt_pct !== undefined ? s.options_tgt_pct : 50;
     document.getElementById('set-conf').value = s.min_confidence;
     document.getElementById('set-regime').checked = s.regime_filter;
     if (document.getElementById('set-eod')) {
@@ -1476,6 +1565,13 @@ async function loadSettings() {
     document.getElementById('rg-margin').value      = ((s.rg_margin_util_cap      ?? 0.60) * 100).toFixed(0);
     document.getElementById('rg-corr').value        = (s.rg_correlation_max       ?? 0.70).toFixed(2);
     _updateRgPreview(s);
+    // Smart Exits
+    if (document.getElementById('set-smart-exits')) document.getElementById('set-smart-exits').checked = s.smart_exits_enabled !== false;
+    if (document.getElementById('set-vix-spike')) document.getElementById('set-vix-spike').value = s.smart_exit_vix_spike_pct ?? 10;
+    if (document.getElementById('set-delta-thresh')) document.getElementById('set-delta-thresh').value = s.smart_exit_delta_threshold ?? 0.35;
+    if (document.getElementById('set-trail-lock')) document.getElementById('set-trail-lock').value = s.smart_exit_trail_lock_pct ?? 30;
+    if (document.getElementById('set-trail-floor')) document.getElementById('set-trail-floor').value = s.smart_exit_trail_floor_pct ?? 20;
+    if (document.getElementById('set-smart-reentry')) document.getElementById('set-smart-reentry').checked = !!s.smart_reentry_enabled;
   } catch(_){}
 }
 
@@ -1490,6 +1586,8 @@ async function saveSettings(btn) {
       capital_per_trade: parseFloat(document.getElementById('set-capital').value),
       sl_pct: parseFloat(document.getElementById('set-sl').value),
       tgt_pct: parseFloat(document.getElementById('set-tgt').value),
+      options_sl_pct: parseFloat(document.getElementById('set-options-sl').value) || 125,
+      options_tgt_pct: parseFloat(document.getElementById('set-options-tgt').value) || 50,
       min_confidence: document.getElementById('set-conf').value,
       regime_filter: document.getElementById('set-regime').checked,
       auto_close_eod: document.getElementById('set-eod') ? document.getElementById('set-eod').checked : true,
@@ -1501,6 +1599,13 @@ async function saveSettings(btn) {
       rg_concurrent_open_pct: isNaN(rgConc)    ? 0.03 : rgConc,
       rg_margin_util_cap:     isNaN(rgMargin)  ? 0.60 : rgMargin,
       rg_correlation_max:     isNaN(rgCorr)    ? 0.70 : rgCorr,
+      // Smart Exits
+      smart_exits_enabled: document.getElementById('set-smart-exits') ? document.getElementById('set-smart-exits').checked : true,
+      smart_exit_vix_spike_pct: parseFloat(document.getElementById('set-vix-spike').value) || 10,
+      smart_exit_delta_threshold: parseFloat(document.getElementById('set-delta-thresh').value) || 0.35,
+      smart_exit_trail_lock_pct: parseFloat(document.getElementById('set-trail-lock').value) || 30,
+      smart_exit_trail_floor_pct: parseFloat(document.getElementById('set-trail-floor').value) || 20,
+      smart_reentry_enabled: document.getElementById('set-smart-reentry') ? document.getElementById('set-smart-reentry').checked : false,
     };
     const r = await fetch('/api/paper/settings', {
       method: 'POST',
@@ -1995,7 +2100,7 @@ async function loadOptions() {
     const empty = document.getElementById('options-empty');
     if(!tbody || !empty) return;
     
-    const ops = data.option_trades || [];
+    const ops = (data.option_trades || []).slice().reverse();
     if(ops.length === 0) {
       tbody.innerHTML = '';
       empty.style.display = 'flex';
@@ -2005,20 +2110,61 @@ async function loadOptions() {
     
     let html = '';
     ops.forEach(t => {
-      let legsHtml = t.legs.map(l => `${l.side} ${l.qty}x ${l.strike} ${l.type} @ ${l.entry_premium}`).join('<br>');
+      // Visual legs formatting
+      let legsHtml = t.legs.map(l => {
+        const isSell = l.side === 'SELL';
+        const typeClass = l.type === 'CE' ? 'badge-call' : 'badge-put';
+        const actionClass = isSell ? 'leg-sell' : 'leg-buy';
+        const actionLabel = isSell ? 'SELL' : 'BUY';
+        const priceLabel = l.exit_premium !== null && l.exit_premium !== undefined ? 
+          `@ ${l.entry_premium} → ${l.exit_premium}` : `@ ${l.entry_premium}`;
+          
+        return `<div class="option-leg-item ${actionClass}">
+          <span class="leg-action">${actionLabel}</span>
+          <span class="leg-qty">${l.qty}x</span>
+          <span class="leg-strike">${l.strike}</span>
+          <span class="badge ${typeClass}">${l.type}</span>
+          <span class="leg-premium">${priceLabel}</span>
+        </div>`;
+      }).join('');
+      
+      const premiumValue = t.net_premium !== undefined && t.net_premium !== null ? t.net_premium : t.net_credit;
+      const displayPremium = fmtInr(premiumValue);
+      const displayPnl = colorPnl(t.pnl);
+      const entryTime = t.entry_date && t.entry_time ? `${t.entry_date.slice(8,10)}/${t.entry_date.slice(5,7)} ${t.entry_time.split(' ')[1].slice(0,5)}` : '—';
+      const actionHtml = t.status === 'OPEN' ? 
+        `<td><button class="close-btn" onclick="closeOptionPosition(${t.id}, this)">✕ Close</button></td>` : 
+        `<td><span class="exit-badge exit-${t.exit_reason}">${(t.exit_reason||'').replace('_',' ')}</span></td>`;
       
       html += `<tr>
         <td>#${t.id}</td>
         <td class="bold">${t.symbol}</td>
         <td><span class="badge ${t.structure.includes('BULL') ? 'badge-green' : (t.structure.includes('BEAR') ? 'badge-red' : 'badge-blue')}">${t.structure}</span></td>
-        <td style="font-family:var(--mono); font-size:0.85rem; line-height:1.4;">${legsHtml}</td>
-        <td>${fmtInr(t.net_premium)}</td>
-        <td class="muted" style="font-size:0.72rem;">${t.entry_date.slice(8,10)}/${t.entry_date.slice(5,7)} ${t.entry_time.split(' ')[1].slice(0,5)}</td>
+        <td><div style="display:flex; flex-direction:column; gap:4px;">${legsHtml}</div></td>
+        <td style="text-align: right; font-family:var(--mono);">${displayPremium}</td>
+        <td style="text-align: right; font-family:var(--mono);" class="pnl-cell">${displayPnl}</td>
+        <td class="muted" style="font-size:0.72rem;">${entryTime}</td>
         <td><span class="badge ${t.status==='OPEN' ? 'badge-amber' : 'badge-green'}">${t.status}</span></td>
+        ${actionHtml}
       </tr>`;
     });
     tbody.innerHTML = html;
   } catch(e) {}
+}
+
+async function closeOptionPosition(tradeId, btn) {
+  btn.disabled=true; btn.textContent='...';
+  try {
+    const r = await fetch(`/api/options/close/${tradeId}`);
+    const d = await r.json();
+    if(d.error) { toast('Error: '+d.error,'err'); btn.disabled=false; btn.textContent='✕ Close'; return; }
+    const pnl = d.pnl;
+    toast(`Closed ${d.symbol} Option: ${sign(pnl)}${fmtInr(pnl)}`, pnl>=0?'ok':'err');
+    await loadAll();
+  } catch(e) {
+    toast(e.message,'err');
+    btn.disabled=false; btn.textContent='✕ Close';
+  }
 }
 
 async function checkSLTGT(btn) {
