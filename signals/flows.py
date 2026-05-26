@@ -96,6 +96,52 @@ def fii_dii_5d_net() -> tuple[dict[str, float], bool]:
     return {k: round(v, 2) for k, v in out.items()}, False
 
 
+def fii_dii_2d_trend(days: int = 20) -> tuple[float, float, bool]:
+    """Return (fii_last2d_net, fii_prev3d_net, stale).
+
+    Splits the 5-day FII cash window into the most-recent 2 days vs the
+    prior 3 days so callers can detect intra-period reversals.
+    A rising trajectory (last2d > prev3d_avg * 2/3) signals institutional
+    re-entry even when the 5d sum is still negative.
+    """
+    zero = (0.0, 0.0, True)
+    try:
+        df = feed.fii_dii_cash(days=days)
+    except Exception:
+        return zero
+
+    if df.empty or "date" not in df.columns:
+        return zero
+
+    cols = {c.lower(): c for c in df.columns}
+    cat_col = cols.get("category") or cols.get("clienttype")
+    net_col = cols.get("netvalue") or cols.get("net")
+    if not cat_col or not net_col:
+        return zero
+
+    unique_dates = sorted(df["date"].unique())
+    if len(unique_dates) < 5:
+        return zero
+
+    last2 = unique_dates[-2:]
+    prev3 = unique_dates[-5:-2]
+
+    def _sum(dates):
+        sub = df[df["date"].isin(dates)]
+        total = 0.0
+        for _, row in sub.iterrows():
+            c = str(row[cat_col]).strip().lower()
+            if "fii" not in c and "fpi" not in c:
+                continue
+            raw = row[net_col]
+            if isinstance(raw, str):
+                raw = raw.replace(",", "")
+            total += float(raw) if pd.notna(raw) else 0.0
+        return round(total, 2)
+
+    return _sum(last2), _sum(prev3), False
+
+
 def sector_relative_strength(
     sector_data: dict[str, pd.DataFrame], lookback: int = 5
 ) -> list[tuple[str, float]]:
@@ -178,47 +224,93 @@ def _bias(
     fii_dii_stale: bool = False,
     derivatives: dict[str, float] | None = None,
     derivatives_stale: bool = False,
+    ai_sentiment: str | None = None,
 ) -> str:
-    """Compute smart-money bias. Stale FII/DII data does not contribute a score."""
-    score = 0
-    if not fii_dii_stale:
-        net = fii_dii.get("fii", 0) + fii_dii.get("dii", 0)
-        if net > 500:
-            score += 1
-        elif net < -500:
-            score -= 1
-            
-    if pcr_oi is not None:
-        if pcr_oi > 1.3:
-            score += 1
-        elif pcr_oi < 0.7:
-            score -= 1
+    """Compute smart-money bias with weighted, calibrated signal scoring.
 
+    Signal weights and thresholds (NSE-calibrated):
+    -----------------------------------------------
+    FII Index Futures 5D net  : weight 2.0  — most reliable institutional lead
+    PCR OI                    : weight 1.5  — NSE bands: >1.2 bull / <0.85 bear
+    FII Cash Net 5D           : weight 1.0  — T+1 delayed, directional only
+    FII Stock Futures 5D net  : weight 1.0
+    FII Index Options 5D net  : weight 0.5  — noisy; low weight
+    AI Sentiment (tiebreaker) : weight 0.5  — only applied when score in (-1, 1)
+
+    Conviction threshold: weighted_score >= 2.0 → LONG, <= -2.0 → SHORT.
+    Raising from ±1 prevents single weak signals from declaring bias.
+
+    2-day trend delta:
+    If fii_last2d and fii_prev3d have opposite signs, the 5d net is
+    misleading. We apply +0.5 weight boost in the direction of the 2d trend.
+    """
+    score = 0.0
+
+    # --- FII Cash (weight 1.0) with 2-day recency delta ---
+    if not fii_dii_stale:
+        net5d = fii_dii.get("fii", 0.0) + fii_dii.get("dii", 0.0)
+        # Base score from 5d net
+        if net5d > 500:
+            score += 1.0
+        elif net5d < -500:
+            score -= 1.0
+
+        # Recency delta: detect intra-period reversals
+        try:
+            last2, prev3, trend_stale = fii_dii_2d_trend()
+            if not trend_stale:
+                # Reversal: last 2d direction conflicts with prior 3d
+                if prev3 < -200 and last2 > 100:
+                    # Was selling, now buying — bullish reversal boost
+                    score += 0.5
+                elif prev3 > 200 and last2 < -100:
+                    # Was buying, now selling — bearish reversal signal
+                    score -= 0.5
+        except Exception:
+            pass
+
+    # --- PCR OI (weight 1.5, NSE-calibrated bands) ---
+    if pcr_oi is not None:
+        if pcr_oi > 1.2:
+            score += 1.5
+        elif pcr_oi < 0.85:
+            score -= 1.5
+
+    # --- FII Derivatives (only when fresh) ---
     if not derivatives_stale and derivatives is not None:
-        # FII Index Futures 5D Net
+        # FII Index Futures 5D Net (weight 2.0 — highest quality signal)
         idx_fut = derivatives.get("fii_index_futures_5d", 0.0)
         if idx_fut > 1000:
-            score += 1
+            score += 2.0
         elif idx_fut < -1000:
-            score -= 1
-            
-        # FII Index Options 5D Net
+            score -= 2.0
+
+        # FII Index Options 5D Net (weight 0.5 — noisy, low threshold)
         idx_opt = derivatives.get("fii_index_options_5d", 0.0)
-        if idx_opt > 5000:
-            score += 1
-        elif idx_opt < -5000:
-            score -= 1
-            
-        # FII Stock Futures 5D Net
+        if idx_opt > 2000:
+            score += 0.5
+        elif idx_opt < -2000:
+            score -= 0.5
+
+        # FII Stock Futures 5D Net (weight 1.0)
         stk_fut = derivatives.get("fii_stock_futures_5d", 0.0)
         if stk_fut > 2000:
-            score += 1
+            score += 1.0
         elif stk_fut < -2000:
-            score -= 1
+            score -= 1.0
 
-    if score >= 1:
+    # --- AI Sentiment tiebreaker (weight 0.5, only when score in (-2, 2)) ---
+    if ai_sentiment is not None and -2.0 < score < 2.0:
+        sentiment_upper = str(ai_sentiment).upper()
+        if sentiment_upper in ("BULLISH", "POSITIVE", "LONG"):
+            score += 0.5
+        elif sentiment_upper in ("BEARISH", "NEGATIVE", "SHORT"):
+            score -= 0.5
+
+    # --- Conviction threshold: ±2.0 on a max possible ~6.5 scale ---
+    if score >= 2.0:
         return "LONG"
-    if score <= -1:
+    if score <= -2.0:
         return "SHORT"
     return "NEUTRAL"
 
@@ -227,7 +319,7 @@ def snapshot(
     sector_data: dict[str, pd.DataFrame], index_symbol: str = "NIFTY"
 ) -> FlowSnapshot:
     fii_dii, fii_dii_stale = fii_dii_5d_net()
-    
+
     # Fetch FII derivatives data
     try:
         fii_derivs, fii_derivs_stale = feed.fii_dii_derivatives(days=5)
@@ -270,8 +362,11 @@ def snapshot(
         pcr_vol=pcr_vol,
         max_pain=mp,
         smart_money_bias=_bias(
-            fii_dii, pcr_oi, fii_dii_stale=fii_dii_stale,
-            derivatives=fii_derivs, derivatives_stale=fii_derivs_stale
+            fii_dii, pcr_oi,
+            fii_dii_stale=fii_dii_stale,
+            derivatives=fii_derivs,
+            derivatives_stale=fii_derivs_stale,
+            ai_sentiment=ai_sentiment,
         ),
         pcr_stale=pcr_stale,
         mp_stale=mp_stale,
