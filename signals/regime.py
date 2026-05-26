@@ -47,7 +47,8 @@ def _vix_rank(vix_series: pd.Series, window: int = 252) -> float | None:
     low, high = float(tail.min()), float(tail.max())
     if high == low:
         return 50.0
-    return round((current - low) / (high - low) * 100.0, 1)
+    percentile = (tail <= current).sum() / len(tail) * 100.0
+    return round(float(percentile), 1)
 
 
 def _ema(s: pd.Series, n: int) -> pd.Series:
