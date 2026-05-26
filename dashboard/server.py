@@ -161,11 +161,21 @@ def _build_result(force: bool = False) -> dict:
     except Exception:
         pass  # iv_rank unavailable -> verdict defaults to None -> gate passes with flag
 
+    _iv_rank_for_verdict = None
+    try:
+        from signals.options import iv_rank as _iv_rank_fn, chain_snapshot as _chain_snap, atm_iv as _atm_iv
+        _db_path = cfg.get("options", {}).get("iv_history_db", "./data/iv_history.sqlite")
+        _chain = _chain_snap("NIFTY")
+        _spot  = nifty_close
+        if not _chain.empty and _spot > 0:
+            _iv_rank_for_verdict = _iv_rank_fn("NIFTY", _atm_iv(_chain, _spot), _db_path)
+    except Exception:
+        pass
     result_for_verdict = {
         **result,
         "leaders": [{"quintile": r.quintile, "symbol": r.symbol} for r in longs],
         "laggards": [{"quintile": r.quintile, "symbol": r.symbol} for r in shorts],
-        "iv_rank": _iv_rank_for_verdict,   # Issue #6 callsite fix
+        "iv_rank": _iv_rank_for_verdict,
     }
     result["verdict"] = verdict_mod.build_trade_verdict(result_for_verdict).to_dict()
 
