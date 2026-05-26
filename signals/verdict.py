@@ -11,7 +11,7 @@ def _conf_score(label: str) -> int:
 
 @dataclass
 class StockVerdict:
-    action: str  # LONG_ONLY, SHORT_ONLY, WAIT
+    action: str  # LONG_ONLY, SHORT_ONLY, LONG_AND_SHORT, WAIT
     tone: str
     confidence: str
     confidence_score: int           # Issue #11: numeric 0-100 backing the label
