@@ -72,9 +72,9 @@ def _next_expiry(symbol="NIFTY", preference="weekly"):
             else:
                 exp_date = date(next_year, next_month, cal[-2][calendar.THURSDAY])
     else:
-        # NSE changed NIFTY weekly expiry from Thursday → Monday (effective Oct 2024)
-        days_ahead = calendar.MONDAY - today.weekday()
-        if days_ahead <= 0:           # already Monday or past it this week
+        # NSE changed NIFTY weekly expiry from Thursday → Tuesday (effective Apr 2025)
+        days_ahead = calendar.TUESDAY - today.weekday()
+        if days_ahead <= 0:           # already Tuesday or past it this week
             days_ahead += 7
         exp_date = today + timedelta(days=days_ahead)
     while _is_holiday(exp_date):
