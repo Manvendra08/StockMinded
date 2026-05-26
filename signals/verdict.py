@@ -2,11 +2,19 @@
 from __future__ import annotations
 from dataclasses import asdict, dataclass
 
+# Issue #11: confidence label -> numeric score mapping (0-100)
+_CONF_SCORE: dict[str, int] = {"HIGH": 80, "MEDIUM": 50, "LOW": 20}
+
+def _conf_score(label: str) -> int:
+    """Return numeric confidence score (0-100) backing the label."""
+    return _CONF_SCORE.get(label.upper(), 0)
+
 @dataclass
 class StockVerdict:
-    action: str  # LONG_ONLY, SHORT_ONLY, WAIT
+    action: str  # LONG_ONLY, SHORT_ONLY, LONG_AND_SHORT, WAIT
     tone: str
     confidence: str
+    confidence_score: int           # Issue #11: numeric 0-100 backing the label
     strategy: str
     top_long: str | None
     top_short: str | None
@@ -20,6 +28,7 @@ class NiftyVerdict:
     tone: str
     bias: str
     confidence: str
+    confidence_score: int           # Issue #11: numeric 0-100 backing the label
     strategy: str
     can_trade: bool
     reasons: list[str]
@@ -114,7 +123,7 @@ def build_trade_verdict(data: dict) -> CombinedVerdict:
             q5_longs = sum(1 for l in leaders if l.get("quintile", 0) == 5)
             q5_shorts = sum(1 for l in laggards if l.get("quintile", 0) == 5)
 
-            # Gate: need ≥5 Q5 names on at least one side to even consider
+            # Gate: need >=5 Q5 names on at least one side to even consider
             if q5_longs >= 5 or q5_shorts >= 5:
                 long_str = q5_longs + (2 if bias == "LONG" else 0) + (4 if trend > 0 else 0)
                 short_str = q5_shorts + (2 if bias == "SHORT" else 0) + (4 if trend < 0 else 0)
@@ -126,18 +135,26 @@ def build_trade_verdict(data: dict) -> CombinedVerdict:
                 elif short_str > long_str + 4:
                     stock_action = "SHORT_ONLY"
                 else:
-                    # Ambiguous — stay out in range regimes
+                    # Ambiguous - stay out in range regimes
                     pass
 
                 if stock_action != "WAIT":
-                    stock_tone = "bull" if stock_action == "LONG_ONLY" else ("bear" if stock_action == "SHORT_ONLY" else "mixed")
+                    # Issue #8: "mixed" tone is now a first-class value; downstream
+                    # consumers must handle it explicitly (e.g. present as "range play").
+                    if stock_action == "LONG_AND_SHORT":
+                        stock_tone = "mixed"
+                    elif stock_action == "LONG_ONLY":
+                        stock_tone = "bull"
+                    else:
+                        stock_tone = "bear"
                     stock_can_trade = True
                     # Confidence stays LOW unless leadership is overwhelming
                     stock_conf = "MEDIUM" if (q5_longs >= 7 or q5_shorts >= 7) else "LOW"
                     stock_strategy = f"Range leadership {stock_action}: Only Q5 RS candidates (high bar)."
     
     stock_v = StockVerdict(
-        action=stock_action, tone=stock_tone, confidence=stock_conf,
+        action=stock_action, tone=stock_tone,
+        confidence=stock_conf, confidence_score=_conf_score(stock_conf),  # Issue #11
         strategy=stock_strategy, top_long=top_long, top_short=top_short,
         can_trade=stock_can_trade, reasons=list(common_reasons), blocks=stock_blocks
     )
@@ -153,31 +170,45 @@ def build_trade_verdict(data: dict) -> CombinedVerdict:
 
     if not data_stale and vix < 25 and option_ok:
         nifty_can_trade = True
-        # Logic for Naked vs. Defined Risk
+        iv_rank_val = _num(data.get("iv_rank"))   # Issue #6: caller must pass current IV rank
+        iv_rank_ok  = (iv_rank_val is None) or (iv_rank_val >= 40)  # None = unknown -> allow but flag
+
         if regime_name in ("TREND_UP", "TREND_DOWN") and abs(trend) >= 4:
-            # Strong trend -> Naked selling (higher gamma/delta risk ok)
-            nifty_action = "NAKED_OPTION_SELL"
-            nifty_conf = "HIGH" if (trend > 0 and bias == "LONG") or (trend < 0 and bias == "SHORT") else "MEDIUM"
-            nifty_tone = "bull" if trend > 0 else "bear"
-            side = "PUTS" if trend > 0 else "CALLS"
-            nifty_strategy = f"Naked {side} selling with SL (Aggressive Trend)."
+            # Issue #6: require IV rank >= 40 before naked sell; thin-premium environments
+            # produce inadequate compensation for the open-ended risk.
+            if not iv_rank_ok:
+                nifty_action = "OPTION_SELL_DEFINED_RISK"
+                nifty_conf = "LOW"
+                nifty_tone = "bull" if trend > 0 else "bear"
+                nifty_strategy = (
+                    f"IV rank {iv_rank_val:.0f} < 40 - downgrade naked -> defined-risk spread."
+                )
+            else:
+                nifty_action = "NAKED_OPTION_SELL"
+                nifty_conf = "HIGH" if (trend > 0 and bias == "LONG") or (trend < 0 and bias == "SHORT") else "MEDIUM"
+                nifty_tone = "bull" if trend > 0 else "bear"
+                side = "PUTS" if trend > 0 else "CALLS"
+                ivr_display = f"{iv_rank_val:.0f}" if iv_rank_val is not None else "N/A"
+                nifty_strategy = f"Naked {side} selling with SL (Aggressive Trend, IVR {ivr_display})."
         elif regime_name in ("RANGE_HIGH_VOL", "RANGE_LOW_VOL", "VOL_CONTRACTION"):
             # Range-bound -> Defined risk (Iron Condor / Iron Fly)
             nifty_action = "OPTION_SELL_DEFINED_RISK"
             nifty_conf = "MEDIUM"
             nifty_strategy = structure.get("primary") or "Sell premium via Iron Condor/Fly (Range)."
         else:
-            # Default to Naked if we have a clear bias even without strong trend
-            if bias in ("LONG", "SHORT"):
+            # Issue #6: fallback naked sell also requires IV rank >= 40
+            if bias in ("LONG", "SHORT") and iv_rank_ok:
                 nifty_action = "NAKED_OPTION_SELL"
                 nifty_conf = "MEDIUM"
                 side = "PUTS" if bias == "LONG" else "CALLS"
-                nifty_strategy = f"Naked {side} selling basis Smart Money Bias."
+                ivr_display = f"{iv_rank_val:.0f}" if iv_rank_val is not None else "N/A"
+                nifty_strategy = f"Naked {side} selling basis Smart Money Bias (IVR {ivr_display})."
 
     nifty_v = NiftyVerdict(
-        action=nifty_action, tone=nifty_tone, bias=bias, confidence=nifty_conf,
-        strategy=nifty_strategy, can_trade=nifty_can_trade, 
-        reasons=list(common_reasons) + [f"PCR {pcr}", f"MaxPain {max_pain}"], 
+        action=nifty_action, tone=nifty_tone, bias=bias,
+        confidence=nifty_conf, confidence_score=_conf_score(nifty_conf),  # Issue #11
+        strategy=nifty_strategy, can_trade=nifty_can_trade,
+        reasons=list(common_reasons) + [f"PCR {pcr}", f"MaxPain {max_pain}"],
         blocks=nifty_blocks
     )
 

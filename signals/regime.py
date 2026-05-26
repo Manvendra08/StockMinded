@@ -25,6 +25,7 @@ class RegimeSnapshot:
     trend_score: int
     vix: float
     vix_5d_change_pct: float
+    vix_rank: float | None          # Issue #10: VIX percentile (0-100) over rolling 1-year window
     adx: float
     breadth_pct_above_50dma: float | None
     notes: str
@@ -33,6 +34,21 @@ class RegimeSnapshot:
         d = asdict(self)
         d["regime"] = self.regime.value
         return d
+
+
+def _vix_rank(vix_series: pd.Series, window: int = 252) -> float | None:
+    """Issue #10: rolling percentile rank of the latest VIX value over `window` sessions."""
+    if len(vix_series) < 30:
+        return None
+    tail = vix_series.iloc[-window:].dropna()
+    if tail.empty:
+        return None
+    current = float(tail.iloc[-1])
+    low, high = float(tail.min()), float(tail.max())
+    if high == low:
+        return 50.0
+    percentile = (tail <= current).sum() / len(tail) * 100.0
+    return round(float(percentile), 1)
 
 
 def _ema(s: pd.Series, n: int) -> pd.Series:
@@ -141,6 +157,7 @@ def classify(index_symbol: str = "NIFTY", stock_universe_data: dict | None = Non
             trend_score=0,
             vix=0.0,
             vix_5d_change_pct=0.0,
+            vix_rank=None,
             adx=0.0,
             breadth_pct_above_50dma=0.0,
             notes="fallback due to missing data",
@@ -157,21 +174,30 @@ def classify(index_symbol: str = "NIFTY", stock_universe_data: dict | None = Non
 
     # Rule stack. Breadth confirms direction; mixed breadth blocks clean trend calls.
     notes = []
-    if vix_chg > 25 and vix_now > 16:
+    # Issue #7: VOL_EXPANSION requires VIX spike sustained across >= 2 consecutive sessions
+    # (single-day spikes are too noisy to justify regime change)
+    vix_prev = float(vix["close"].iloc[-2]) if len(vix) >= 2 else vix_now
+    vix_prev5 = float(vix["close"].iloc[-7]) if len(vix) >= 7 else vix_5d_ago
+    prev_day_chg = 100 * (vix_prev - vix_prev5) / vix_prev5 if vix_prev5 else 0.0
+    two_session_spike = (vix_chg > 25 and vix_now > 16) and (prev_day_chg > 20 or vix_chg > 35)
+    if two_session_spike:
         regime = Regime.VOL_EXPANSION
-        notes.append(f"VIX +{vix_chg:.1f}% in 5d at {vix_now:.1f}")
+        notes.append(f"VIX +{vix_chg:.1f}% in 5d (2-session confirmed) at {vix_now:.1f}")
     elif vix_chg < -20 and vix_now < 14:
         regime = Regime.VOL_CONTRACTION
         notes.append(f"VIX {vix_chg:.1f}% in 5d at {vix_now:.1f}")
-    elif trend <= -3 and breadth_val >= 60:
+    elif trend <= -3 and breadth_val >= 55:
+        # Issue #3: lower mixed-tape breadth floor from 60->55 to match the new 45 cap above
         regime = Regime.RANGE_HIGH_VOL if vix_now >= 16 else Regime.RANGE_LOW_VOL
-        notes.append("mixed tape: index weak, breadth strong")
+        notes.append("mixed tape: index weak, breadth strong (>=55%)")
     elif trend >= 3 and breadth_val <= 40:
         regime = Regime.RANGE_HIGH_VOL if vix_now >= 16 else Regime.RANGE_LOW_VOL
         notes.append("mixed tape: index firm, breadth weak")
     elif adx >= 22 and trend >= 4 and breadth_val >= 50:
         regime = Regime.TREND_UP
-    elif adx >= 22 and trend <= -4 and breadth_val <= 50:
+    elif adx >= 22 and trend <= -4 and breadth_val <= 45:
+        # Issue #3: raised breadth cap from 50->45; 46-50% was a ~40% dead zone
+        # where TREND_DOWN fired in essentially mixed-market conditions.
         regime = Regime.TREND_DOWN
     elif adx < 22 and vix_now < 14:
         regime = Regime.RANGE_LOW_VOL
@@ -181,11 +207,14 @@ def classify(index_symbol: str = "NIFTY", stock_universe_data: dict | None = Non
         regime = Regime.RANGE_LOW_VOL if vix_now < 15 else Regime.RANGE_HIGH_VOL
         notes.append("transition zone")
 
+    vix_rank_val = _vix_rank(vix["close"])
+
     return RegimeSnapshot(
         regime=regime,
         trend_score=trend,
         vix=round(vix_now, 2),
         vix_5d_change_pct=round(vix_chg, 2),
+        vix_rank=vix_rank_val,           # Issue #10
         adx=round(adx, 2),
         breadth_pct_above_50dma=breadth,
         notes="; ".join(notes) or "ok",

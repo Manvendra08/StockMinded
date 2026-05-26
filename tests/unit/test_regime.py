@@ -125,6 +125,7 @@ class TestRegimeSnapshot:
             vix_5d_change_pct=-2.0,
             adx=28.0,
             breadth_pct_above_50dma=75.0,
+            vix_rank=42.0,   # callsite fix: P3 #10
             notes="ok",
         )
         d = snap.to_dict()
@@ -139,8 +140,24 @@ class TestRegimeSnapshot:
             vix_5d_change_pct=0.0,
             adx=18.0,
             breadth_pct_above_50dma=60.0,
+            vix_rank=None,   # callsite fix: P3 #10
             notes="ok",
         )
         d = snap.to_dict()
-        for key in ["regime", "trend_score", "vix", "vix_5d_change_pct", "adx", "breadth_pct_above_50dma", "notes"]:
+        for key in ["regime", "trend_score", "vix", "vix_5d_change_pct", "adx", "breadth_pct_above_50dma", "vix_rank", "notes"]:
             assert key in d
+
+    def test_vix_rank_is_float_or_none(self):
+        snap_with_rank = RegimeSnapshot(
+            regime=Regime.TREND_UP, trend_score=3, vix=14.0,
+            vix_5d_change_pct=5.0, adx=30.0, breadth_pct_above_50dma=65.0,
+            vix_rank=38.5, notes="test",
+        )
+        assert isinstance(snap_with_rank.vix_rank, float)
+
+        snap_no_rank = RegimeSnapshot(
+            regime=Regime.RANGE_LOW_VOL, trend_score=0, vix=11.0,
+            vix_5d_change_pct=0.0, adx=18.0, breadth_pct_above_50dma=60.0,
+            vix_rank=None, notes="test",
+        )
+        assert snap_no_rank.vix_rank is None
