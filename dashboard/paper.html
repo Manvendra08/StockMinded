@@ -1727,27 +1727,47 @@ async function loadHistory() {
     empty.style.display='none';
 
     tbody.innerHTML = closed.map(t => {
+      const isOption = t.legs && t.legs.length > 0;
       const pnl = t.pnl;
       const pct = t.pnl_pct;
       const pnlCell = colorPnl(pnl);
       const pctCell = (pct==null) ? '<span class="muted">—</span>'
                                   : `<span class="${cls(pct)}">${sign(pct)}${fmt(pct)}%</span>`;
-      return `<tr>
-        <td class="muted" style="font-size:0.72rem">${t.entry_date.slice(8,10)}/${t.entry_date.slice(5,7)}</td>
-        <td><div class="sym-cell">${t.symbol}</div></td>
-        <td><span class="dir-badge dir-${t.direction.toLowerCase()}">${t.direction}</span></td>
-        <td>${fmt(t.entry_price)}</td>
-        <td>${t.exit_price!=null ? fmt(t.exit_price) : '—'}</td>
-        <td>${t.qty}</td>
-        <td>${pnlCell}</td>
-        <td>${pctCell}</td>
-        <td><span class="exit-badge exit-${t.exit_reason}">${(t.exit_reason||'').replace('_',' ')}</span></td>
-        <td class="muted" style="font-size:0.72rem; line-height:1.2;">
-          ${(t.entry_time||'').slice(8,10)}/${(t.entry_time||'').slice(5,7)} ${(t.entry_time||'').slice(11,16)}<br>
-          ${(t.exit_time||'').slice(8,10)}/${(t.exit_time||'').slice(5,7)} ${(t.exit_time||'').slice(11,16)}
-        </td>
-        <td><span class="conf-badge conf-${t.confidence}">${t.confidence}</span></td>
-      </tr>`;
+      if (isOption) {
+        return `<tr>
+          <td class="muted" style="font-size:0.72rem">${t.entry_date.slice(8,10)}/${t.entry_date.slice(5,7)}</td>
+          <td><div class="sym-cell">${t.symbol} <span class="badge-amber" style="font-size: 0.6rem; padding: 2px 4px; display: inline-block;">OPT</span></div></td>
+          <td><span class="dir-badge dir-neutral">${(t.structure || "OPTION").replace(/_/g, ' ')}</span></td>
+          <td>${fmt(t.net_premium)}</td>
+          <td>${t.exit_premium!=null ? fmt(t.exit_premium) : '—'}</td>
+          <td>${t.legs.reduce((acc, leg) => acc + (leg.qty || 1), 0)}</td>
+          <td>${pnlCell}</td>
+          <td>${pctCell}</td>
+          <td><span class="exit-badge exit-${t.exit_reason}">${(t.exit_reason||'').replace('_',' ')}</span></td>
+          <td class="muted" style="font-size:0.72rem; line-height:1.2;">
+            ${(t.entry_time||'').slice(8,10)}/${(t.entry_time||'').slice(5,7)} ${(t.entry_time||'').slice(11,16)}<br>
+            ${(t.exit_time||'').slice(8,10)}/${(t.exit_time||'').slice(5,7)} ${(t.exit_time||'').slice(11,16)}
+          </td>
+          <td><span class="conf-badge conf-MEDIUM">MED</span></td>
+        </tr>`;
+      } else {
+        return `<tr>
+          <td class="muted" style="font-size:0.72rem">${t.entry_date.slice(8,10)}/${t.entry_date.slice(5,7)}</td>
+          <td><div class="sym-cell">${t.symbol}</div></td>
+          <td><span class="dir-badge dir-${(t.direction||'').toLowerCase()}">${t.direction}</span></td>
+          <td>${fmt(t.entry_price)}</td>
+          <td>${t.exit_price!=null ? fmt(t.exit_price) : '—'}</td>
+          <td>${t.qty}</td>
+          <td>${pnlCell}</td>
+          <td>${pctCell}</td>
+          <td><span class="exit-badge exit-${t.exit_reason}">${(t.exit_reason||'').replace('_',' ')}</span></td>
+          <td class="muted" style="font-size:0.72rem; line-height:1.2;">
+            ${(t.entry_time||'').slice(8,10)}/${(t.entry_time||'').slice(5,7)} ${(t.entry_time||'').slice(11,16)}<br>
+            ${(t.exit_time||'').slice(8,10)}/${(t.exit_time||'').slice(5,7)} ${(t.exit_time||'').slice(11,16)}
+          </td>
+          <td><span class="conf-badge conf-${t.confidence}">${t.confidence}</span></td>
+        </tr>`;
+      }
     }).join('');
     
     // Also update stats cards if they should reflect the current filter

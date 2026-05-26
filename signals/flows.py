@@ -27,6 +27,8 @@ class FlowSnapshot:
     notes: str = ""
     option_source: str | None = None
     ai_sentiment: str | None = None
+    fii_derivatives_5d: dict[str, float] = field(default_factory=dict)
+    fii_derivatives_stale: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -45,6 +47,8 @@ class FlowSnapshot:
             "notes": self.notes,
             "option_source": self.option_source,
             "ai_sentiment": self.ai_sentiment,
+            "fii_derivatives_5d": self.fii_derivatives_5d,
+            "fii_derivatives_stale": self.fii_derivatives_stale,
         }
 
 
@@ -56,13 +60,20 @@ def fii_dii_5d_net() -> tuple[dict[str, float], bool]:
     """
     zero = {"fii": 0.0, "dii": 0.0}
     try:
-        df = feed.fii_dii_cash(days=10)
+        df = feed.fii_dii_cash(days=20)
     except Exception as e:
         print(f"[flows] FII/DII fetch failed: {e}")
         return zero, True
 
     if df.empty:
         return zero, True
+
+    if "date" not in df.columns:
+        return zero, True
+
+    unique_dates = sorted(df["date"].unique())
+    last_5_dates = unique_dates[-5:]
+    df = df[df["date"].isin(last_5_dates)]
 
     out = {"fii": 0.0, "dii": 0.0}
     cols = {c.lower(): c for c in df.columns}
@@ -90,7 +101,7 @@ def sector_relative_strength(
 ) -> list[tuple[str, float]]:
     out = []
     for name, df in sector_data.items():
-        if df is None or df.empty:
+        if df is None or df.empty or "close" not in df.columns:
             continue
         valid_close = df["close"].dropna()
         if len(valid_close) < lookback + 1:
@@ -165,8 +176,10 @@ def _bias(
     fii_dii: dict[str, float],
     pcr_oi: float | None,
     fii_dii_stale: bool = False,
+    derivatives: dict[str, float] | None = None,
+    derivatives_stale: bool = False,
 ) -> str:
-    """Compute smart-money bias.  Stale FII/DII data does not contribute a score."""
+    """Compute smart-money bias. Stale FII/DII data does not contribute a score."""
     score = 0
     if not fii_dii_stale:
         net = fii_dii.get("fii", 0) + fii_dii.get("dii", 0)
@@ -174,11 +187,35 @@ def _bias(
             score += 1
         elif net < -500:
             score -= 1
+            
     if pcr_oi is not None:
         if pcr_oi > 1.3:
             score += 1
         elif pcr_oi < 0.7:
             score -= 1
+
+    if not derivatives_stale and derivatives is not None:
+        # FII Index Futures 5D Net
+        idx_fut = derivatives.get("fii_index_futures_5d", 0.0)
+        if idx_fut > 1000:
+            score += 1
+        elif idx_fut < -1000:
+            score -= 1
+            
+        # FII Index Options 5D Net
+        idx_opt = derivatives.get("fii_index_options_5d", 0.0)
+        if idx_opt > 5000:
+            score += 1
+        elif idx_opt < -5000:
+            score -= 1
+            
+        # FII Stock Futures 5D Net
+        stk_fut = derivatives.get("fii_stock_futures_5d", 0.0)
+        if stk_fut > 2000:
+            score += 1
+        elif stk_fut < -2000:
+            score -= 1
+
     if score >= 1:
         return "LONG"
     if score <= -1:
@@ -190,12 +227,22 @@ def snapshot(
     sector_data: dict[str, pd.DataFrame], index_symbol: str = "NIFTY"
 ) -> FlowSnapshot:
     fii_dii, fii_dii_stale = fii_dii_5d_net()
+    
+    # Fetch FII derivatives data
+    try:
+        fii_derivs, fii_derivs_stale = feed.fii_dii_derivatives(days=5)
+    except Exception as e:
+        print(f"[flows.snapshot] FII derivatives fetch failed: {e}")
+        fii_derivs, fii_derivs_stale = {}, True
+
     rs = sector_relative_strength(sector_data, lookback=5)
     top_in = rs[:3]
     top_out = rs[-3:][::-1] if len(rs) >= 3 else []
     notes_parts = []
     if fii_dii_stale:
-        notes_parts.append("FII/DII data unavailable; bias computed from PCR only")
+        notes_parts.append("FII/DII data unavailable")
+    if fii_derivs_stale:
+        notes_parts.append("FII derivatives data unavailable")
 
     try:
         pcr_oi, pcr_vol, mp, pcr_stale, mp_stale, pcr_updated_at, mp_updated_at = feed.get_pcr_max_pain_cached(index_symbol)
@@ -222,13 +269,18 @@ def snapshot(
         pcr_oi=pcr_oi,
         pcr_vol=pcr_vol,
         max_pain=mp,
-        smart_money_bias=_bias(fii_dii, pcr_oi, fii_dii_stale=fii_dii_stale),
+        smart_money_bias=_bias(
+            fii_dii, pcr_oi, fii_dii_stale=fii_dii_stale,
+            derivatives=fii_derivs, derivatives_stale=fii_derivs_stale
+        ),
         pcr_stale=pcr_stale,
         mp_stale=mp_stale,
         fii_dii_stale=fii_dii_stale,
         pcr_updated_at=pcr_updated_at,
         mp_updated_at=mp_updated_at,
-        notes="; ".join(notes_parts),
+        notes="; ".join([n for n in notes_parts if n]),
         option_source=feed.option_chain_source(index_symbol),
         ai_sentiment=ai_sentiment,
+        fii_derivatives_5d=fii_derivs,
+        fii_derivatives_stale=fii_derivs_stale,
     )

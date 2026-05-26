@@ -1158,28 +1158,28 @@ def get_pcr_max_pain_cached(symbol: str = "NIFTY") -> tuple[float | None, float 
     return None, None, None, True, True, None, None
 
 
-def _get_persistent_fii_dii_cache() -> tuple[Optional[list[dict]], float]:
-    """Retrieve cached FII/DII data and its timestamp from a persistent local file."""
+def _get_persistent_fii_dii_cache() -> tuple[Optional[list[dict]], Optional[list[dict]], float]:
+    """Retrieve cached FII/DII data, stockedge data, and its timestamp from a persistent local file."""
     import json
     cache_file = CACHE_DIR / "fii_dii_cache.json"
     if cache_file.exists():
         try:
             with open(cache_file, "r") as f:
                 data = json.load(f)
-                return data.get("data"), data.get("timestamp", 0.0)
+                return data.get("data"), data.get("stockedge_data"), data.get("timestamp", 0.0)
         except Exception:
             pass
-    return None, 0.0
+    return None, None, 0.0
 
 
-def _set_persistent_fii_dii_cache(data: list[dict], timestamp: float) -> None:
-    """Save FII/DII data and its timestamp to a persistent local file."""
+def _set_persistent_fii_dii_cache(data: list[dict], stockedge_data: list[dict] | None, timestamp: float) -> None:
+    """Save FII/DII data, stockedge data, and its timestamp to a persistent local file."""
     import json
     cache_file = CACHE_DIR / "fii_dii_cache.json"
     try:
         cache_file.parent.mkdir(parents=True, exist_ok=True)
         with open(cache_file, "w") as f:
-            json.dump({"data": data, "timestamp": timestamp}, f)
+            json.dump({"data": data, "stockedge_data": stockedge_data, "timestamp": timestamp}, f)
     except Exception:
         pass
 
@@ -1189,65 +1189,140 @@ def fii_dii_cash(days: int = 10) -> pd.DataFrame:
     import time
     now = time.time()
     
-    # Check persistent cache (valid for 1 hour)
-    cached_data, cached_ts = _get_persistent_fii_dii_cache()
-    if cached_data is not None and (now - cached_ts) < 3600:
-        logging.getLogger(__name__).info(f"Returning cached FII/DII data (age: {round(now - cached_ts)}s)")
-        return pd.DataFrame(cached_data)
+    # Try to load existing cached data
+    cached_data, cached_stockedge, cached_ts = _get_persistent_fii_dii_cache()
+    if cached_data is None:
+        cached_data = []
+    if cached_stockedge is None:
+        cached_stockedge = []
 
-    try:
-        from nsepython import nse_fiidii
-        # Monkeypatch nsepython to avoid 'logger' NameError in their except blocks
-        import nsepython.rahu as nse_rahu
-        if not hasattr(nse_rahu, 'logger'):
-            nse_rahu.logger = logging.getLogger('nsepython')
-    except ImportError as e:
-        raise RuntimeError("nsepython not installed or nse_fiidii not available") from e
+    # Check if we need to fetch live (only if cache is stale > 1 hour)
+    need_fetch = (now - cached_ts) >= 3600 or not cached_stockedge
 
-    raw = None
-    for attempt in range(5):
-        try:
-            raw = nse_fiidii()
-            if raw is not None and not (isinstance(raw, pd.DataFrame) and raw.empty):
-                break
-        except Exception as e:
-            print(f"[feed.fii_dii_cash] attempt {attempt+1} failed: {type(e).__name__}: {e}")
-            time.sleep(2 * (attempt + 1))
-    
-    # AI Fallback
-    if raw is None or (isinstance(raw, pd.DataFrame) and raw.empty):
-        try:
-            from data import ai_scraper
-            ai_raw = ai_scraper.get_fii_dii_fallback()
-            if ai_raw:
-                raw = pd.DataFrame(ai_raw)
-                raw["_source"] = "ai_scraper"
-        except Exception as e:
-            print(f"[feed.fii_dii_cash] AI fallback failed: {e}")
-    
-    if raw is None:
+    raw_stockedge = None
+    if need_fetch:
+        print("[feed.fii_dii_cash] Fetching FII/DII activities from StockEdge API...")
+        for attempt in range(3):
+            try:
+                url = "https://api.stockedge.com/Api/FIIDashboardApi/GetLatestFIIActivities?lang=en"
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "Accept": "application/json, text/plain, */*",
+                    "Origin": "https://web.stockedge.com",
+                    "Referer": "https://web.stockedge.com/"
+                }
+                response = requests.get(url, headers=headers, timeout=15)
+                if response.status_code == 200:
+                    raw_stockedge = response.json()
+                    if raw_stockedge:
+                        break
+            except Exception as e:
+                print(f"[feed.fii_dii_cash] StockEdge API attempt {attempt+1} failed: {e}")
+                time.sleep(1)
+
+        if raw_stockedge:
+            cached_stockedge = raw_stockedge
+            new_cash_records = []
+            for day in raw_stockedge:
+                date_str = day.get("Date", "").split("T")[0]
+                try:
+                    dt_obj = dt.datetime.strptime(date_str, "%Y-%m-%d")
+                    formatted_date = dt_obj.strftime("%d-%b-%Y")
+                except Exception:
+                    formatted_date = date_str
+                
+                for item in day.get("FIIDIIData", []):
+                    short_name = item.get("ShortName")
+                    val = item.get("Value")
+                    if short_name == "FII CM*":
+                        new_cash_records.append({
+                            "category": "FII/FPI",
+                            "date": formatted_date,
+                            "netValue": val,
+                            "buyValue": 0.0,
+                            "sellValue": 0.0
+                        })
+                    elif short_name == "DII CM*":
+                        new_cash_records.append({
+                            "category": "DII",
+                            "date": formatted_date,
+                            "netValue": val,
+                            "buyValue": 0.0,
+                            "sellValue": 0.0
+                        })
+            cached_data = new_cash_records
+            try:
+                _set_persistent_fii_dii_cache(cached_data, cached_stockedge, now)
+            except Exception as e:
+                print(f"[feed.fii_dii_cash] Failed to cache StockEdge data: {e}")
+        else:
+            print("[feed.fii_dii_cash] StockEdge API failed. Falling back to legacy/AI...")
+            # Fallback to legacy
+            raw = None
+            try:
+                from nsepython import nse_fiidii
+                import nsepython.rahu as nse_rahu
+                if not hasattr(nse_rahu, 'logger'):
+                    nse_rahu.logger = logging.getLogger('nsepython')
+            except ImportError as e:
+                raw = None
+
+            if raw is None:
+                for attempt in range(5):
+                    try:
+                        raw = nse_fiidii()
+                        if raw is not None and not (isinstance(raw, pd.DataFrame) and raw.empty):
+                            break
+                    except Exception as e:
+                        print(f"[feed.fii_dii_cash] legacy attempt {attempt+1} failed: {e}")
+                        time.sleep(2)
+            
+            # AI Fallback
+            if raw is None or (isinstance(raw, pd.DataFrame) and raw.empty):
+                try:
+                    from data import ai_scraper
+                    ai_raw = ai_scraper.get_fii_dii_fallback()
+                    if ai_raw:
+                        raw = pd.DataFrame(ai_raw)
+                except Exception as e:
+                    print(f"[feed.fii_dii_cash] AI fallback failed: {e}")
+
+            if raw is not None:
+                if isinstance(raw, pd.DataFrame):
+                    new_df = raw.copy()
+                elif isinstance(raw, list):
+                    new_df = pd.DataFrame(raw)
+                else:
+                    new_df = pd.DataFrame()
+                
+                if not new_df.empty:
+                    new_records = new_df.to_dict(orient="records")
+                    merged_map = {}
+                    for r in cached_data:
+                        d_str = str(r.get("date", ""))
+                        cat = str(r.get("category", "")).strip()
+                        merged_map[(d_str, cat)] = r
+                    
+                    for r in new_records:
+                        d_val = r.get("date")
+                        if hasattr(d_val, "strftime"):
+                            d_str = d_val.strftime("%d-%b-%Y")
+                        else:
+                            d_str = str(d_val)
+                        r["date"] = d_str
+                        cat = str(r.get("category", "")).strip()
+                        merged_map[(d_str, cat)] = r
+                    
+                    cached_data = list(merged_map.values())
+                    try:
+                        _set_persistent_fii_dii_cache(cached_data, cached_stockedge, now)
+                    except Exception as e:
+                        print(f"[feed.fii_dii_cash] Failed to cache FII/DII data: {e}")
+
+    if not cached_data:
         return pd.DataFrame()
 
-    if isinstance(raw, pd.DataFrame):
-        df = raw
-    elif isinstance(raw, list):
-        df = pd.DataFrame(raw)
-    else:
-        return pd.DataFrame()
-
-    if df.empty:
-        return df
-
-    # Save to persistent cache
-    try:
-        # Convert date to string to keep it JSON serializable
-        serializable_df = df.copy()
-        if "date" in serializable_df.columns:
-            serializable_df["date"] = serializable_df["date"].astype(str)
-        serializable_data = serializable_df.to_dict(orient="records")
-        _set_persistent_fii_dii_cache(serializable_data, now)
-    except Exception as e:
-        print(f"[feed.fii_dii_cash] Failed to cache FII/DII data: {e}")
+    df = pd.DataFrame(cached_data)
 
     if "date" in df.columns:
         parsed_dates = pd.to_datetime(df["date"], format="%d-%b-%Y", errors="coerce")
@@ -1261,10 +1336,66 @@ def fii_dii_cash(days: int = 10) -> pd.DataFrame:
         if "segment" in cols:
             seg_col = df.columns[cols.index("segment")]
             df = df[df[seg_col].str.lower().str.contains("cash", na=False)]
-        df = df.sort_values("date").tail(days).reset_index(drop=True)
+        
+        # Sort chronologically
+        df = df.sort_values("date").reset_index(drop=True)
     else:
-        df = df.tail(days).reset_index(drop=True)
+        df = df.reset_index(drop=True)
+        
     return df
+
+
+def fii_dii_derivatives(days: int = 5) -> tuple[dict[str, float], bool]:
+    """Return the cumulative sum of FII derivatives activity over the last N sessions.
+    
+    Returns (derivatives_dict, stale).
+    """
+    _, cached_stockedge, _ = _get_persistent_fii_dii_cache()
+    if not cached_stockedge:
+        try:
+            fii_dii_cash(days=20)
+            _, cached_stockedge, _ = _get_persistent_fii_dii_cache()
+        except Exception as e:
+            print(f"[feed.fii_dii_derivatives] Failed to trigger fetch: {e}")
+
+    if not cached_stockedge:
+        return {
+            "fii_index_futures_5d": 0.0,
+            "fii_index_options_5d": 0.0,
+            "fii_stock_futures_5d": 0.0,
+            "fii_stock_options_5d": 0.0,
+        }, True
+
+    # Sort chronologically by Date
+    try:
+        sorted_data = sorted(cached_stockedge, key=lambda x: x.get("Date", ""))
+    except Exception:
+        sorted_data = cached_stockedge
+
+    # Take the last N days
+    last_n = sorted_data[-days:] if len(sorted_data) >= days else sorted_data
+
+    out = {
+        "fii_index_futures_5d": 0.0,
+        "fii_index_options_5d": 0.0,
+        "fii_stock_futures_5d": 0.0,
+        "fii_stock_options_5d": 0.0,
+    }
+
+    for day in last_n:
+        for item in day.get("FIIDIIData", []):
+            short_name = item.get("ShortName")
+            val = item.get("Value", 0.0) or 0.0
+            if short_name == "FII Idx Fut":
+                out["fii_index_futures_5d"] += val
+            elif short_name == "FII Idx Opt":
+                out["fii_index_options_5d"] += val
+            elif short_name == "FII Stk Fut":
+                out["fii_stock_futures_5d"] += val
+            elif short_name == "FII Stk Opt":
+                out["fii_stock_options_5d"] += val
+
+    return {k: round(v, 2) for k, v in out.items()}, False
 
 
 def _cached_ohlc(symbol: str, period: str, interval: str, cache_key: str) -> pd.DataFrame:

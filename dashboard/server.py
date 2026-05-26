@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import sqlite3
 import traceback
 from dataclasses import asdict
 from datetime import datetime, date, timezone, timedelta
@@ -41,6 +42,94 @@ app.json.ensure_ascii = False  # Allow native UTF-8 (like Rupee symbol) in JSON 
 # -- cache in memory so refresh is instant after first load --------
 _cache: dict = {}
 _cache_ts: datetime | None = None
+
+
+def _load_journal_trade_rows() -> list[dict]:
+    """Load stock trades from the SQLite journal."""
+    cfg = load_config()
+    db_path = cfg["paths"]["journal_db"]
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute("SELECT * FROM trades ORDER BY id ASC").fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def _journal_trade_to_ui_trade(row: dict) -> dict:
+    opened_at = str(row.get("opened_at") or "")
+    closed_at = str(row.get("closed_at") or "")
+    side = str(row.get("side") or "LONG").upper()
+    entry = row.get("entry")
+    exit_price = row.get("exit_price")
+    qty = int(row.get("qty") or 0)
+    pnl = row.get("pnl_rupees")
+    pnl_pct = None
+    if pnl is None and entry not in (None, 0) and exit_price is not None:
+        if side == "SHORT":
+            pnl = round((float(entry) - float(exit_price)) * qty, 2)
+            pnl_pct = round(100 * (float(entry) - float(exit_price)) / float(entry), 2)
+        else:
+            pnl = round((float(exit_price) - float(entry)) * qty, 2)
+            pnl_pct = round(100 * (float(exit_price) - float(entry)) / float(entry), 2)
+    elif pnl is not None and entry not in (None, 0) and exit_price is not None and qty:
+        pnl_pct = round((float(pnl) / (float(entry) * qty)) * 100, 2)
+
+    return {
+        "id": row.get("id"),
+        "symbol": row.get("symbol"),
+        "direction": "SHORT" if side == "SHORT" else "LONG",
+        "entry_price": entry,
+        "exit_price": exit_price,
+        "qty": qty,
+        "pnl": pnl,
+        "pnl_pct": pnl_pct,
+        "status": "CLOSED" if closed_at else "OPEN",
+        "exit_reason": "CLOSED" if closed_at else "OPEN",
+        "confidence": "MEDIUM",
+        "entry_date": opened_at[:10] if opened_at else None,
+        "entry_time": opened_at.replace("T", " ")[:19] if opened_at else None,
+        "exit_time": closed_at.replace("T", " ")[:19] if closed_at else None,
+        "structure": row.get("structure"),
+        "notes": row.get("notes"),
+        "source": "journal",
+        "risk_rupees": row.get("risk_rupees"),
+        "sl_price": row.get("stop"),
+        "tgt_price": row.get("target"),
+    }
+
+
+def _merged_paper_trades(limit: int = 100) -> list[dict]:
+    """Return stock journal trades plus paper-trader trades in one feed."""
+    trades = []
+    try:
+        journal_rows = _load_journal_trade_rows()
+        trades.extend(_journal_trade_to_ui_trade(row) for row in journal_rows)
+    except Exception:
+        traceback.print_exc()
+    try:
+        trades.extend(pt.get_all_trades(limit=limit))
+    except Exception:
+        traceback.print_exc()
+
+    trades.sort(key=lambda t: str(t.get("entry_time") or t.get("entry_date") or ""))
+    return list(reversed(trades[-limit:]))
+
+
+def _merged_open_trades() -> list[dict]:
+    """Return all open stock and paper trades."""
+    trades = []
+    try:
+        journal_rows = [row for row in _load_journal_trade_rows() if not row.get("closed_at")]
+        trades.extend(_journal_trade_to_ui_trade(row) for row in journal_rows)
+    except Exception:
+        traceback.print_exc()
+    try:
+        trades.extend(pt.get_open_trades())
+    except Exception:
+        traceback.print_exc()
+    return trades
 
 
 def _market_status_now() -> dict:
@@ -218,6 +307,8 @@ def _run_engine() -> dict:
             "notes": getattr(flow_snap, "notes", ""),
             "option_source": getattr(flow_snap, "option_source", None),
             "ai_sentiment": getattr(flow_snap, "ai_sentiment", None),
+            "fii_derivatives_5d": getattr(flow_snap, "fii_derivatives_5d", {}),
+            "fii_derivatives_stale": getattr(flow_snap, "fii_derivatives_stale", False),
         },
         "leaders": [
             {"symbol": r.symbol, "rs_slope": max(-150.0, min(150.0, r.rs_slope_20d)), "pct_vs_50dma": r.pct_vs_50dma, "quintile": r.quintile}
@@ -553,6 +644,40 @@ def _format_telegram_alert(data: dict, alerts: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _format_options_telegram_alert(trade: dict, regime_name: str, bias: str, ivr_disp: str, vix_disp: str, is_nifty: bool = False) -> str:
+    """Format options trade execution details for Telegram."""
+    lines = []
+    header = "AUTO-EXECUTED NIFTY OPTIONS" if is_nifty else "AUTO-EXECUTED OPTIONS"
+    lines.append(f"⚡ *[{header}]*")
+    lines.append(f"*{trade.get('symbol')}* - `{trade.get('structure')}`")
+    lines.append("")
+    lines.append("*Market Context:*")
+    lines.append(f"• Regime: `{regime_name}`")
+    lines.append(f"• Bias: `{bias}` | IVR: `{ivr_disp}` | VIX: `{vix_disp}`")
+    lines.append("")
+    lines.append("*Executed Legs:*")
+    for leg in trade.get("legs", []):
+        side_emoji = "🟢" if leg.get("side") == "BUY" else "🔴"
+        side_text = leg.get("side")
+        leg_type = leg.get("type")
+        strike = leg.get("strike")
+        expiry = leg.get("expiry")
+        qty = leg.get("qty")
+        premium = leg.get("entry_premium")
+        lines.append(f"  {side_emoji} {side_text} {leg_type} {strike:.0f} ({expiry}) x {qty} @ ₹{premium:.2f}")
+    
+    lines.append("")
+    lines.append("*Position Summary:*")
+    net_prem = trade.get("net_premium", 0)
+    pnl_sign = "Credit" if net_prem >= 0 else "Debit"
+    lines.append(f"• Net {pnl_sign}: *₹{abs(net_prem):,.0f}*")
+    if "max_loss_rupees" in trade:
+        max_loss = trade.get("max_loss_rupees", 0)
+        lines.append(f"• Max Risk/Loss: *₹{max_loss:,.0f}*")
+    return "\n".join(lines)
+
+
+
 # -- Routes --------------------------------------------------------
 @app.route("/")
 def index():
@@ -797,8 +922,18 @@ def paper_page():
 def api_paper_trades():
     """Get all trades (open first, then recent closed)."""
     try:
-        trades = pt.get_all_trades(limit=100)
-        stats = pt.get_stats()
+        trades = _merged_paper_trades(limit=100)
+        stats = {
+            "total_trades": len(trades),
+            "open_trades": len([t for t in trades if t.get("status") == "OPEN"]),
+            "cumulative_pnl": round(sum(t.get("pnl", 0) or 0 for t in trades if t.get("status") == "CLOSED"), 2),
+            "overall_win_rate": round(
+                len([t for t in trades if t.get("status") == "CLOSED" and (t.get("pnl") or 0) > 0])
+                / max(len([t for t in trades if t.get("status") == "CLOSED" and (t.get("pnl") or 0) != 0]), 1)
+                * 100,
+                1,
+            ),
+        }
         return jsonify({"trades": trades, "stats": stats})
     except Exception as e:
         traceback.print_exc()
@@ -820,20 +955,20 @@ def api_paper_learned_filters():
 def api_paper_open():
     """Get only open trades with live P&L."""
     try:
-        trades = pt.get_open_trades()
+        trades = _merged_open_trades()
         # Enrich with live unrealized P&L
         if trades:
             symbols = list(set(t["symbol"] for t in trades))
             prices = pt._get_ltp_batch(symbols)
             for t in trades:
                 ltp = prices.get(t["symbol"])
-                if ltp:
-                    if t["direction"] == "LONG":
-                        t["unrealized_pnl"] = round((ltp - t["entry_price"]) * t["qty"], 2)
-                        t["unrealized_pct"] = round(100 * (ltp - t["entry_price"]) / t["entry_price"], 2)
-                    else:
+                if ltp is not None and t.get("entry_price"):
+                    if t.get("direction") == "SHORT":
                         t["unrealized_pnl"] = round((t["entry_price"] - ltp) * t["qty"], 2)
                         t["unrealized_pct"] = round(100 * (t["entry_price"] - ltp) / t["entry_price"], 2)
+                    else:
+                        t["unrealized_pnl"] = round((ltp - t["entry_price"]) * t["qty"], 2)
+                        t["unrealized_pct"] = round(100 * (ltp - t["entry_price"]) / t["entry_price"], 2)
                     t["current_price"] = ltp
         return jsonify({"trades": trades})
     except Exception as e:
@@ -1214,9 +1349,15 @@ def _automation_worker():
                         if nifty_entered:
                             token = cfg.get("alerts", {}).get("telegram_bot_token")
                             chat_id = cfg.get("alerts", {}).get("telegram_chat_id")
-                            Alerter(token, chat_id).send(
-                                f"*[AUTO-EXECUTED NIFTY OPTIONS]*\nCount: {len(nifty_entered)}"
-                            )
+                            regime_name = data.get("regime", {}).get("name", "")
+                            bias = data.get("flows", {}).get("bias", "NEUTRAL")
+                            vix = data.get("regime", {}).get("vix", 15)
+                            vix_disp = f"{vix:.1f}" if vix is not None else "N/A"
+                            for res in nifty_entered:
+                                msg = _format_options_telegram_alert(
+                                    res, regime_name, bias, "N/A", vix_disp, is_nifty=True
+                                )
+                                Alerter(token, chat_id).send(msg)
                     except Exception as ne:
                         print(f"  > NIFTY options automation error: {ne}")
 
@@ -1255,17 +1396,10 @@ def _automation_worker():
                                             res = pt.enter_option_structure(struct.name, legs, sym, cfg)
                                             if "error" not in res:
                                                 print(f"  > Auto-entered Option Structure: {sym} {struct.name}")
-                                                pnl_sign = "Credit" if res["net_premium"] >= 0 else "Debit"
-                                                
-                                                # Handle None values for formatting
                                                 ivr_disp = f"{ivr:.0f}" if ivr is not None else "N/A"
                                                 vix_disp = f"{vix:.1f}" if vix is not None else "N/A"
-                                                
-                                                msg = (
-                                                    f"*[AUTO-EXECUTED OPTIONS]*\n"
-                                                    f"*{sym}* `{struct.name}`\n"
-                                                    f"Net {pnl_sign}: ₹{abs(res['net_premium']):,.0f}\n"
-                                                    f"Regime: `{regime_name}` | Bias: `{bias}` | IVR: `{ivr_disp}` | VIX: `{vix_disp}`"
+                                                msg = _format_options_telegram_alert(
+                                                    res, regime_name, bias, ivr_disp, vix_disp, is_nifty=False
                                                 )
                                                 Alerter(token, chat_id).send(msg)
                                 except Exception as sym_err:

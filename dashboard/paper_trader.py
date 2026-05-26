@@ -43,7 +43,7 @@ DEFAULT_SETTINGS = {
     "capital_per_trade": 500000.0,
     "sl_pct": 2.0,
     "tgt_pct": 4.0,
-    "trail_sl": False,
+    "trail_sl": True,
     "min_confidence": "HIGH",
     "max_trades_per_day": 8,
     "max_new_entries_per_cycle": 5,
@@ -160,6 +160,30 @@ MARKET_OPEN = dt_mod.time(9, 15)
 MARKET_CLOSE = dt_mod.time(15, 30)
 EOD_WINDOW_START = dt_mod.time(15, 25)
 EOD_WINDOW_END = dt_mod.time(15, 35)
+
+# Option SL grace period: don't check SL/TGT within N minutes of entry.
+# Prevents false exits from bid-ask spread jitter on illiquid OTM strikes.
+OPTION_SL_GRACE_MINUTES = 5
+
+# Equity entry window: avoid open whipsaw and late-day insufficient-time entries
+EQUITY_ENTRY_START = dt_mod.time(10, 0)
+EQUITY_ENTRY_END = dt_mod.time(14, 15)
+
+
+def _within_grace_period(trade: dict, now: datetime, grace_minutes: int = OPTION_SL_GRACE_MINUTES) -> bool:
+    """True if trade was entered within the last `grace_minutes` — skip SL/TGT checks."""
+    entry_time_str = trade.get("entry_time")
+    if not entry_time_str:
+        return False
+    try:
+        entry_dt = datetime.strptime(entry_time_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=IST)
+        # Ensure now is also timezone-aware
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=IST)
+        elapsed = (now - entry_dt).total_seconds()
+        return elapsed < grace_minutes * 60
+    except (ValueError, TypeError):
+        return False
 
 def is_market_open(now: datetime | None = None) -> bool:
     """True only on Mon-Fri between 09:15 and 15:30 IST."""
@@ -331,6 +355,7 @@ def enter_trade(alert: dict) -> dict:
             "sl_pct": sl_pct,
             "tgt_price": tgt_price,
             "tgt_pct": tgt_pct,
+            "peak_price": entry_price,
             "entry_time": _now_ist().strftime("%Y-%m-%d %H:%M:%S"),
             "entry_date": today_str,
             "exit_price": None,
@@ -628,8 +653,8 @@ def check_option_exits() -> list[dict]:
                         t["reentry_eligible"] = True
                         exit_reason = "DELTA_BREACH"
             
-            # Flat SL/TGT backup
-            if not exit_reason and current_net is not None:
+            # Flat SL/TGT backup (skip during grace period to avoid bid-ask jitter exits)
+            if not exit_reason and current_net is not None and not _within_grace_period(t, now_ist):
                 pnl = (t.get("net_premium") or 0.0) - current_net
                 sl_limit = settings.get("options_sl_pct", 125.0) / 100.0
                 tgt_limit = settings.get("options_tgt_pct", 50.0) / 100.0
@@ -683,8 +708,8 @@ def check_nifty_option_exits(vix_current: float = None, cfg: dict = None) -> lis
                     t["reentry_eligible"] = True
                     exit_reason = "DELTA_BREACH"
             
-            # Flat SL/TGT backup
-            if not exit_reason and current_net is not None:
+            # Flat SL/TGT backup (skip during grace period to avoid bid-ask jitter exits)
+            if not exit_reason and current_net is not None and not _within_grace_period(t, now_ist):
                 pnl = t.get("net_credit", 0.0) - current_net
                 sl_limit = settings.get("options_sl_pct", 125.0) / 100.0
                 tgt_limit = settings.get("options_tgt_pct", 50.0) / 100.0
@@ -880,6 +905,23 @@ def check_and_close_trades() -> list[dict]:
             if any(k not in trade for k in ["sl_price", "tgt_price", "direction"]):
                 continue
 
+            # Trailing stop logic (lock in 50% max gains)
+            if settings.get("trail_sl", True):
+                if "peak_price" not in trade:
+                    trade["peak_price"] = trade["entry_price"]
+                if direction == "LONG":
+                    if ltp > trade["peak_price"]:
+                        trade["peak_price"] = ltp
+                        new_sl = trade["entry_price"] + (ltp - trade["entry_price"]) * 0.5
+                        if new_sl > trade["sl_price"]:
+                            trade["sl_price"] = round(new_sl, 2)
+                else:
+                    if ltp < trade["peak_price"]:
+                        trade["peak_price"] = ltp
+                        new_sl = trade["entry_price"] - (trade["entry_price"] - ltp) * 0.5
+                        if new_sl < trade["sl_price"]:
+                            trade["sl_price"] = round(new_sl, 2)
+
             # Respect EOD close setting
             eod_trigger = is_eod and auto_close
 
@@ -1008,6 +1050,12 @@ def auto_enter_from_alerts(alerts: list[dict], cfg: dict | None = None) -> list[
     if not is_market_open(now_ist): return []
     if now_ist.hour == 15 and now_ist.minute >= 15: return []
 
+    # Equity entry time window: avoid open whipsaw (09:15-10:00) and
+    # late-day entries with insufficient time for target (after 14:15).
+    t_now = now_ist.timetz().replace(tzinfo=None)
+    if t_now < EQUITY_ENTRY_START or t_now > EQUITY_ENTRY_END:
+        return []
+
     if cfg is None: cfg = load_config()
 
     # Merge UI-saved risk gate overrides into a copy of cfg so Guardrails
@@ -1054,10 +1102,16 @@ def auto_enter_from_alerts(alerts: list[dict], cfg: dict | None = None) -> list[
         deployed = sum(t.get("capital_deployed", 0) or 0 for t in db["trades"] if t.get("status") == "OPEN")
         margin_used_pct = deployed / total_capital if total_capital > 0 else 0
         today_trade_count = len([t for t in db["trades"] if t.get("entry_date") == today_str])
+        open_trades_count = len([t for t in db["trades"] if t.get("status") == "OPEN"])
 
         for alert in alerts:
             if today_trade_count + len(entered) >= max_trades_per_day: break
             if len(entered) >= max_new_entries_per_cycle: break
+
+            regime = alert.get("source_regime", "UNKNOWN")
+            if "RANGE" in regime.upper() and (open_trades_count + len(entered) >= 3):
+                journal.log_skipped_trade(alert.get("symbol", ""), alert.get("direction", "LONG"), alert.get("confidence", "MEDIUM"), "REGIME_CAP", regime, alert.get("flow_bias", "NEUTRAL"), "regime_filter", "Max 3 concurrent positions in RANGE regime")
+                continue
 
             sym = alert.get("symbol", "")
             conf = alert.get("confidence", "MEDIUM")
@@ -1173,6 +1227,7 @@ def auto_enter_from_alerts(alerts: list[dict], cfg: dict | None = None) -> list[
                 "capital_deployed": round(entry_price * final_qty, 2),
                 "sl_price": stop, "sl_pct": sl_pct,
                 "tgt_price": tgt_price, "tgt_pct": tgt_pct,
+                "peak_price": entry_price,
                 "entry_time": now_ist.strftime("%Y-%m-%d %H:%M:%S"),
                 "entry_date": today_str, "confidence": conf, "risk_rupees": proposed_risk,
                 "planned_risk": alert.get("planned_risk", proposed_risk),
@@ -1342,18 +1397,31 @@ def _generate_corrections(today_trades: list[dict], history: list[dict]) -> list
 
 def get_stats() -> dict:
     db = _load_db()
-    all_closed = [t for t in db["trades"] if t["status"] == "CLOSED"]
+    all_closed = [t for t in db.get("trades", []) if t.get("status") == "CLOSED"]
+    all_closed.extend([t for t in db.get("option_trades", []) if t.get("status") == "CLOSED"])
     resolved = [t for t in all_closed if (t.get("pnl") or 0) != 0]
     winners = [t for t in resolved if (t.get("pnl") or 0) > 0]
+    total_trades = len(db.get("trades", [])) + len(db.get("option_trades", []))
+    open_trades = len([t for t in db.get("trades", []) if t.get("status") == "OPEN"]) + len([t for t in db.get("option_trades", []) if t.get("status") == "OPEN"])
     return {
-        "total_trades": len(db["trades"]),
-        "open_trades": len([t for t in db["trades"] if t["status"] == "OPEN"]),
+        "total_trades": total_trades,
+        "open_trades": open_trades,
         "cumulative_pnl": round(sum(t.get("pnl", 0) or 0 for t in all_closed), 2),
         "overall_win_rate": round(len(winners) / max(len(resolved), 1) * 100, 1)
     }
 
-def get_open_trades() -> list[dict]: return [t for t in _load_db()["trades"] if t["status"] == "OPEN"]
-def get_all_trades(limit: int = 50) -> list[dict]: return list(reversed(_load_db()["trades"][-limit:]))
+def get_open_trades() -> list[dict]: 
+    db = _load_db()
+    open_t = [t for t in db.get("trades", []) if t.get("status") == "OPEN"]
+    open_t.extend([t for t in db.get("option_trades", []) if t.get("status") == "OPEN"])
+    return open_t
+
+def get_all_trades(limit: int = 50) -> list[dict]: 
+    db = _load_db()
+    all_t = db.get("trades", []) + db.get("option_trades", [])
+    # Re-sort by id or entry time to match original behavior where newer is at end
+    all_t.sort(key=lambda x: str(x.get("entry_time", "")))
+    return list(reversed(all_t[-limit:]))
 def get_daily_summaries(limit: int = 30) -> list[dict]: return list(reversed(_load_db()["daily_summaries"][-limit:]))
 
 def get_strategy_notes() -> list[dict]:
@@ -1367,3 +1435,145 @@ def get_strategy_notes() -> list[dict]:
 
 def get_learned_filters() -> list[dict]:
     return _load_db().get("learned_filters", [])
+
+def cleanup_db(from_date: str | None = None, to_date: str | None = None, purge_churn: bool = False, full_reset: bool = False) -> dict:
+    """Clean up trade database based on criteria.
+    - full_reset: Clears ALL trades and summaries.
+    - purge_churn: Removes trades with 0 P&L (spam entries).
+    - from_date/to_date: Removes ALL trades in this range (inclusive).
+    """
+    import sqlite3
+    db = _load_db()
+    
+    if full_reset:
+        db["trades"] = []
+        db["option_trades"] = []
+        db["daily_summaries"] = []
+        db["strategy_notes"] = []
+        db["cumulative_pnl"] = 0.0
+        _save_db(db)
+        
+        # Sync full reset with SQLite Journal database
+        try:
+            cfg = load_config()
+            conn = sqlite3.connect(cfg["paths"]["journal_db"])
+            conn.execute("DELETE FROM trades")
+            conn.execute("DELETE FROM skipped_trades")
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"⚠️ Failed to reset SQLite journal: {e}")
+            
+        return {"status": "success", "message": "Database fully reset"}
+
+    original_count = len(db.get("trades", []))
+    removed_count = 0
+
+    # 1. Filter Stock Trades
+    keep_trades = []
+    for t in db.get("trades", []):
+        entry_date = t.get("entry_date", "")
+        pnl = t.get("pnl") or 0.0
+        
+        in_range = True
+        if from_date and entry_date < from_date:
+            in_range = False
+        if to_date and entry_date > to_date:
+            in_range = False
+            
+        if from_date or to_date:
+            if in_range:
+                removed_count += 1
+                continue # Delete it
+        
+        if purge_churn and t.get("id", 0) > 5 and pnl == 0 and t.get("status") == "CLOSED":
+            removed_count += 1
+            continue # Delete it
+
+        keep_trades.append(t)
+    db["trades"] = keep_trades
+
+    # 2. Filter Option Trades
+    keep_options = []
+    for t in db.get("option_trades", []):
+        entry_date = t.get("entry_date", "")
+        pnl = t.get("pnl") or 0.0
+        
+        in_range = True
+        if from_date and entry_date < from_date:
+            in_range = False
+        if to_date and entry_date > to_date:
+            in_range = False
+            
+        if from_date or to_date:
+            if in_range:
+                removed_count += 1
+                continue # Delete it
+                
+        keep_options.append(t)
+    db["option_trades"] = keep_options
+
+    # Recalculate cumulative P&L
+    db["cumulative_pnl"] = sum(t.get("pnl", 0) for t in keep_trades if t.get("status") == "CLOSED") + \
+                           sum(t.get("pnl", 0) for t in keep_options if t.get("status") == "CLOSED")
+    
+    # 3. Clean up daily summaries
+    new_summaries = []
+    for s in db.get("daily_summaries", []):
+        d = s.get("date")
+        if (from_date and d < from_date) or (to_date and d > to_date):
+            if from_date or to_date:
+                continue
+        
+        # Update trade list in summary
+        s_trades = [t for t in keep_trades if t.get("entry_date") == d]
+        s["trades"] = s_trades
+        s["total_trades"] = len(s_trades)
+        s["total_pnl"] = sum(t.get("pnl", 0) for t in s_trades)
+        winners = [t for t in s_trades if (t.get("pnl") or 0) > 0]
+        s["win_rate"] = round((len(winners) / max(len(s_trades), 1) * 100), 2) if s_trades else 0
+        new_summaries.append(s)
+    db["daily_summaries"] = new_summaries
+
+    _save_db(db)
+
+    # Sync range deletion with SQLite Journal database
+    try:
+        cfg = load_config()
+        conn = sqlite3.connect(cfg["paths"]["journal_db"])
+        if from_date and to_date:
+            conn.execute("DELETE FROM trades WHERE substr(opened_at, 1, 10) >= ? AND substr(opened_at, 1, 10) <= ?", (from_date, to_date))
+            conn.execute("DELETE FROM skipped_trades WHERE substr(ts, 1, 10) >= ? AND substr(ts, 1, 10) <= ?", (from_date, to_date))
+        elif from_date:
+            conn.execute("DELETE FROM trades WHERE substr(opened_at, 1, 10) >= ?", (from_date,))
+            conn.execute("DELETE FROM skipped_trades WHERE substr(ts, 1, 10) >= ?", (from_date,))
+        elif to_date:
+            conn.execute("DELETE FROM trades WHERE substr(opened_at, 1, 10) <= ?", (to_date,))
+            conn.execute("DELETE FROM skipped_trades WHERE substr(ts, 1, 10) <= ?", (to_date,))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"⚠️ Failed to clean journal SQLite db range: {e}")
+
+    return {
+        "original_count": original_count,
+        "removed_count": removed_count,
+        "final_count": len(db["trades"]),
+        "cumulative_pnl": db["cumulative_pnl"]
+    }
+
+def export_trades_to_csv() -> str:
+    """Return trade history as a CSV string."""
+    db = _load_db()
+    trades = db.get("trades", []) + db.get("option_trades", [])
+    if not trades:
+        return "No trades found"
+
+    df = pd.DataFrame(trades)
+    cols = [
+        "id", "symbol", "direction", "status", "entry_price", "exit_price",
+        "qty", "capital_deployed", "pnl", "pnl_pct", "exit_reason",
+        "entry_time", "exit_time", "confidence"
+    ]
+    available_cols = [c for c in cols if c in df.columns]
+    return df[available_cols].to_csv(index=False)

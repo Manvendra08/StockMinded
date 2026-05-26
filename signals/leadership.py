@@ -38,9 +38,11 @@ def _slope(series: pd.Series, n: int = 20) -> float:
 
 def rank_universe(stock_data: dict[str, pd.DataFrame], bench_df: pd.DataFrame) -> list[StockRank]:
     ranks: list[StockRank] = []
+    if bench_df is None or bench_df.empty or "close" not in bench_df.columns:
+        return []
     bench_close = bench_df["close"].dropna()
     for sym, df in stock_data.items():
-        if df is None or df.empty:
+        if df is None or df.empty or "close" not in df.columns:
             continue
         valid_close = df["close"].dropna()
         if len(valid_close) < 50:
@@ -120,13 +122,15 @@ def a_grade(ranks: list[StockRank], inflow_sectors: list[str] | None = None,
 
     If sector_map is not provided, returns raw quintile extremes.
     """
-    leaders = [r for r in ranks if r.quintile >= 2 and r.above_50dma and r.rs_slope_20d > 0]
+    # A-grade requires strong RS conviction (Q4/Q5). Q2/Q3 are watchlist only.
+    leaders = [r for r in ranks if r.quintile >= 4 and r.above_50dma and r.rs_slope_20d > 0]
     if not leaders:
-        leaders = [r for r in ranks if r.rs_slope_20d > 0]
+        # Fallback to Q3 if no Q4/Q5 leaders found
+        leaders = [r for r in ranks if r.quintile >= 3 and r.above_50dma and r.rs_slope_20d > 0]
 
-    laggards = [r for r in ranks if r.quintile >= 2 and not r.above_50dma and r.rs_slope_20d < 0]
+    laggards = [r for r in ranks if r.quintile >= 4 and not r.above_50dma and r.rs_slope_20d < 0]
     if not laggards:
-        laggards = [r for r in ranks if r.rs_slope_20d < 0]
+        laggards = [r for r in ranks if r.quintile >= 3 and not r.above_50dma and r.rs_slope_20d < 0]
 
     if sector_map and inflow_sectors:
         inflow_set = set(inflow_sectors)

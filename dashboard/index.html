@@ -2771,11 +2771,11 @@
       return `stale · last updated ${date.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false })}`;
     }
 
-    function renderStaleMetricValue(value, stale, ts, formatter, tooltip) {
+    function renderStaleMetricValue(value, stale, ts, formatter, tooltip, cls = '') {
       if (value != null) {
         const formatted = formatter(value);
-        if (!stale) return `<div class="fs-value">${formatted}</div>`;
-        return `<div class="stale-wrap"><div class="fs-value stale-value">${formatted}</div><div class="stale-label">${formatLastUpdatedLabel(ts)}</div></div>`;
+        if (!stale) return `<div class="fs-value ${cls}">${formatted}</div>`;
+        return `<div class="stale-wrap"><div class="fs-value stale-value ${cls}">${formatted}</div><div class="stale-label">${formatLastUpdatedLabel(ts)}</div></div>`;
       }
       return `<div class="fs-value" title="${tooltip}">—</div>`;
     }
@@ -2787,9 +2787,14 @@
       bias.className = 'bias-indicator ' + f.bias;
       bias.innerHTML = `${icon} Smart Money Bias: ${f.bias}`;
 
+      const derivs = f.fii_derivatives_5d || {};
       const stats = [
         { label: 'FII 5D Net (₹Cr)', value: fmt(f.fii_dii_5d?.fii), cls: changeClass(f.fii_dii_5d?.fii) },
         { label: 'DII 5D Net (₹Cr)', value: fmt(f.fii_dii_5d?.dii), cls: changeClass(f.fii_dii_5d?.dii) },
+        { label: 'FII Index Fut (₹Cr)', html: renderStaleMetricValue(derivs.fii_index_futures_5d, f.fii_derivatives_stale, d.ts, (v) => fmt(v), 'Derivatives data unavailable', changeClass(derivs.fii_index_futures_5d)) },
+        { label: 'FII Index Opt (₹Cr)', html: renderStaleMetricValue(derivs.fii_index_options_5d, f.fii_derivatives_stale, d.ts, (v) => fmt(v), 'Derivatives data unavailable', changeClass(derivs.fii_index_options_5d)) },
+        { label: 'FII Stock Fut (₹Cr)', html: renderStaleMetricValue(derivs.fii_stock_futures_5d, f.fii_derivatives_stale, d.ts, (v) => fmt(v), 'Derivatives data unavailable', changeClass(derivs.fii_stock_futures_5d)) },
+        { label: 'FII Stock Opt (₹Cr)', html: renderStaleMetricValue(derivs.fii_stock_options_5d, f.fii_derivatives_stale, d.ts, (v) => fmt(v), 'Derivatives data unavailable', changeClass(derivs.fii_stock_options_5d)) },
         { label: 'PCR (OI)', html: renderStaleMetricValue(f.pcr_oi, f.pcr_stale, f.pcr_updated_at, (v) => fmt(v), 'Data unavailable — check feed') },
         { label: 'Max Pain', html: renderStaleMetricValue(f.max_pain, f.mp_stale, f.mp_updated_at, (v) => fmt(v, 0), 'Data unavailable — check feed') },
       ];

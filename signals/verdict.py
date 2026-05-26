@@ -108,34 +108,33 @@ def build_trade_verdict(data: dict) -> CombinedVerdict:
             stock_conf = "HIGH" if bias == "SHORT" else "MEDIUM"
             stock_strategy = "Short A-Grade laggards with RS Slope < -50."
         elif regime_name in ("RANGE_HIGH_VOL", "RANGE_LOW_VOL", "VOL_CONTRACTION"):
-            # Sector rotation within range — directional RS picking valid even without strong trend
-            # if we have strong leaders/laggards.
+            # Range regimes: directional stock picking only when leadership is
+            # exceptionally strong.  Marginal setups bleed via EOD close in
+            # choppy conditions.  Prefer option premium selling instead.
             q5_longs = sum(1 for l in leaders if l.get("quintile", 0) == 5)
             q5_shorts = sum(1 for l in laggards if l.get("quintile", 0) == 5)
-            
-            if trend != 0 or bias != "NEUTRAL" or q5_longs >= 3 or q5_shorts >= 3:
-                # Weighted strength: Q5 count + Bias weight + Trend weight
-                # This allows strong leadership to override a weak index bias
+
+            # Gate: need ≥5 Q5 names on at least one side to even consider
+            if q5_longs >= 5 or q5_shorts >= 5:
                 long_str = q5_longs + (2 if bias == "LONG" else 0) + (4 if trend > 0 else 0)
                 short_str = q5_shorts + (2 if bias == "SHORT" else 0) + (4 if trend < 0 else 0)
 
                 if q5_longs >= 5 and q5_shorts >= 5:
                     stock_action = "LONG_AND_SHORT"
-                elif long_str > short_str + 3:
+                elif long_str > short_str + 4:
                     stock_action = "LONG_ONLY"
-                elif short_str > long_str + 3:
-                    stock_action = "SHORT_ONLY"
-                elif long_str > short_str:
-                    stock_action = "LONG_ONLY"
-                elif short_str > long_str:
+                elif short_str > long_str + 4:
                     stock_action = "SHORT_ONLY"
                 else:
-                    stock_action = "LONG_AND_SHORT"
-                
-                stock_tone = "bull" if stock_action == "LONG_ONLY" else ("bear" if stock_action == "SHORT_ONLY" else "mixed")
-                stock_can_trade = True
-                stock_conf = "MEDIUM" if (q5_longs >= 5 or q5_shorts >= 5) else "LOW"
-                stock_strategy = f"Leadership {stock_action}: A-Grade RS candidates prioritized."
+                    # Ambiguous — stay out in range regimes
+                    pass
+
+                if stock_action != "WAIT":
+                    stock_tone = "bull" if stock_action == "LONG_ONLY" else ("bear" if stock_action == "SHORT_ONLY" else "mixed")
+                    stock_can_trade = True
+                    # Confidence stays LOW unless leadership is overwhelming
+                    stock_conf = "MEDIUM" if (q5_longs >= 7 or q5_shorts >= 7) else "LOW"
+                    stock_strategy = f"Range leadership {stock_action}: Only Q5 RS candidates (high bar)."
     
     stock_v = StockVerdict(
         action=stock_action, tone=stock_tone, confidence=stock_conf,

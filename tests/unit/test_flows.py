@@ -107,6 +107,33 @@ class TestBias:
         result = _bias({"fii": -1000, "dii": 0}, pcr_oi=1.0)
         assert result == "SHORT"
 
+    def test_derivatives_bullish_futures_and_stock_futures(self):
+        derivs = {
+            "fii_index_futures_5d": 1200.0,
+            "fii_index_options_5d": 0.0,
+            "fii_stock_futures_5d": 2500.0,
+        }
+        # Score: cash (0) + pcr (0) + futures (+1) + stk_fut (+1) = +2 -> LONG
+        assert _bias({"fii": 0, "dii": 0}, pcr_oi=1.0, derivatives=derivs) == "LONG"
+
+    def test_derivatives_bearish_options_and_futures(self):
+        derivs = {
+            "fii_index_futures_5d": -1500.0,
+            "fii_index_options_5d": -6000.0,
+            "fii_stock_futures_5d": 0.0,
+        }
+        # Score: cash (0) + pcr (0) + futures (-1) + options (-1) = -2 -> SHORT
+        assert _bias({"fii": 0, "dii": 0}, pcr_oi=1.0, derivatives=derivs) == "SHORT"
+
+    def test_derivatives_stale_ignored(self):
+        derivs = {
+            "fii_index_futures_5d": 2000.0,
+            "fii_index_options_5d": 8000.0,
+            "fii_stock_futures_5d": 4000.0,
+        }
+        # Since stale=True, derivatives score should not count, so result is NEUTRAL
+        assert _bias({"fii": 0, "dii": 0}, pcr_oi=1.0, derivatives=derivs, derivatives_stale=True) == "NEUTRAL"
+
 
 class TestFlowSnapshot:
     def test_to_dict_roundtrip(self):

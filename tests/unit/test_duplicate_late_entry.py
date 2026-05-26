@@ -156,20 +156,20 @@ class TestDuplicateTradeBlocking:
 
 
 class TestLateEntryBlocking:
-    """Test that entries after market cutoff are blocked."""
+    """Test that entries outside the designated equity window are blocked."""
 
     @patch("dashboard.paper_trader._get_ltp")
     @patch("dashboard.paper_trader.is_market_open", return_value=True)
-    def test_entry_before_1515_allowed(self, mock_ltp, mock_market_open, mock_db_with_trade, mock_config, alert_reliance):
-        """Entries before 15:15 should be allowed."""
+    def test_entry_within_window_allowed(self, mock_ltp, mock_market_open, mock_db_with_trade, mock_config, alert_reliance):
+        """Entries within 10:00-14:15 should be allowed."""
         mock_ltp.return_value = 2500.0
         alert_reliance["symbol"] = "INFY"  # Different symbol to avoid dup check
         
         with patch("dashboard.paper_trader._load_db", return_value=mock_db_with_trade):
             with patch("dashboard.paper_trader._save_db"):
                 with patch("dashboard.paper_trader._now_ist") as mock_now:
-                    # 15:14 - just before cutoff
-                    mock_now.return_value = datetime(2026, 4, 28, 15, 14, tzinfo=timezone(timedelta(hours=5, minutes=30)))
+                    # 14:14 - well within window
+                    mock_now.return_value = datetime(2026, 4, 28, 14, 14, tzinfo=timezone(timedelta(hours=5, minutes=30)))
                     
                     result = auto_enter_from_alerts([alert_reliance], cfg=mock_config)
                     
@@ -177,15 +177,15 @@ class TestLateEntryBlocking:
 
     @patch("dashboard.paper_trader._get_ltp")
     @patch("dashboard.paper_trader.is_market_open", return_value=True)
-    def test_entry_at_1515_blocked(self, mock_ltp, mock_market_open, mock_db_with_trade, mock_config, alert_reliance):
-        """Entries at or after 15:15 should be blocked."""
+    def test_entry_after_window_blocked(self, mock_ltp, mock_market_open, mock_db_with_trade, mock_config, alert_reliance):
+        """Entries after 14:15 should be blocked."""
         mock_ltp.return_value = 2500.0
         
         with patch("dashboard.paper_trader._load_db", return_value=mock_db_with_trade):
             with patch("dashboard.paper_trader._save_db"):
                 with patch("dashboard.paper_trader._now_ist") as mock_now:
-                    # 15:15 - at cutoff
-                    mock_now.return_value = datetime(2026, 4, 28, 15, 15, tzinfo=timezone(timedelta(hours=5, minutes=30)))
+                    # 14:16 - just after cutoff
+                    mock_now.return_value = datetime(2026, 4, 28, 14, 16, tzinfo=timezone(timedelta(hours=5, minutes=30)))
                     
                     result = auto_enter_from_alerts([alert_reliance], cfg=mock_config)
                     
@@ -193,15 +193,15 @@ class TestLateEntryBlocking:
 
     @patch("dashboard.paper_trader._get_ltp")
     @patch("dashboard.paper_trader.is_market_open", return_value=True)
-    def test_entry_after_1515_blocked(self, mock_ltp, mock_market_open, mock_db_with_trade, mock_config, alert_reliance):
-        """Entries well after 15:15 should be blocked."""
+    def test_entry_before_window_blocked(self, mock_ltp, mock_market_open, mock_db_with_trade, mock_config, alert_reliance):
+        """Entries before 10:00 should be blocked."""
         mock_ltp.return_value = 2500.0
         
         with patch("dashboard.paper_trader._load_db", return_value=mock_db_with_trade):
             with patch("dashboard.paper_trader._save_db"):
                 with patch("dashboard.paper_trader._now_ist") as mock_now:
-                    # 15:30 - market close
-                    mock_now.return_value = datetime(2026, 4, 28, 15, 30, tzinfo=timezone(timedelta(hours=5, minutes=30)))
+                    # 09:59 - before window
+                    mock_now.return_value = datetime(2026, 4, 28, 9, 59, tzinfo=timezone(timedelta(hours=5, minutes=30)))
                     
                     result = auto_enter_from_alerts([alert_reliance], cfg=mock_config)
                     
