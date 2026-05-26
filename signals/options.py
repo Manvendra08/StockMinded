@@ -72,8 +72,9 @@ def _next_expiry(symbol="NIFTY", preference="weekly"):
             else:
                 exp_date = date(next_year, next_month, cal[-2][calendar.THURSDAY])
     else:
-        days_ahead = calendar.THURSDAY - today.weekday()
-        if days_ahead < 0:
+        # NSE changed NIFTY weekly expiry from Thursday → Monday (effective Oct 2024)
+        days_ahead = calendar.MONDAY - today.weekday()
+        if days_ahead <= 0:           # already Monday or past it this week
             days_ahead += 7
         exp_date = today + timedelta(days=days_ahead)
     while _is_holiday(exp_date):
@@ -119,6 +120,7 @@ def atm_iv(chain, spot):
 def iv_rank(symbol, current_iv, db_path):
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA journal_mode=WAL")  # Issue #9: WAL avoids reader/writer contention
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS iv_history (
                  symbol TEXT, date DATE, atm_iv REAL, PRIMARY KEY(symbol, date))''')
@@ -155,7 +157,16 @@ def chain_snapshot(symbol) -> pd.DataFrame:
                 pass
         return datetime.max
     expiries.sort(key=parse_exp)
-    closest_expiry = expiries[0]
+    # Issue #4: on expiry day, avoid 0-DTE chain (gamma risk / illiquidity);
+    # prefer next week's expiry so signals are stable throughout the session.
+    today_local = date.today()
+    def _is_today(s):
+        try:
+            return parse_exp(s).date() == today_local
+        except Exception:
+            return False
+    non_zero_dte = [e for e in expiries if not _is_today(e)]
+    closest_expiry = non_zero_dte[0] if non_zero_dte else expiries[0]
     underlying_value = raw.get("records", {}).get("underlyingValue", 0)
     rows = []
     tte_days = (parse_exp(closest_expiry).date() - date.today()).days
@@ -270,7 +281,7 @@ def is_within_exit_window(cfg: dict = None, now: datetime = None, mode: str = "p
     Check if trade should be exited now based on mode and rules.
     
     Intraday: exit by 15:15
-    Positional: exit by expiry-day 15:15, no new trades on expiry day
+    Positional: exit by expiry-day 15:15 ONLY; normal days remain in trade
     """
     from datetime import timezone, timedelta
     if cfg is None:
@@ -297,18 +308,22 @@ def is_within_exit_window(cfg: dict = None, now: datetime = None, mode: str = "p
         exit_str = nifty_cfg.get("positional_exit_expiry_cutoff", "15:15")
         h, m = map(int, exit_str.split(":"))
         exit_time = time(h, m)
-        if current_time >= exit_time:
+        # Only force-exit on EXPIRY DAY; on normal days stay in the trade
+        expiry_str = nifty_cfg.get("current_expiry", "")
+        on_expiry_day = is_expiry_day(expiry_str) if expiry_str else False
+        if on_expiry_day and current_time >= exit_time:
             return True, f"Expiry day exit by {exit_str}"
         return False, "Not expiry cutoff"
 
 
 def calc_structure_max_loss(structure_type: str, net_credit: float, wing_width: float,
-                            lot_size: int = 1) -> float:
+                            lot_size: int = 1, **kwargs) -> float:
     """
     Calculate max loss for an option structure.
     
     Iron Condor / Credit spread: max_loss = (wing_width * lot_size) - net_credit
     Credit Spread: max_loss = (spread_width * lot_size) - net_credit
+    naked_short kwargs: underlying_spot, naked_loss_pct (default 0.20), naked_loss_cap (default 250_000)
     """
     if net_credit <= 0:
         return max(0, wing_width * lot_size)
@@ -320,10 +335,16 @@ def calc_structure_max_loss(structure_type: str, net_credit: float, wing_width: 
     elif structure_type == "credit_spread":
         return max(0, (wing_width * lot_size) - net_credit)
     elif structure_type == "naked_short":
-        # Naked options have theoretically unlimited loss. 
-        # For paper trading risk gating, we'll proxy max loss as 20% of the underlying's value.
-        # In Nifty terms, ~24000 * 0.20 = 4800 points * 50 = 240,000 per lot.
-        return 250000.0 * lot_size
+        # Issue #5: derive max-loss proxy dynamically from a configurable % of underlying.
+        # Caller should pass underlying_spot via kwargs; fallback keeps behaviour safe.
+        # Default: 20 % of spot × lot_size  (e.g. 24500 × 0.20 × 75 ≈ ₹3.68 L/lot)
+        spot = kwargs.get("underlying_spot", 0.0)
+        pct  = kwargs.get("naked_loss_pct",  0.20)
+        if spot > 0:
+            return round(spot * pct * lot_size, 2)
+        # Fallback: use configured absolute cap or ₹250k
+        cap = kwargs.get("naked_loss_cap", 250_000.0)
+        return cap * lot_size
     
     return wing_width * lot_size
 
@@ -481,11 +502,9 @@ def net_position_delta(legs: list, chain: pd.DataFrame) -> Optional[float]:
         delta_col = "ce_delta" if opt_type == "CE" else "pe_delta"
         leg_delta = float(row.iloc[0].get(delta_col, 0.0))
         
-        # Calculate per-share delta: SELL is -1, BUY is +1
+        qty = leg.get("qty", 1)
         sign = 1 if side == "BUY" else -1
-        net_delta += sign * leg_delta
+        net_delta += sign * leg_delta * qty
         matched += 1
     
-    if matched == 0:
-        return None
-    return round(net_delta, 4)
+    return round(net_delta, 4) if matched > 0 else None
