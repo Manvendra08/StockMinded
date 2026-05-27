@@ -1270,8 +1270,100 @@ def generate_eod_summary(target_date: str | None = None) -> dict:
         if "daily_summaries" not in db:
             db["daily_summaries"] = []
 
+        # Gather all trades across SQLite and paper_trades JSON
+        all_trades = []
+        
+        # 1. Load from SQLite
+        try:
+            import sqlite3
+            from config.loader import load_config
+            cfg = load_config()
+            db_path = cfg["paths"]["journal_db"]
+            if Path(db_path).exists():
+                conn = sqlite3.connect(db_path)
+                conn.row_factory = sqlite3.Row
+                try:
+                    rows = conn.execute("SELECT * FROM trades").fetchall()
+                    for r in rows:
+                        row = dict(r)
+                        opened_at = str(row.get("opened_at") or "")
+                        closed_at = str(row.get("closed_at") or "")
+                        side = str(row.get("side") or "LONG").upper()
+                        entry = row.get("entry")
+                        exit_price = row.get("exit_price")
+                        qty = int(row.get("qty") or 0)
+                        pnl = row.get("pnl_rupees")
+                        if pnl is None and entry not in (None, 0) and exit_price is not None:
+                            if side == "SHORT":
+                                pnl = (float(entry) - float(exit_price)) * qty
+                            else:
+                                pnl = (float(exit_price) - float(entry)) * qty
+                        
+                        notes = str(row.get("notes") or "").upper()
+                        exit_reason = "CLOSED"
+                        if "SL_HIT" in notes or "SL HIT" in notes:
+                            exit_reason = "SL_HIT"
+                        elif "TARGET_HIT" in notes or "TARGET HIT" in notes or "TGT HIT" in notes:
+                            exit_reason = "TARGET_HIT"
+                        elif "EOD" in notes:
+                            exit_reason = "EOD_CLOSE"
+                        elif closed_at:
+                            exit_reason = "CLOSED"
+                        else:
+                            exit_reason = "OPEN"
+
+                        all_trades.append({
+                            "id": row.get("id"),
+                            "symbol": row.get("symbol"),
+                            "direction": "SHORT" if side == "SHORT" else "LONG",
+                            "entry_price": entry,
+                            "exit_price": exit_price,
+                            "qty": qty,
+                            "pnl": pnl,
+                            "status": "CLOSED" if closed_at else "OPEN",
+                            "exit_reason": exit_reason,
+                            "entry_date": opened_at[:10] if opened_at else None,
+                            "source": "sqlite"
+                        })
+                finally:
+                    conn.close()
+        except Exception as e:
+            print(f"Error loading SQLite trades for EOD: {e}")
+
+        # 2. Load from JSON db["trades"]
+        for t in db.get("trades", []):
+            all_trades.append({
+                "id": t.get("id"),
+                "symbol": t.get("symbol"),
+                "direction": t.get("direction", "LONG"),
+                "entry_price": t.get("entry_price"),
+                "exit_price": t.get("exit_price"),
+                "qty": t.get("qty"),
+                "pnl": t.get("pnl"),
+                "status": t.get("status"),
+                "exit_reason": t.get("exit_reason") or ("CLOSED" if t.get("status") == "CLOSED" else "OPEN"),
+                "entry_date": t.get("entry_date"),
+                "source": "json_trades"
+            })
+
+        # 3. Load from JSON db["option_trades"]
+        for t in db.get("option_trades", []):
+            all_trades.append({
+                "id": t.get("id"),
+                "symbol": t.get("symbol"),
+                "direction": "LONG" if (t.get("net_premium", 0) or 0) < 0 else "SHORT",
+                "entry_price": t.get("net_premium"),
+                "exit_price": t.get("exit_premium"),
+                "qty": sum(leg.get("qty", 1) for leg in t.get("legs", [])),
+                "pnl": t.get("pnl"),
+                "status": t.get("status"),
+                "exit_reason": t.get("exit_reason") or ("CLOSED" if t.get("status") == "CLOSED" else "OPEN"),
+                "entry_date": t.get("entry_date"),
+                "source": "json_options"
+            })
+
         def _calc_day_summary(day: str) -> dict:
-            day_trades = [t for t in db.get("trades", []) if t.get("entry_date") == day]
+            day_trades = [t for t in all_trades if t.get("entry_date") == day]
             closed_today = [t for t in day_trades if t["status"] == "CLOSED"]
             winners = [t for t in closed_today if (t.get("pnl") or 0) > 0]
             losers = [t for t in closed_today if (t.get("pnl") or 0) < 0]
@@ -1304,12 +1396,9 @@ def generate_eod_summary(target_date: str | None = None) -> dict:
                 "corrections": _generate_corrections(closed_today, db.get("daily_summaries", []))
             }
 
-        # 1. Identify all unique trade dates in db["trades"] and db["option_trades"]
+        # 1. Identify all unique trade dates in all_trades
         all_trade_dates = set()
-        for t in db.get("trades", []):
-            if t.get("entry_date"):
-                all_trade_dates.add(t["entry_date"])
-        for t in db.get("option_trades", []):
+        for t in all_trades:
             if t.get("entry_date"):
                 all_trade_dates.add(t["entry_date"])
 
