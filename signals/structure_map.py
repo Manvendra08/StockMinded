@@ -49,3 +49,15 @@ MAP: dict[Regime, StructurePlan] = {
 
 def plan_for(regime: Regime) -> StructurePlan:
     return MAP[regime]
+
+
+def build_structure_map(cfg=None) -> dict[str, dict[str, str]]:
+    """Convert MAP into a serializable dictionary for the dashboard."""
+    return {
+        r.value: {
+            "primary": plan.primary,
+            "secondary": plan.secondary,
+            "notes": plan.notes,
+        }
+        for r, plan in MAP.items()
+    }

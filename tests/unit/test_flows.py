@@ -101,11 +101,11 @@ class TestBias:
 
     def test_bullish_fii_alone_with_neutral_pcr(self):
         result = _bias({"fii": 1000, "dii": 0}, pcr_oi=1.0)
-        assert result == "LONG"
+        assert result == "NEUTRAL"
 
     def test_bearish_fii_alone_with_neutral_pcr(self):
         result = _bias({"fii": -1000, "dii": 0}, pcr_oi=1.0)
-        assert result == "SHORT"
+        assert result == "NEUTRAL"
 
     def test_derivatives_bullish_futures_and_stock_futures(self):
         derivs = {

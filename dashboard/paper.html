@@ -1447,6 +1447,9 @@ async function loadStats() {
     const stdDev = Math.sqrt(returns.map(x => Math.pow(x - avgReturn, 2)).reduce((a,b) => a+b, 0) / returns.length) || 0;
     const sharpe = (stdDev > 0 && returns.length > 3) ? (avgReturn / stdDev) * Math.sqrt(252) : 0; // Guard for low samples
 
+    const winners = closed.filter(t => (t.pnl || 0) > 0);
+    const losers = closed.filter(t => (t.pnl || 0) < 0);
+
     if (filterDate) {
       const dayTrades = _allTrades.filter(t => t.entry_date === filterDate || t.exit_date === filterDate);
       const dayClosed = dayTrades.filter(t => t.status === 'CLOSED');
@@ -1464,6 +1467,18 @@ async function loadStats() {
         avg_winner: dayWinners.length ? dayWinners.reduce((s, t) => s + t.pnl, 0) / dayWinners.length : 0,
         avg_loser: dayLosers.length ? dayLosers.reduce((s, t) => s + t.pnl, 0) / dayLosers.length : 0,
         total_trades: dayTrades.length
+      };
+    } else {
+      stats = {
+        cumulative_pnl: stats ? stats.cumulative_pnl : 0,
+        total_winners: winners.length,
+        total_losers: losers.length,
+        overall_win_rate: stats ? stats.overall_win_rate : 0,
+        closed_trades: closed.length,
+        open_trades: stats ? stats.open_trades : 0,
+        avg_winner: winners.length ? winners.reduce((sum, t) => sum + (t.pnl || 0), 0) / winners.length : 0,
+        avg_loser: losers.length ? losers.reduce((sum, t) => sum + (t.pnl || 0), 0) / losers.length : 0,
+        total_trades: stats ? stats.total_trades : 0
       };
     }
 

@@ -170,7 +170,12 @@ def build_trade_verdict(data: dict) -> CombinedVerdict:
 
     if not data_stale and vix < 25 and option_ok:
         nifty_can_trade = True
-        iv_rank_val = _num(data.get("iv_rank"))   # Issue #6: caller must pass current IV rank
+        iv_rank_val = data.get("iv_rank")
+        if iv_rank_val is not None:
+            try:
+                iv_rank_val = float(iv_rank_val)
+            except (ValueError, TypeError):
+                iv_rank_val = None
         iv_rank_ok  = (iv_rank_val is None) or (iv_rank_val >= 40)  # None = unknown -> allow but flag
 
         if regime_name in ("TREND_UP", "TREND_DOWN") and abs(trend) >= 4:

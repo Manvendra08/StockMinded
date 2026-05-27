@@ -488,6 +488,10 @@ def net_position_delta(legs: list, chain: pd.DataFrame) -> Optional[float]:
     if chain is None or chain.empty or not legs:
         return None
     
+    min_qty = min(leg.get("qty", 1) for leg in legs) if legs else 1
+    if min_qty <= 0:
+        min_qty = 1
+
     net_delta = 0.0
     matched = 0
     for leg in legs:
@@ -507,4 +511,4 @@ def net_position_delta(legs: list, chain: pd.DataFrame) -> Optional[float]:
         net_delta += sign * leg_delta * qty
         matched += 1
     
-    return round(net_delta, 4) if matched > 0 else None
+    return round(net_delta / min_qty, 4) if matched > 0 else None

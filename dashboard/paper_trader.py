@@ -1247,17 +1247,335 @@ def auto_enter_from_alerts(alerts: list[dict], cfg: dict | None = None) -> list[
                     entry=entry_price,
                     stop=stop,
                     target=tgt_price,
-                    risk_rupees=proposed_risk,
+                    risk_rupees=new_trade["risk_rupees"],
                     regime=regime,
-                    notes=f"Auto-enter: {alert.get('entry_trigger', '')}"
+                    notes=f"Auto-entry: {alert.get('entry_trigger', '')}"
                 )
                 new_trade["journal_id"] = jid
             except Exception as e:
-                print(f"⚠️ Journal sync failed for auto-enter {sym}: {e}")
+                print(f"⚠️ Journal sync failed for {sym}: {e}")
 
             db["trades"].append(new_trade)
-            today_symbols.add(sym)
-            open_risk += proposed_risk
             entered.append(new_trade)
-
+            today_symbols.add(sym)
+            open_risk += new_trade["risk_rupees"]
     return entered
+
+def generate_eod_summary(target_date: str | None = None) -> dict:
+    """Generate end-of-day P&L summary and strategy analysis."""
+    today = target_date or date.today().isoformat()
+    check_and_close_trades()
+
+    with atomic_db_update() as db:
+        if "daily_summaries" not in db:
+            db["daily_summaries"] = []
+
+        def _calc_day_summary(day: str) -> dict:
+            day_trades = [t for t in db.get("trades", []) if t.get("entry_date") == day]
+            closed_today = [t for t in day_trades if t["status"] == "CLOSED"]
+            winners = [t for t in closed_today if (t.get("pnl") or 0) > 0]
+            losers = [t for t in closed_today if (t.get("pnl") or 0) < 0]
+            total_pnl = sum(t.get("pnl", 0) or 0 for t in closed_today)
+            
+            sl_hits = len([t for t in closed_today if t.get("exit_reason") == "SL_HIT"])
+            target_hits = len([t for t in closed_today if t.get("exit_reason") == "TARGET_HIT"])
+            eod_exits = len([t for t in closed_today if t.get("exit_reason") == "EOD_CLOSE"])
+            win_rate = round((len(winners) / max(len(closed_today), 1)) * 100, 1)
+
+            return {
+                "date": day,
+                "generated_at": _now_ist().strftime("%Y-%m-%d %H:%M:%S IST"),
+                "total_trades": len(day_trades),
+                "closed": len(closed_today),
+                "winners": len(winners),
+                "losers": len(losers),
+                "win_rate": win_rate,
+                "sl_hits": sl_hits,
+                "target_hits": target_hits,
+                "eod_exits": eod_exits,
+                "total_pnl": round(total_pnl, 2),
+                "trades": closed_today,
+                "cumulative_pnl": 0.0,
+                "analysis": {
+                    "what_went_right": [],
+                    "what_went_wrong": [],
+                    "patterns": []
+                },
+                "corrections": _generate_corrections(closed_today, db.get("daily_summaries", []))
+            }
+
+        # 1. Identify all unique trade dates in db["trades"] and db["option_trades"]
+        all_trade_dates = set()
+        for t in db.get("trades", []):
+            if t.get("entry_date"):
+                all_trade_dates.add(t["entry_date"])
+        for t in db.get("option_trades", []):
+            if t.get("entry_date"):
+                all_trade_dates.add(t["entry_date"])
+
+        # Ensure 'today' is in the set
+        all_trade_dates.add(today)
+
+        # 2. Check for missing summaries and generate them
+        existing_dates = {s["date"] for s in db["daily_summaries"]}
+        for d in sorted(all_trade_dates):
+            if d not in existing_dates or d == today:
+                summary = _calc_day_summary(d)
+                db["daily_summaries"] = [s for s in db["daily_summaries"] if s["date"] != d]
+                db["daily_summaries"].append(summary)
+
+        # 3. Sort daily_summaries chronologically
+        db["daily_summaries"].sort(key=lambda x: x["date"])
+
+        # 4. Recompute cumulative_pnl sequentially across all summaries
+        running_pnl = 0.0
+        for s in db["daily_summaries"]:
+            running_pnl += s["total_pnl"]
+            s["cumulative_pnl"] = round(running_pnl, 2)
+
+        db["cumulative_pnl"] = round(running_pnl, 2)
+
+        # Return the summary for target today
+        today_summary = next((s for s in db["daily_summaries"] if s["date"] == today), None)
+        if not today_summary:
+            today_summary = _calc_day_summary(today)
+            today_summary["cumulative_pnl"] = db["cumulative_pnl"]
+        
+        return today_summary
+
+def _generate_corrections(today_trades: list[dict], history: list[dict]) -> list[str]:
+    """Generate strategy corrections based on today's result + recent history."""
+    corrections = []
+
+    if not today_trades:
+        return ["No trades to analyze. Consider lowering confidence threshold if signals were present but not taken."]
+
+    winners = [t for t in today_trades if (t.get("pnl") or 0) > 0]
+    losers = [t for t in today_trades if (t.get("pnl") or 0) < 0]
+    sl_hits = [t for t in today_trades if t.get("exit_reason") == "SL_HIT"]
+
+    win_rate = len(winners) / len(today_trades) * 100 if today_trades else 0
+
+    # SL too tight?
+    if len(sl_hits) >= 3:
+        corrections.append("WIDEN SL: 3+ SL hits today. Consider 2.5% SL instead of 2%.")
+
+    # Win rate corrections
+    if win_rate < 40 and len(today_trades) >= 3:
+        corrections.append("REDUCE TRADES: Low win rate. Only take HIGH confidence signals tomorrow.")
+    elif win_rate >= 70:
+        corrections.append("MAINTAIN: Strategy working. Keep current parameters.")
+
+    # Check for missed targets (EOD exits that were in profit)
+    eod_profitable = [t for t in today_trades if t.get("exit_reason") == "EOD_CLOSE" and (t.get("pnl") or 0) > 0]
+    if eod_profitable:
+        corrections.append(f"TRAIL STOP: {len(eod_profitable)} trade(s) exited at EOD with profit — implement trailing SL to lock gains.")
+
+    # Directional bias check
+    long_trades = [t for t in today_trades if t["direction"] == "LONG"]
+    short_trades = [t for t in today_trades if t["direction"] == "SHORT"]
+    long_losses = sum(1 for t in long_trades if (t.get("pnl") or 0) < 0)
+    short_losses = sum(1 for t in short_trades if (t.get("pnl") or 0) < 0)
+
+    if long_losses >= 2 and len(long_trades) >= 2:
+        corrections.append("REDUCE LONGS: Long bias failing. Check if regime has shifted bearish.")
+    if short_losses >= 2 and len(short_trades) >= 2:
+        corrections.append("REDUCE SHORTS: Short bias failing. Check if regime has shifted bullish.")
+
+    # Check recent history for systemic issues
+    if len(history) >= 3:
+        last_3 = history[-3:]
+        losing_days = sum(1 for s in last_3 if s.get("total_pnl", 0) < 0)
+        if losing_days >= 3:
+            corrections.append("PAUSE TRADING: 3 consecutive losing days. Review strategy fundamentals before continuing.")
+        avg_win_rate = sum(s.get("win_rate", 0) for s in last_3) / 3
+        if avg_win_rate < 35:
+            corrections.append("OVERHAUL SIGNALS: 3-day average win rate below 35%. Tighten entry criteria aggressively.")
+
+    if not corrections:
+        corrections.append("No corrections needed. System performing within parameters.")
+
+    return corrections
+
+def get_stats() -> dict:
+    db = _load_db()
+    all_closed = [t for t in db.get("trades", []) if t.get("status") == "CLOSED"]
+    all_closed.extend([t for t in db.get("option_trades", []) if t.get("status") == "CLOSED"])
+    resolved = [t for t in all_closed if (t.get("pnl") or 0) != 0]
+    winners = [t for t in resolved if (t.get("pnl") or 0) > 0]
+    total_trades = len(db.get("trades", [])) + len(db.get("option_trades", []))
+    open_trades = len([t for t in db.get("trades", []) if t.get("status") == "OPEN"]) + len([t for t in db.get("option_trades", []) if t.get("status") == "OPEN"])
+    return {
+        "total_trades": total_trades,
+        "open_trades": open_trades,
+        "cumulative_pnl": round(sum(t.get("pnl", 0) or 0 for t in all_closed), 2),
+        "overall_win_rate": round(len(winners) / max(len(resolved), 1) * 100, 1)
+    }
+
+def get_open_trades() -> list[dict]: 
+    db = _load_db()
+    open_t = [t for t in db.get("trades", []) if t.get("status") == "OPEN"]
+    open_t.extend([t for t in db.get("option_trades", []) if t.get("status") == "OPEN"])
+    return open_t
+
+def get_all_trades(limit: int = 50) -> list[dict]: 
+    db = _load_db()
+    all_t = db.get("trades", []) + db.get("option_trades", [])
+    # Re-sort by id or entry time to match original behavior where newer is at end
+    all_t.sort(key=lambda x: str(x.get("entry_time", "")))
+    return list(reversed(all_t[-limit:]))
+def get_daily_summaries(limit: int = 30) -> list[dict]: return list(reversed(_load_db()["daily_summaries"][-limit:]))
+
+def get_strategy_notes() -> list[dict]:
+    db = _load_db()
+    notes = db.get("strategy_notes", [])
+    if not notes:
+        for s in db.get("daily_summaries", []):
+            if s.get("corrections"):
+                notes.append({"date": s["date"], "corrections": s["corrections"]})
+    return list(reversed(notes))
+
+def get_learned_filters() -> list[dict]:
+    return _load_db().get("learned_filters", [])
+
+def cleanup_db(from_date: str | None = None, to_date: str | None = None, purge_churn: bool = False, full_reset: bool = False) -> dict:
+    """Clean up trade database based on criteria.
+    - full_reset: Clears ALL trades and summaries.
+    - purge_churn: Removes trades with 0 P&L (spam entries).
+    - from_date/to_date: Removes ALL trades in this range (inclusive).
+    """
+    import sqlite3
+    db = _load_db()
+    
+    if full_reset:
+        db["trades"] = []
+        db["option_trades"] = []
+        db["daily_summaries"] = []
+        db["strategy_notes"] = []
+        db["cumulative_pnl"] = 0.0
+        _save_db(db)
+        
+        # Sync full reset with SQLite Journal database
+        try:
+            cfg = load_config()
+            conn = sqlite3.connect(cfg["paths"]["journal_db"])
+            conn.execute("DELETE FROM trades")
+            conn.execute("DELETE FROM skipped_trades")
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"⚠️ Failed to reset SQLite journal: {e}")
+            
+        return {"status": "success", "message": "Database fully reset"}
+
+    original_count = len(db.get("trades", []))
+    removed_count = 0
+
+    # 1. Filter Stock Trades
+    keep_trades = []
+    for t in db.get("trades", []):
+        entry_date = t.get("entry_date", "")
+        pnl = t.get("pnl") or 0.0
+        
+        in_range = True
+        if from_date and entry_date < from_date:
+            in_range = False
+        if to_date and entry_date > to_date:
+            in_range = False
+            
+        if from_date or to_date:
+            if in_range:
+                removed_count += 1
+                continue # Delete it
+        
+        if purge_churn and t.get("id", 0) > 5 and pnl == 0 and t.get("status") == "CLOSED":
+            removed_count += 1
+            continue # Delete it
+
+        keep_trades.append(t)
+    db["trades"] = keep_trades
+
+    # 2. Filter Option Trades
+    keep_options = []
+    for t in db.get("option_trades", []):
+        entry_date = t.get("entry_date", "")
+        pnl = t.get("pnl") or 0.0
+        
+        in_range = True
+        if from_date and entry_date < from_date:
+            in_range = False
+        if to_date and entry_date > to_date:
+            in_range = False
+            
+        if from_date or to_date:
+            if in_range:
+                removed_count += 1
+                continue # Delete it
+                
+        keep_options.append(t)
+    db["option_trades"] = keep_options
+
+    # Recalculate cumulative P&L
+    db["cumulative_pnl"] = sum(t.get("pnl", 0) for t in keep_trades if t.get("status") == "CLOSED") + \
+                           sum(t.get("pnl", 0) for t in keep_options if t.get("status") == "CLOSED")
+    
+    # 3. Clean up daily summaries
+    new_summaries = []
+    for s in db.get("daily_summaries", []):
+        d = s.get("date")
+        if (from_date and d < from_date) or (to_date and d > to_date):
+            if from_date or to_date:
+                continue
+        
+        # Update trade list in summary
+        s_trades = [t for t in keep_trades if t.get("entry_date") == d]
+        s["trades"] = s_trades
+        s["total_trades"] = len(s_trades)
+        s["total_pnl"] = sum(t.get("pnl", 0) for t in s_trades)
+        winners = [t for t in s_trades if (t.get("pnl") or 0) > 0]
+        s["win_rate"] = round((len(winners) / max(len(s_trades), 1) * 100), 2) if s_trades else 0
+        new_summaries.append(s)
+    db["daily_summaries"] = new_summaries
+
+    _save_db(db)
+
+    # Sync range deletion with SQLite Journal database
+    try:
+        cfg = load_config()
+        conn = sqlite3.connect(cfg["paths"]["journal_db"])
+        if from_date and to_date:
+            conn.execute("DELETE FROM trades WHERE substr(opened_at, 1, 10) >= ? AND substr(opened_at, 1, 10) <= ?", (from_date, to_date))
+            conn.execute("DELETE FROM skipped_trades WHERE substr(ts, 1, 10) >= ? AND substr(ts, 1, 10) <= ?", (from_date, to_date))
+        elif from_date:
+            conn.execute("DELETE FROM trades WHERE substr(opened_at, 1, 10) >= ?", (from_date,))
+            conn.execute("DELETE FROM skipped_trades WHERE substr(ts, 1, 10) >= ?", (from_date,))
+        elif to_date:
+            conn.execute("DELETE FROM trades WHERE substr(opened_at, 1, 10) <= ?", (to_date,))
+            conn.execute("DELETE FROM skipped_trades WHERE substr(ts, 1, 10) <= ?", (to_date,))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"⚠️ Failed to clean journal SQLite db range: {e}")
+
+    return {
+        "original_count": original_count,
+        "removed_count": removed_count,
+        "final_count": len(db["trades"]),
+        "cumulative_pnl": db["cumulative_pnl"]
+    }
+
+def export_trades_to_csv() -> str:
+    """Return trade history as a CSV string."""
+    db = _load_db()
+    trades = db.get("trades", []) + db.get("option_trades", [])
+    if not trades:
+        return "No trades found"
+
+    df = pd.DataFrame(trades)
+    cols = [
+        "id", "symbol", "direction", "status", "entry_price", "exit_price",
+        "qty", "capital_deployed", "pnl", "pnl_pct", "exit_reason",
+        "entry_time", "exit_time", "confidence"
+    ]
+    available_cols = [c for c in cols if c in df.columns]
+    return df[available_cols].to_csv(index=False)
