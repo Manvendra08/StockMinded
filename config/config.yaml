@@ -117,6 +117,8 @@ options:
 # NIFTY Option Selling - Defined Risk Only
 nifty_options:
   enabled: true
+  # Minimum lot count per leg (10 means 10 * lot_size contracts per leg)
+  min_lots_per_leg: 10
   # Trade modes: intraday | positional
   mode: positional
   # Intraday window

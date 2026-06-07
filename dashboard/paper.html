@@ -1696,7 +1696,7 @@ async function loadOpen() {
       return `<tr>
         <td><div class="sym-cell">
           ${t.symbol}
-          <span class="dir-badge dir-${t.direction.toLowerCase()}">${t.direction}</span>
+          <span class="dir-badge dir-${(t.direction || 'NEUTRAL').toLowerCase()}">${t.direction || 'NEUTRAL'}</span>
         </div></td>
         <td>${fmt(t.entry_price)}</td>
         <td class="${cls(upnl)}">${cmp ? fmt(cmp) : '—'}</td>

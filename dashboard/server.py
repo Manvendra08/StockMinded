@@ -23,6 +23,7 @@ from dotenv import load_dotenv
 load_dotenv(PROJECT_ROOT / ".env")
 
 from flask import Flask, jsonify, request, send_from_directory
+import logging
 import numpy as np
 import pandas as pd
 
@@ -345,8 +346,8 @@ def _run_engine() -> dict:
         _spot  = nifty_close
         if not _chain.empty and _spot > 0:
             _iv_rank_for_verdict = _iv_rank_fn("NIFTY", _atm_iv(_chain, _spot), _db_path)
-    except Exception:
-        pass
+    except Exception as e:
+        logging.getLogger(__name__).exception("Failed computing iv_rank for verdict: %s", e)
 
     # Compute verdict using FULL data before slicing leaders/laggards for UI
     result_for_verdict = {
@@ -800,13 +801,14 @@ def api_intraday():
                                 avg_20d = float(hist_20.mean()) if len(hist_20) >= 5 else float(avg_vol)
                                 if avg_20d > 0:
                                     rel_vol = round(today_vol / avg_20d, 2)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logging.getLogger(__name__).exception("Failed computing relative volume for %s: %s", raw, e)
                         
                 rows.append({"symbol": sym, "ltp": ltp, "open": open_, "high": high,
                              "low": low, "prev_close": prev, "chg_pct": chg_pct, 
                              "vol": avg_vol, "today_vol": today_vol, "rel_vol": rel_vol})
-            except Exception:
+            except Exception as e:
+                logging.getLogger(__name__).exception("Failed to fetch ticker data for %s: %s", sym, e)
                 rows.append({"symbol": sym, "ltp": None, "open": None, "high": None,
                              "low": None, "prev_close": None, "chg_pct": None, "vol": None, "today_vol": 0, "rel_vol": None})
 
@@ -984,6 +986,8 @@ def api_paper_open():
             symbols = list(set(t["symbol"] for t in trades))
             prices = pt._get_ltp_batch(symbols)
             for t in trades:
+                if t.get("legs"):
+                    continue
                 ltp = prices.get(t["symbol"])
                 if ltp is not None and t.get("entry_price"):
                     if t.get("direction") == "SHORT":
@@ -1213,6 +1217,9 @@ def _dict_to_setup(d: dict):
 
 def _dict_legs_to_resolved(legs: list[dict]):
     from signals.option_strategy import ResolvedLeg
+    from config.loader import load_config
+    cfg = load_config()
+    min_lots = cfg.get("nifty_options", {}).get("min_lots_per_leg", 10)
     out = []
     for leg in legs:
         qty = max(1, int(leg.get("qty", 1)))
@@ -1221,7 +1228,7 @@ def _dict_legs_to_resolved(legs: list[dict]):
             type=leg.get("type", ""),
             strike=leg.get("strike", 0),
             expiry=leg.get("expiry", ""),
-            lots=1,
+            lots=min_lots,
             lot_size=qty,
             premium=leg.get("premium", 0.0),
         ))

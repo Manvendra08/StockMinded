@@ -188,9 +188,15 @@ def _build_bear_call_spread(regime: str, bias: str, vix: float, pcr: Optional[fl
 
 
 def resolve_nifty_structure(setup: NiftyOptionSetup, chain: pd.DataFrame,
-                            spot: float, lot_size: int, strike_step: int) -> NiftyOptionSetup:
+                            spot: float, lot_size: int, strike_step: int, cfg: dict = None) -> NiftyOptionSetup:
     if chain.empty or not setup.suitable:
         return setup
+    
+    if cfg is None:
+        from config.loader import load_config
+        cfg = load_config()
+    
+    min_lots = cfg.get("nifty_options", {}).get("min_lots_per_leg", 10)
     
     strikes = sorted(chain["strike"].tolist())
     atm = atm_strike(spot, strikes)
@@ -205,6 +211,19 @@ def resolve_nifty_structure(setup: NiftyOptionSetup, chain: pd.DataFrame,
     if not has_live_prices:
         setup.suitable = False
         setup.skip_reason = "No live option prices (chain source is OI-only — wait for market open)"
+        return setup
+        
+    # Guard: ensure we aren't relying entirely on synthetic Black-Scholes fallbacks
+    total_options = len(chain) * 2
+    synthetic_count = 0
+    if "ce_synthetic" in chain.columns:
+        synthetic_count += chain["ce_synthetic"].sum()
+    if "pe_synthetic" in chain.columns:
+        synthetic_count += chain["pe_synthetic"].sum()
+    
+    if total_options > 0 and (synthetic_count / total_options) > 0.5:
+        setup.suitable = False
+        setup.skip_reason = f"Too many synthetic option prices ({synthetic_count}/{total_options} > 50%). Chain data is stale or missing."
         return setup
 
     wing = setup.wing_width
@@ -234,10 +253,10 @@ def resolve_nifty_structure(setup: NiftyOptionSetup, chain: pd.DataFrame,
         max_loss = wing * lot_size - net_credit
         
         resolved_legs = [
-            ResolvedLeg("SELL", "PE", short_put, expiry, 1, lot_size, sr.iloc[0]["pe_ltp"]),
-            ResolvedLeg("BUY", "PE", long_put, expiry, 1, lot_size, lr.iloc[0]["pe_ltp"]),
-            ResolvedLeg("SELL", "CE", short_call, expiry, 1, lot_size, scr.iloc[0]["ce_ltp"]),
-            ResolvedLeg("BUY", "CE", long_call, expiry, 1, lot_size, lcr.iloc[0]["ce_ltp"]),
+            ResolvedLeg("SELL", "PE", short_put, expiry, min_lots, lot_size, sr.iloc[0]["pe_ltp"]),
+            ResolvedLeg("BUY", "PE", long_put, expiry, min_lots, lot_size, lr.iloc[0]["pe_ltp"]),
+            ResolvedLeg("SELL", "CE", short_call, expiry, min_lots, lot_size, scr.iloc[0]["ce_ltp"]),
+            ResolvedLeg("BUY", "CE", long_call, expiry, min_lots, lot_size, lcr.iloc[0]["ce_ltp"]),
         ]
         credit_per_lot = net_credit / lot_size
         setup.breakevens = [short_put - credit_per_lot, short_call + credit_per_lot]
@@ -266,8 +285,8 @@ def resolve_nifty_structure(setup: NiftyOptionSetup, chain: pd.DataFrame,
         max_loss = wing * lot_size - net_credit
         
         resolved_legs = [
-            ResolvedLeg("SELL", leg_type, short_s, expiry, 1, lot_size, short_prem),
-            ResolvedLeg("BUY", leg_type, long_s, expiry, 1, lot_size, long_prem),
+            ResolvedLeg("SELL", leg_type, short_s, expiry, min_lots, lot_size, short_prem),
+            ResolvedLeg("BUY", leg_type, long_s, expiry, min_lots, lot_size, long_prem),
         ]
         credit_per_lot = net_credit / lot_size
         setup.breakevens = [short_s - credit_per_lot if leg_type == "PE" else short_s + credit_per_lot]
@@ -288,7 +307,7 @@ def resolve_nifty_structure(setup: NiftyOptionSetup, chain: pd.DataFrame,
         prem = sr.iloc[0][f"{leg_type.lower()}_ltp"]
         
         resolved_legs = [
-            ResolvedLeg("SELL", leg_type, short_s, expiry, 1, lot_size, prem),
+            ResolvedLeg("SELL", leg_type, short_s, expiry, min_lots, lot_size, prem),
         ]
         net_credit = prem * lot_size
         max_loss = 250000.0 * lot_size # Proxy for naked
