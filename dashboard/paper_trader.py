@@ -1412,6 +1412,13 @@ def generate_eod_summary(target_date: str | None = None) -> dict:
 
         # 3. Load from JSON db["option_trades"]
         for t in db.get("option_trades", []):
+            # Skip invalid synthetic/zero-premium closures — they are not real executed P&L events
+            exit_reason = (t.get("exit_reason") or ("CLOSED" if t.get("status") == "CLOSED" else "OPEN"))
+            pnl_val = t.get("pnl")
+            if exit_reason == "INVALID_ZERO_PREMIUM" and (pnl_val is None or pnl_val == 0):
+                # Don't include in EOD metrics; continue to next trade
+                continue
+
             all_trades.append({
                 "id": t.get("id"),
                 "symbol": t.get("symbol"),
@@ -1421,7 +1428,7 @@ def generate_eod_summary(target_date: str | None = None) -> dict:
                 "qty": sum(leg.get("qty", 1) for leg in t.get("legs", [])),
                 "pnl": t.get("pnl"),
                 "status": t.get("status"),
-                "exit_reason": t.get("exit_reason") or ("CLOSED" if t.get("status") == "CLOSED" else "OPEN"),
+                "exit_reason": exit_reason,
                 "entry_date": t.get("entry_date"),
                 "source": "json_options"
             })
