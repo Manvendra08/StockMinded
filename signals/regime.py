@@ -193,15 +193,15 @@ def classify(index_symbol: str = "NIFTY", stock_universe_data: dict | None = Non
     elif trend >= 3 and breadth_val <= 40:
         regime = Regime.RANGE_HIGH_VOL if vix_now >= 16 else Regime.RANGE_LOW_VOL
         notes.append("mixed tape: index firm, breadth weak")
-    elif adx >= 22 and trend >= 4 and breadth_val >= 50:
+    elif adx >= 20 and trend >= 4 and breadth_val >= 50:
         regime = Regime.TREND_UP
-    elif adx >= 22 and trend <= -4 and breadth_val <= 45:
+    elif adx >= 20 and trend <= -4 and breadth_val <= 45:
         # Issue #3: raised breadth cap from 50->45; 46-50% was a ~40% dead zone
         # where TREND_DOWN fired in essentially mixed-market conditions.
         regime = Regime.TREND_DOWN
-    elif adx < 22 and vix_now < 14:
+    elif adx < 20 and vix_now < 14:
         regime = Regime.RANGE_LOW_VOL
-    elif adx < 22 and vix_now >= 16:
+    elif adx < 20 and vix_now >= 16:
         regime = Regime.RANGE_HIGH_VOL
     else:
         regime = Regime.RANGE_LOW_VOL if vix_now < 15 else Regime.RANGE_HIGH_VOL

@@ -1,12 +1,47 @@
 """Leadership: RS-line ranking against Nifty, A-grade long/short lists."""
 from __future__ import annotations
 
+import datetime as dt
+from datetime import timezone, timedelta
 from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
 
 from data import feed
+
+
+def _projected_volume_multiplier() -> float:
+    """
+    Calculate the projection multiplier for today's volume based on the elapsed market time.
+    Active market hours: 09:15 to 15:30 IST (375 minutes).
+    Returns a multiplier >= 1.0 to scale today's partial volume.
+    If the market is closed or not yet open, returns 1.0.
+    """
+    ist = timezone(timedelta(hours=5, minutes=30))
+    now_ist = dt.datetime.now(ist)
+    
+    # Check if it's a weekday (Monday-Friday)
+    if now_ist.weekday() >= 5:  # Saturday or Sunday
+        return 1.0
+        
+    market_start = now_ist.replace(hour=9, minute=15, second=0, microsecond=0)
+    market_end = now_ist.replace(hour=15, minute=30, second=0, microsecond=0)
+    
+    if now_ist < market_start:
+        return 1.0
+    if now_ist >= market_end:
+        return 1.0
+        
+    elapsed_minutes = (now_ist - market_start).total_seconds() / 60.0
+    if elapsed_minutes <= 0:
+        return 1.0
+        
+    total_minutes = 375.0
+    elapsed_fraction = elapsed_minutes / total_minutes
+    # Clamp elapsed fraction between 0.05 and 1.0 to avoid extremely large multipliers
+    elapsed_fraction = max(0.05, min(1.0, elapsed_fraction))
+    return 1.0 / elapsed_fraction
 
 
 @dataclass
@@ -66,7 +101,16 @@ def rank_universe(stock_data: dict[str, pd.DataFrame], bench_df: pd.DataFrame) -
                 prev_20 = valid_vol.iloc[-21:-1]
                 mean_v = prev_20.mean()
                 if mean_v > 0:
-                    rvol = float(valid_vol.iloc[-1] / mean_v)
+                    today_vol = float(valid_vol.iloc[-1])
+                    # Apply projection multiplier if the last candle is today's date
+                    last_date = valid_vol.index[-1]
+                    if hasattr(last_date, "date"):
+                        last_date = last_date.date()
+                    ist = timezone(timedelta(hours=5, minutes=30))
+                    today_ist = dt.datetime.now(ist).date()
+                    if last_date == today_ist:
+                        today_vol *= _projected_volume_multiplier()
+                    rvol = today_vol / mean_v
 
         ranks.append(
             StockRank(

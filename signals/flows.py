@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
+import logging
 
 from data import feed
 
@@ -266,8 +267,8 @@ def _bias(
                 elif prev3 > 200 and last2 < -100:
                     # Was buying, now selling — bearish reversal signal
                     score -= 0.5
-        except Exception:
-            pass
+        except Exception as e:
+            logging.getLogger(__name__).exception("fii_dii_2d_trend() failed: %s", e)
 
     # --- PCR OI (weight 1.5, NSE-calibrated bands) ---
     if pcr_oi is not None:

@@ -1,6 +1,7 @@
 """Daily/monthly stops, correlation check, margin cap, concurrent risk cap."""
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import date
 
@@ -25,6 +26,8 @@ class Guardrails:
         r = cfg["risk"]
         cap = cfg["account"]["capital"]
         self.capital = float(cap)
+        if self.capital <= 0:
+            raise ValueError("Invalid config: account.capital must be > 0")
         
         # Use .get() with sensible defaults for risk parameters
         self.daily_stop = self.capital * r.get("daily_stop_pct", 0.02)
@@ -32,6 +35,17 @@ class Guardrails:
         self.concurrent_cap = self.capital * r.get("concurrent_open_pct", 0.25)
         self.margin_cap_pct = r.get("margin_util_cap", 0.80)
         self.corr_max = r.get("correlation_max", 0.75)
+        
+        # Log missing configurations
+        missing_defaults = []
+        if "daily_stop_pct" not in r: missing_defaults.append("daily_stop_pct=0.02")
+        if "monthly_stop_pct" not in r: missing_defaults.append("monthly_stop_pct=0.05")
+        if "concurrent_open_pct" not in r: missing_defaults.append("concurrent_open_pct=0.25")
+        if "margin_util_cap" not in r: missing_defaults.append("margin_util_cap=0.80")
+        if "correlation_max" not in r: missing_defaults.append("correlation_max=0.75")
+        
+        if missing_defaults:
+            logging.getLogger(__name__).warning("Guardrails running with defaults for missing config keys: %s", ", ".join(missing_defaults))
 
     def check_new_trade(self, *, proposed_risk: float, open_risk: float,
                         day_pnl: float, month_pnl: float,

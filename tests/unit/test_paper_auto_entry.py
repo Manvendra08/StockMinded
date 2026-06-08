@@ -201,6 +201,20 @@ class TestAutoEntryRiskGates:
             
             assert len(result) == 0
 
+    @patch("dashboard.paper_trader._get_ltp")
+    def test_holiday_blocks_auto_entry(self, mock_ltp, mock_db_empty, mock_config, valid_alert):
+        """Auto-entry should not occur on NSE holidays listed in config."""
+        mock_ltp.return_value = 2500.0
+
+        from datetime import timezone, timedelta
+        # Use a known holiday from config/nse_holidays_2026.csv -> 2026-05-01
+        with patch("dashboard.paper_trader._now_ist") as mock_now:
+            mock_now.return_value = datetime(2026, 5, 1, 10, 0, tzinfo=timezone(timedelta(hours=5, minutes=30)))
+
+            result = auto_enter_from_alerts([valid_alert], cfg=mock_config)
+
+            assert len(result) == 0
+
 
 class TestSizingIntegration:
     """Test that sizing module is used correctly."""

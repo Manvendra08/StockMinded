@@ -796,7 +796,15 @@ def api_intraday():
                         if not sym_hist.empty and 'Volume' in sym_hist:
                             volumes = sym_hist['Volume'].dropna()
                             if not volumes.empty:
-                                today_vol = int(volumes.iloc[-1])
+                                today_vol = float(volumes.iloc[-1])
+                                last_date = volumes.index[-1]
+                                if hasattr(last_date, "date"):
+                                    last_date = last_date.date()
+                                ist = timezone(timedelta(hours=5, minutes=30))
+                                today_ist = datetime.now(ist).date()
+                                if last_date == today_ist:
+                                    today_vol *= lead_mod._projected_volume_multiplier()
+                                today_vol = int(today_vol)
                                 hist_20 = volumes.iloc[:-1].tail(20)
                                 avg_20d = float(hist_20.mean()) if len(hist_20) >= 5 else float(avg_vol)
                                 if avg_20d > 0:

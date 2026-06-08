@@ -90,7 +90,12 @@ def _get_nse_session():
                     logging.getLogger(__name__).debug("[_get_nse_session] session warmed up")
                     break
                 except Exception as e:
-                    print(f"[_get_nse_session] warm-up attempt {attempt+1} failed: {type(e).__name__}: {e}")
+                    logging.getLogger(__name__).warning(
+                        "[_get_nse_session] warm-up attempt %s failed: %s: %s",
+                        attempt + 1,
+                        type(e).__name__,
+                        e,
+                    )
                     time.sleep(2 * (attempt + 1))
             
             if not success:
@@ -235,8 +240,8 @@ def _dhan_master() -> pd.DataFrame:
     try:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         df.to_csv(cache_file, index=False)
-    except Exception:
-        pass
+    except Exception as e:
+        logging.getLogger(__name__).exception("Failed to write Dhan master cache: %s", e)
     _DHAN_MASTER_CACHE = df
     return df
 
@@ -248,7 +253,8 @@ def _dhan_find_instrument(symbol: str) -> dict | None:
         return {"security_id": str(under[0]), "segment": under[1], "instrument": "INDEX"}
     try:
         df = _dhan_master()
-    except Exception:
+    except Exception as e:
+        logging.getLogger(__name__).exception("Failed to load Dhan master data: %s", e)
         return None
     sec_col = _dhan_col(df, "SEM_SMST_SECURITY_ID", "security_id", "SECURITY_ID")
     exch_col = _dhan_col(df, "SEM_EXM_EXCH_ID", "EXCH_ID")
@@ -365,7 +371,7 @@ def quote_batch(symbols: list[str]) -> dict[str, dict]:
                 raw = _dhan_post("marketfeed/quote", {seg: ids})
                 data.update(raw.get("data") or {})
             except Exception as e:
-                print(f"[dhan quote_batch] segment {seg} failed: {e}")
+                logging.getLogger(__name__).warning("[dhan quote_batch] segment %s failed: %s", seg, e)
         for seg, rows in (data or {}).items():
             for sid, item in (rows or {}).items():
                 sym = reverse.get((seg, str(sid)))
@@ -409,8 +415,8 @@ def _dhan_expiry(symbol: str, underlying_scrip: int, underlying_seg: str) -> str
             cached = json.loads(cache_file.read_text(encoding="utf-8"))
             expiries = cached.get("data") or []
             return sorted(expiries)[0] if expiries else None
-    except Exception:
-        pass
+    except Exception as e:
+        logging.getLogger(__name__).exception("Failed to read Dhan expiry cache: %s", e)
 
     payload = {"UnderlyingScrip": underlying_scrip, "UnderlyingSeg": underlying_seg}
     raw = _dhan_post("optionchain/expirylist", payload)
@@ -419,8 +425,8 @@ def _dhan_expiry(symbol: str, underlying_scrip: int, underlying_seg: str) -> str
         try:
             CACHE_DIR.mkdir(parents=True, exist_ok=True)
             cache_file.write_text(json.dumps({"ts": time.time(), "data": expiries}), encoding="utf-8")
-        except Exception:
-            pass
+        except Exception as e:
+            logging.getLogger(__name__).exception("Failed to write Dhan expiry cache: %s", e)
         return sorted(expiries)[0]
     return None
 
@@ -887,7 +893,28 @@ def ohlc(symbol: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
 
 
 def india_vix(period: str = "3mo") -> pd.DataFrame:
-    return ohlc("INDIAVIX", period=period)
+    df = ohlc("INDIAVIX", period=period)
+    try:
+        if df is None or df.empty:
+            return df
+        # Normalize column name
+        col = "close" if "close" in df.columns else None
+        if col is None:
+            # Attempt to coerce last column as close
+            if len(df.columns) > 0:
+                col = df.columns[-1]
+            else:
+                return df
+        # Coerce to numeric and clamp to sane range
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+        # Replace outliers or negative with NaN, then forward-fill a conservative value
+        df[col] = df[col].apply(lambda x: float(x) if pd.notna(x) and x > 0 and x < 1000 else float('nan'))
+        if df[col].isna().all():
+            logging.getLogger(__name__).warning("India VIX feed returned no valid 'close' values")
+        return df
+    except Exception as e:
+        logging.getLogger(__name__).exception(f"Error sanitizing India VIX data: {e}")
+        return df
 
 
 def option_chain(symbol: str = "NIFTY") -> dict:
@@ -900,8 +927,8 @@ def option_chain(symbol: str = "NIFTY") -> dict:
         try:
             CACHE_DIR.mkdir(parents=True, exist_ok=True)
             cache_file.write_text(json.dumps({"ts": time.time(), "data": data}, default=str), encoding="utf-8")
-        except Exception:
-            pass
+        except Exception as e:
+            logging.getLogger(__name__).exception("Failed to save option chain cache for %s: %s", symbol, e)
         _OPTION_CHAIN_SOURCE[symbol] = data.get("_source") or "unknown"
         return data
 
@@ -915,8 +942,8 @@ def option_chain(symbol: str = "NIFTY") -> dict:
                     data["_cache"].update({"stale": True, "ts": cached.get("ts")})
                     _OPTION_CHAIN_SOURCE[symbol] = f"cache:{data.get('_source') or 'unknown'}"
                     return data
-        except Exception:
-            pass
+        except Exception as e:
+            logging.getLogger(__name__).exception("Failed to load option chain cache for %s: %s", symbol, e)
         return {"records": {"data": []}}
 
     def _try_external_fallbacks() -> dict:
@@ -926,7 +953,12 @@ def option_chain(symbol: str = "NIFTY") -> dict:
                 if data and data.get("records", {}).get("data"):
                     return _save_chain(data)
             except Exception as e:
-                print(f"[option_chain {fn.__name__}] failed for {symbol}: {e}")
+                logging.getLogger(__name__).warning(
+                    "[option_chain %s] failed for %s: %s",
+                    fn.__name__,
+                    symbol,
+                    e,
+                )
         return {"records": {"data": []}}
     
     # 1. Dhan (preferred: has full data including LTPs when user has API access).
@@ -935,7 +967,7 @@ def option_chain(symbol: str = "NIFTY") -> dict:
         if data and data.get("records", {}).get("data"):
             return _save_chain(data)
     except Exception as e:
-        print(f"[option_chain dhan] failed for {symbol}: {e}")
+        logging.getLogger(__name__).warning("[option_chain dhan] failed for %s: %s", symbol, e)
 
     # 2. Research360 — no auth required, provides OI for all strikes + LTP
     #    for ~10 near-ATM strikes via graphprice/graphc/graphp arrays.
@@ -944,7 +976,7 @@ def option_chain(symbol: str = "NIFTY") -> dict:
         if data and data.get("records", {}).get("data"):
             return _save_chain(data)
     except Exception as e:
-        print(f"[option_chain research360] failed for {symbol}: {e}")
+        logging.getLogger(__name__).warning("[option_chain research360] failed for %s: %s", symbol, e)
 
     # 3. Try robust direct fetch (NSE) as third option
     session = _get_nse_session()
@@ -976,7 +1008,7 @@ def option_chain(symbol: str = "NIFTY") -> dict:
                     if data and data.get("records", {}).get("data"):
                         return _save_chain(data)
             except Exception as e:
-                print(f"[option_chain robust fetch] failed for {symbol}: {e}")
+                logging.getLogger(__name__).warning("[option_chain robust fetch] failed for %s: %s", symbol, e)
                 break
         try:
             indices = ['NIFTY', 'FINNIFTY', 'BANKNIFTY', 'MIDCPNIFTY']
@@ -996,7 +1028,7 @@ def option_chain(symbol: str = "NIFTY") -> dict:
                 if data and data.get("records", {}).get("data"):
                     return _save_chain(data)
         except Exception as e:
-            print(f"[option_chain robust fetch] failed for {symbol}: {e}")
+            logging.getLogger(__name__).warning("[option_chain robust fetch] failed for %s: %s", symbol, e)
 
     # 3. Fallback to nsepython (might work if our session logic failed but theirs somehow succeeds)
     try:
@@ -1004,16 +1036,16 @@ def option_chain(symbol: str = "NIFTY") -> dict:
         result = nse_optionchain_scrapper(symbol)
         if result and result.get("records", {}).get("data"):
             return _save_chain(result)
-    except Exception:
-        pass
+    except Exception as e:
+        logging.getLogger(__name__).exception("nse_optionchain_scrapper failed for %s: %s", symbol, e)
 
     try:
         from nsepython import option_chain as nse_oc
         result = nse_oc(symbol)
         if result and result.get("records", {}).get("data"):
             return _save_chain(result)
-    except Exception:
-        pass
+    except Exception as e:
+        logging.getLogger(__name__).exception("nsepython.option_chain failed for %s: %s", symbol, e)
 
     fallback = _try_external_fallbacks()
     if fallback.get("records", {}).get("data"):
@@ -1027,7 +1059,7 @@ def option_chain(symbol: str = "NIFTY") -> dict:
             ai_data["_source"] = "ai_scraper"
             return _save_chain(ai_data)
     except Exception as e:
-        print(f"[option_chain ai_scraper] failed for {symbol}: {e}")
+        logging.getLogger(__name__).exception("AI option_chain fallback failed for %s: %s", symbol, e)
 
     data = _load_cached_chain()
     
@@ -1056,7 +1088,7 @@ def option_chain(symbol: str = "NIFTY") -> dict:
                         row["PE"]["lastPrice"] = ltp_map.get(f"{s}_PE", 0)
                     data["_source"] = "research360+dhan_ltp"
         except Exception as e:
-            print(f"[option_chain enrichment] failed for {symbol}: {e}")
+            logging.getLogger(__name__).exception("Option chain enrichment failed for %s: %s", symbol, e)
 
     return data
 
@@ -1126,7 +1158,7 @@ def get_pcr_max_pain_cached(symbol: str = "NIFTY") -> tuple[float | None, float 
                 "ts": time.time(),
                 "source": raw.get("_source") or option_chain_source(symbol) or "unknown",
             }
-            with open(cache_file, 'w') as f:
+            with open(cache_file, 'w', encoding="utf-8") as f:
                 json.dump(cache_data, f)
 
             return pcr_oi, pcr_vol, max_pain, False, False, cache_data["ts"], cache_data["ts"]
@@ -1136,7 +1168,7 @@ def get_pcr_max_pain_cached(symbol: str = "NIFTY") -> tuple[float | None, float 
     # Fallback to cache
     if cache_file.exists():
         try:
-            with open(cache_file, 'r') as f:
+            with open(cache_file, 'r', encoding="utf-8") as f:
                 cache_data = json.load(f)
             if cache_data.get("source"):
                 _OPTION_CHAIN_SOURCE[symbol.upper()] = f"cache:{cache_data.get('source')}"
@@ -1152,7 +1184,7 @@ def get_pcr_max_pain_cached(symbol: str = "NIFTY") -> tuple[float | None, float 
                 cache_data.get("ts"),
             )
         except Exception as e:
-            print(f"[get_pcr_max_pain_cached] cache read failed: {e}")
+            logging.getLogger(__name__).exception("Failed to read PCR/MaxPain cache: %s", e)
             
     # If we got here, both live and cache failed. Do not take down dashboard flows.
     return None, None, None, True, True, None, None
@@ -1167,8 +1199,8 @@ def _get_persistent_fii_dii_cache() -> tuple[Optional[list[dict]], Optional[list
             with open(cache_file, "r") as f:
                 data = json.load(f)
                 return data.get("data"), data.get("stockedge_data"), data.get("timestamp", 0.0)
-        except Exception:
-            pass
+        except Exception as e:
+            logging.getLogger(__name__).exception("Failed to read FII/DII cache: %s", e)
     return None, None, 0.0
 
 
@@ -1180,8 +1212,8 @@ def _set_persistent_fii_dii_cache(data: list[dict], stockedge_data: list[dict] |
         cache_file.parent.mkdir(parents=True, exist_ok=True)
         with open(cache_file, "w") as f:
             json.dump({"data": data, "stockedge_data": stockedge_data, "timestamp": timestamp}, f)
-    except Exception:
-        pass
+    except Exception as e:
+        logging.getLogger(__name__).exception("Failed to write FII/DII cache: %s", e)
 
 
 def fii_dii_cash(days: int = 10) -> pd.DataFrame:

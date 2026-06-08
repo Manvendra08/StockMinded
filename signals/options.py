@@ -1,8 +1,9 @@
 import math
+import logging
 import calendar
 import sqlite3
 import pandas as pd
-from datetime import datetime, date, timedelta, time
+from datetime import datetime, date, timedelta, time, timezone
 from pathlib import Path
 import os
 import csv
@@ -54,7 +55,7 @@ def _is_holiday(dt_date):
 
 
 def _next_expiry(symbol="NIFTY", preference="weekly"):
-    today = date.today()
+    today = datetime.now(timezone(timedelta(hours=5, minutes=30))).date()
     if symbol == "BANKNIFTY":
         cal = calendar.monthcalendar(today.year, today.month)
         last_week = cal[-1]
@@ -124,7 +125,7 @@ def iv_rank(symbol, current_iv, db_path):
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS iv_history (
                  symbol TEXT, date DATE, atm_iv REAL, PRIMARY KEY(symbol, date))''')
-    today = date.today().isoformat()
+    today = datetime.now(timezone(timedelta(hours=5, minutes=30))).date().isoformat()
     if current_iv > 0:
         c.execute("INSERT OR REPLACE INTO iv_history VALUES (?, ?, ?)", (symbol, today, current_iv))
         conn.commit()
@@ -141,7 +142,7 @@ def iv_rank(symbol, current_iv, db_path):
     return ((current_iv - low) / (high - low)) * 100.0
 
 
-def chain_snapshot(symbol) -> pd.DataFrame:
+def chain_snapshot(symbol, target_expiries=None) -> pd.DataFrame:
     raw = option_chain(symbol)
     records = raw.get("records", {}).get("data", [])
     if not records:
@@ -154,12 +155,12 @@ def chain_snapshot(symbol) -> pd.DataFrame:
             try:
                 return datetime.strptime(s, fmt)
             except:
-                pass
+                    logging.getLogger(__name__).debug(f"Failed to parse expiry string: {s}")
         return datetime.max
     expiries.sort(key=parse_exp)
     # Issue #4: on expiry day, avoid 0-DTE chain (gamma risk / illiquidity);
     # prefer next week's expiry so signals are stable throughout the session.
-    today_local = date.today()
+    today_local = datetime.now(timezone(timedelta(hours=5, minutes=30))).date()
     def _is_today(s):
         try:
             return parse_exp(s).date() == today_local
@@ -168,15 +169,21 @@ def chain_snapshot(symbol) -> pd.DataFrame:
     non_zero_dte = [e for e in expiries if not _is_today(e)]
     closest_expiry = non_zero_dte[0] if non_zero_dte else expiries[0]
     underlying_value = raw.get("records", {}).get("underlyingValue", 0)
+    
+    valid_expiries = target_expiries if target_expiries else [closest_expiry]
+
     rows = []
-    tte_days = (parse_exp(closest_expiry).date() - date.today()).days
-    t = max(tte_days, 0.5) / 365.0
     r = 0.065
     vix_annual = 0.15
 
     for rec in records:
-        if rec.get("expiryDate") != closest_expiry:
+        exp_date_str = rec.get("expiryDate")
+        if exp_date_str not in valid_expiries:
             continue
+            
+        tte_days = (parse_exp(exp_date_str).date() - datetime.now(timezone(timedelta(hours=5, minutes=30))).date()).days
+        t = max(tte_days, 0.5) / 365.0
+        
         strike = rec.get("strikePrice")
         ce = rec.get("CE", {})
         pe = rec.get("PE", {})
@@ -192,26 +199,33 @@ def chain_snapshot(symbol) -> pd.DataFrame:
             if pe_iv <= 0:
                 pe_iv = vix_annual
             
+            ce_synthetic = False
+            pe_synthetic = False
+            
             if ce_ltp <= 0:
                 ce_ltp = round(_bs_price(underlying_value, strike, t, r, ce_iv, "CE"), 2)
+                ce_synthetic = True
             if pe_ltp <= 0:
                 pe_ltp = round(_bs_price(underlying_value, strike, t, r, pe_iv, "PE"), 2)
+                pe_synthetic = True
 
             ce_delta = _bs_delta(underlying_value, strike, t, r, ce_iv, "CE")
             pe_delta = _bs_delta(underlying_value, strike, t, r, pe_iv, "PE")
         rows.append({
             "strike": strike,
-            "expiry": closest_expiry,
+            "expiry": exp_date_str,
             "ce_oi": ce.get("openInterest", 0),
             "ce_vol": ce.get("totalTradedVolume", 0),
             "ce_iv": ce_iv,
             "ce_ltp": ce_ltp,
             "ce_delta": ce_delta,
+            "ce_synthetic": ce_synthetic if 'ce_synthetic' in locals() else False,
             "pe_oi": pe.get("openInterest", 0),
             "pe_vol": pe.get("totalTradedVolume", 0),
             "pe_iv": pe_iv,
             "pe_ltp": pe_ltp,
             "pe_delta": pe_delta,
+            "pe_synthetic": pe_synthetic if 'pe_synthetic' in locals() else False,
         })
     return pd.DataFrame(rows)
 
@@ -242,6 +256,10 @@ def is_within_entry_window(cfg: dict = None, now: datetime = None) -> Tuple[bool
     
     if now.weekday() >= 5:
         return False, "Weekend - market closed"
+
+    # Block entries on NSE holidays
+    if _is_holiday(now.date()):
+        return False, "Holiday - market closed"
     
     current_time = now.time()
     
@@ -271,7 +289,8 @@ def is_expiry_day(expiry_str: str) -> bool:
     """Check if today is expiry day for given expiry string."""
     try:
         exp_date = datetime.strptime(expiry_str, "%d-%b-%Y").date()
-        return exp_date == date.today()
+        today_ist = datetime.now(timezone(timedelta(hours=5, minutes=30))).date()
+        return exp_date == today_ist
     except:
         return False
 
@@ -293,6 +312,10 @@ def is_within_exit_window(cfg: dict = None, now: datetime = None, mode: str = "p
     
     if now.weekday() >= 5:
         return False, "Weekend"
+
+    # Block forced exits on NSE holidays (no market activity)
+    if _is_holiday(now.date()):
+        return False, "Holiday - market closed"
     
     current_time = now.time()
     

@@ -59,6 +59,11 @@ def _num(v, default=0.0) -> float:
     except (TypeError, ValueError):
         return default
 
+def _get_val(obj, key, default=None):
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
 def build_trade_verdict(data: dict) -> CombinedVerdict:
     regime = data.get("regime", {}) or {}
     flows = data.get("flows", {}) or {}
@@ -92,8 +97,8 @@ def build_trade_verdict(data: dict) -> CombinedVerdict:
     if source_errors: common_blocks.append("Source errors present")
     if vix >= 25: common_blocks.append("VIX extreme (>25)")
 
-    top_long = leaders[0].get("symbol") if leaders and isinstance(leaders[0], dict) else None
-    top_short = laggards[0].get("symbol") if laggards and isinstance(laggards[0], dict) else None
+    top_long = _get_val(leaders[0], "symbol") if leaders else None
+    top_short = _get_val(laggards[0], "symbol") if laggards else None
 
     # --- 1. DIRECTIONAL STOCK PICKING SYSTEM ---
     stock_action = "WAIT"
@@ -120,8 +125,8 @@ def build_trade_verdict(data: dict) -> CombinedVerdict:
             # Range regimes: directional stock picking only when leadership is
             # exceptionally strong.  Marginal setups bleed via EOD close in
             # choppy conditions.  Prefer option premium selling instead.
-            q5_longs = sum(1 for l in leaders if l.get("quintile", 0) == 5)
-            q5_shorts = sum(1 for l in laggards if l.get("quintile", 0) == 5)
+            q5_longs = sum(1 for l in leaders if _get_val(l, "quintile", 0) == 5)
+            q5_shorts = sum(1 for l in laggards if _get_val(l, "quintile", 0) == 5)
 
             # Gate: need >=5 Q5 names on at least one side to even consider
             if q5_longs >= 5 or q5_shorts >= 5:

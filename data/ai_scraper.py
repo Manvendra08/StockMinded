@@ -241,8 +241,8 @@ def _get_persistent_sentiment_cache() -> tuple[Optional[Any], float, float]:
             with open(cache_file, "r") as f:
                 data = json.load(f)
                 return data.get("sentiment"), data.get("timestamp", 0.0), data.get("expires_at", 0.0)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.exception("Failed to read persistent sentiment cache: %s", e)
     return None, 0.0, 0.0
 
 def _set_persistent_sentiment_cache(sentiment: Any, timestamp: float, ttl: float = 3600.0) -> None:
@@ -259,8 +259,8 @@ def _set_persistent_sentiment_cache(sentiment: Any, timestamp: float, ttl: float
                 "timestamp": timestamp,
                 "expires_at": timestamp + ttl
             }, f)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.exception("Failed to write persistent sentiment cache: %s", e)
 
 def _parse_rss_date(date_str: str) -> float:
     """Parse RFC 2822 date string to Unix timestamp. Returns 0.0 on failure."""

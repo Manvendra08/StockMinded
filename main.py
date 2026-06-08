@@ -7,9 +7,9 @@ Usage:
 """
 from __future__ import annotations
 
+import logging
 import signal
 import sys
-import traceback
 from datetime import datetime
 
 try:
@@ -108,9 +108,8 @@ def run_schedule(cfg: dict) -> None:
         def wrapped():
             try:
                 fn(cfg)
-            except Exception as e:
-                print(f"[{name}] failed: {e}")
-                traceback.print_exc()
+            except Exception:
+                logging.getLogger(__name__).exception("[%s] failed", name)
         return wrapped
 
     hh, mm = map(int, s["morning_dashboard"].split(":"))

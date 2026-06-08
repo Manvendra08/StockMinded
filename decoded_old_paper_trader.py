@@ -8,6 +8,7 @@ Data persisted to dashboard/paper_trades.json.
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import traceback
 from datetime import datetime, date, time, timezone, timedelta
@@ -74,8 +75,8 @@ def _load_db() -> dict:
     if DATA_FILE.exists():
         try:
             return json.loads(DATA_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            pass
+        except Exception as e:
+            logging.getLogger(__name__).exception("Failed to read paper trades DB: %s", e)
     return {
         "trades": [],
         "option_trades": [],
