@@ -213,18 +213,15 @@ def resolve_nifty_structure(setup: NiftyOptionSetup, chain: pd.DataFrame,
         setup.skip_reason = "No live option prices (chain source is OI-only — wait for market open)"
         return setup
         
-    # Guard: ensure we aren't relying entirely on synthetic Black-Scholes fallbacks
-    total_options = len(chain) * 2
-    synthetic_count = 0
-    if "ce_synthetic" in chain.columns:
-        synthetic_count += chain["ce_synthetic"].sum()
-    if "pe_synthetic" in chain.columns:
-        synthetic_count += chain["pe_synthetic"].sum()
-    
-    if total_options > 0 and (synthetic_count / total_options) > 0.5:
-        setup.suitable = False
-        setup.skip_reason = f"Too many synthetic option prices ({synthetic_count}/{total_options} > 50%). Chain data is stale or missing."
-        return setup
+    # Guard: ensure ATM options have live prices (not purely synthetic fallbacks)
+    atm_row = chain[chain["strike"] == atm]
+    if not atm_row.empty:
+        ce_syn = atm_row.iloc[0].get("ce_synthetic", False)
+        pe_syn = atm_row.iloc[0].get("pe_synthetic", False)
+        if ce_syn and pe_syn:
+            setup.suitable = False
+            setup.skip_reason = "ATM options lack live prices (fully synthetic). Chain data is stale or market closed."
+            return setup
 
     wing = setup.wing_width
     resolved_legs = []
@@ -369,7 +366,7 @@ def pick_structure(regime, bias, iv_rank, vix) -> Optional[OptionStructure]:
 
 
 def resolve_legs(structure: OptionStructure, chain: pd.DataFrame, spot: float,
-                  lot_size: int, strike_step: int) -> list[ResolvedLeg]:
+                  lot_size: int, strike_step: int, num_lots: int = 1) -> list[ResolvedLeg]:
     if chain.empty:
         return []
     strikes = sorted(chain["strike"].tolist())
@@ -393,5 +390,5 @@ def resolve_legs(structure: OptionStructure, chain: pd.DataFrame, spot: float,
         if row.empty:
             return []
         premium = row.iloc[0].get(f"{leg.option_type.lower()}_ltp", 0)
-        resolved.append(ResolvedLeg(leg.side, leg.option_type, target, row.iloc[0].get("expiry"), leg.qty_ratio, lot_size, premium))
+        resolved.append(ResolvedLeg(leg.side, leg.option_type, target, row.iloc[0].get("expiry"), leg.qty_ratio * num_lots, lot_size, premium))
     return resolved

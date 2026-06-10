@@ -62,6 +62,7 @@ DEFAULT_SETTINGS = {
     "smart_exit_trail_lock_pct": 30.0,       # Trail lock activation (% of max profit)
     "smart_exit_trail_floor_pct": 20.0,      # Trail lock floor (% of max profit)
     "smart_reentry_enabled": False,          # Re-entry (off by default)
+    "options_lots_per_trade": 1,             # Number of lots to trade per options order
     # ── Risk Gate (Guardrails) overrides ──────────────────────────
     "rg_daily_stop_pct": 0.02,       # 2% of capital = daily loss limit
     "rg_monthly_stop_pct": 0.06,     # 6% of capital = monthly loss limit
@@ -238,7 +239,7 @@ def save_settings(new_settings: dict) -> dict:
                             db["settings"][k] = float(v)
                         except (ValueError, TypeError):
                             pass
-                elif k in ("max_trades_per_day", "max_new_entries_per_cycle"):
+                elif k in ("max_trades_per_day", "max_new_entries_per_cycle", "options_lots_per_trade"):
                     if v is not None and str(v).strip() != "":
                         try:
                             db["settings"][k] = int(v)
@@ -537,7 +538,8 @@ def _build_option_price_map(open_ops: list[dict]) -> dict:
     for sym in underlyings:
         try:
             needed_expiries = list({leg["expiry"] for t in open_ops if t["symbol"] == sym for leg in t["legs"]})
-            chain = chain_snapshot(sym, target_expiries=needed_expiries)
+            needed_strikes = list({leg["strike"] for t in open_ops if t["symbol"] == sym for leg in t["legs"]})
+            chain = chain_snapshot(sym, target_expiries=needed_expiries, target_strikes=needed_strikes)
             if chain.empty: continue
             for trade in [t for t in open_ops if t["symbol"] == sym]:
                 for leg in trade["legs"]:
@@ -655,7 +657,8 @@ def check_option_exits() -> list[dict]:
             from signals.options import chain_snapshot, net_position_delta
             for sym in {t["symbol"] for t in open_ops}:
                 try:
-                    chain_cache[sym] = chain_snapshot(sym)
+                    needed_strikes = list({leg["strike"] for t in open_ops if t["symbol"] == sym for leg in t["legs"]})
+                    chain_cache[sym] = chain_snapshot(sym, target_strikes=needed_strikes)
                 except Exception as e:
                     logging.getLogger(__name__).exception("Failed to fetch chain_snapshot for %s: %s", sym, e)
         
@@ -742,7 +745,8 @@ def check_nifty_option_exits(vix_current: float = None, cfg: dict = None) -> lis
         if smart_enabled:
             from signals.options import chain_snapshot, net_position_delta
             try:
-                chain = chain_snapshot("NIFTY")
+                needed_strikes = list({leg["strike"] for t in open_nifty if t["symbol"] == "NIFTY" for leg in t["legs"]})
+                chain = chain_snapshot("NIFTY", target_strikes=needed_strikes)
             except Exception as e:
                 logging.getLogger(__name__).exception("Failed to fetch NIFTY chain_snapshot: %s", e)
 
@@ -848,6 +852,13 @@ def get_nifty_option_setups(data: dict, cfg: dict = None) -> list[dict]:
     if cfg is None:
         from config.loader import load_config
         cfg = load_config()
+        
+    # Inject options lot size from UI settings
+    db = _load_db()
+    settings = db.get("settings", {})
+    if "nifty_options" not in cfg:
+        cfg["nifty_options"] = {}
+    cfg["nifty_options"]["min_lots_per_leg"] = settings.get("options_lots_per_trade", 1)
     
     journal = Journal(cfg["paths"]["journal_db"])
     setups = []
@@ -971,20 +982,21 @@ def check_and_close_trades() -> list[dict]:
             if any(k not in trade for k in ["sl_price", "tgt_price", "direction"]):
                 continue
 
-            # Trailing stop logic (lock in 50% max gains)
+            # Trailing stop logic (Standard trailing stop maintaining sl_pct buffer behind peak)
             if settings.get("trail_sl", True):
                 if "peak_price" not in trade:
                     trade["peak_price"] = trade["entry_price"]
+                sl_pct = trade.get("sl_pct", settings.get("sl_pct", 2.0))
                 if direction == "LONG":
                     if ltp > trade["peak_price"]:
                         trade["peak_price"] = ltp
-                        new_sl = trade["entry_price"] + (ltp - trade["entry_price"]) * 0.5
+                        new_sl = ltp * (1 - sl_pct / 100)
                         if new_sl > trade["sl_price"]:
                             trade["sl_price"] = round(new_sl, 2)
                 else:
                     if ltp < trade["peak_price"]:
                         trade["peak_price"] = ltp
-                        new_sl = trade["entry_price"] - (trade["entry_price"] - ltp) * 0.5
+                        new_sl = ltp * (1 + sl_pct / 100)
                         if new_sl < trade["sl_price"]:
                             trade["sl_price"] = round(new_sl, 2)
 
@@ -1605,6 +1617,10 @@ def _normalize_option_trade_for_ui(trade: dict, settings: dict | None = None) ->
         else:
             normalized.setdefault("sl_price", round(float(entry_price) * (1 - sl_pct), 2))
             normalized.setdefault("tgt_price", round(float(entry_price) * (1 + tgt_pct), 2))
+
+    pnl = normalized.get("pnl")
+    if pnl is not None and entry_price is not None:
+        normalized.setdefault("exit_premium", round(entry_price - pnl, 2))
 
     return normalized
 

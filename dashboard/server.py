@@ -62,6 +62,16 @@ def _journal_trade_to_ui_trade(row: dict) -> dict:
     opened_at = str(row.get("opened_at") or "")
     closed_at = str(row.get("closed_at") or "")
     side = str(row.get("side") or "LONG").upper()
+
+    def _to_ist(dt_str: str) -> str | None:
+        if not dt_str: return None
+        try:
+            clean = dt_str.replace("Z", "").replace("T", " ")[:19]
+            dt = datetime.strptime(clean, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+            ist = timezone(timedelta(hours=5, minutes=30))
+            return dt.astimezone(ist).strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return dt_str.replace("T", " ")[:19]
     entry = row.get("entry")
     exit_price = row.get("exit_price")
     qty = int(row.get("qty") or 0)
@@ -89,9 +99,9 @@ def _journal_trade_to_ui_trade(row: dict) -> dict:
         "status": "CLOSED" if closed_at else "OPEN",
         "exit_reason": "CLOSED" if closed_at else "OPEN",
         "confidence": "MEDIUM",
-        "entry_date": opened_at[:10] if opened_at else None,
-        "entry_time": opened_at.replace("T", " ")[:19] if opened_at else None,
-        "exit_time": closed_at.replace("T", " ")[:19] if closed_at else None,
+        "entry_date": _to_ist(opened_at)[:10] if opened_at else None,
+        "entry_time": _to_ist(opened_at),
+        "exit_time": _to_ist(closed_at),
         "structure": row.get("structure"),
         "notes": row.get("notes"),
         "source": "journal",
@@ -101,7 +111,7 @@ def _journal_trade_to_ui_trade(row: dict) -> dict:
     }
 
 
-def _merged_paper_trades(limit: int = 100) -> list[dict]:
+def _merged_paper_trades(limit: int = 100) -> tuple[list[dict], list[dict]]:
     """Return stock journal trades plus paper-trader trades in one feed."""
     trades = []
     try:
@@ -110,12 +120,21 @@ def _merged_paper_trades(limit: int = 100) -> list[dict]:
     except Exception:
         traceback.print_exc()
     try:
-        trades.extend(pt.get_all_trades(limit=limit))
+        trades.extend(pt.get_all_trades(limit=999999))
     except Exception:
         traceback.print_exc()
 
-    trades.sort(key=lambda t: str(t.get("entry_time") or t.get("entry_date") or ""))
-    return list(reversed(trades[-limit:]))
+    # Deduplicate: paper trades store 'journal_id' which maps to journal trade 'id'
+    seen_jids = set()
+    for t in trades:
+        if t.get("source") != "journal" and "journal_id" in t:
+            seen_jids.add(t["journal_id"])
+
+    deduped = [t for t in trades if not (t.get("source") == "journal" and t.get("id") in seen_jids)]
+    deduped.sort(key=lambda t: str(t.get("entry_time") or t.get("entry_date") or ""))
+    
+    full_history = list(reversed(deduped))
+    return full_history, full_history[:limit]
 
 
 def _merged_open_trades() -> list[dict]:
@@ -130,7 +149,14 @@ def _merged_open_trades() -> list[dict]:
         trades.extend(pt.get_open_trades())
     except Exception:
         traceback.print_exc()
-    return trades
+        
+    # Deduplicate by journal_id
+    seen_jids = set()
+    for t in trades:
+        if t.get("source") != "journal" and "journal_id" in t:
+            seen_jids.add(t["journal_id"])
+
+    return [t for t in trades if not (t.get("source") == "journal" and t.get("id") in seen_jids)]
 
 
 def _market_status_now() -> dict:
@@ -498,9 +524,9 @@ def _generate_trade_alerts(data: dict) -> list[dict]:
     allow_longs = can_trade_equity and stock_action in ("LONG_ONLY", "LONG_AND_SHORT")
     allow_shorts = can_trade_equity and stock_action in ("SHORT_ONLY", "LONG_AND_SHORT")
     
-    # 2. Time filter: avoid entries after 14:45 to reduce EOD churn
+    # 2. Time filter: avoid entries after 15:00 to reduce EOD churn
     now_ist = datetime.now(timezone(timedelta(hours=5, minutes=30)))
-    if (now_ist.hour, now_ist.minute) >= (14, 45):
+    if (now_ist.hour, now_ist.minute) > (15, 0):
         allow_longs = False
         allow_shorts = False
         can_trade_options = False
@@ -945,15 +971,15 @@ def paper_page():
 def api_paper_trades():
     """Get all trades (open first, then recent closed)."""
     try:
-        trades = _merged_paper_trades(limit=100)
-        closed_trades = [t for t in trades if t.get("status") == "CLOSED"]
+        full_history, display_trades = _merged_paper_trades(limit=100)
+        closed_trades = [t for t in full_history if t.get("status") == "CLOSED"]
         winners = [t for t in closed_trades if (t.get("pnl") or 0) > 0]
         losers = [t for t in closed_trades if (t.get("pnl") or 0) < 0]
         resolved_trades = [t for t in closed_trades if (t.get("pnl") or 0) != 0]
 
         stats = {
-            "total_trades": len(trades),
-            "open_trades": len([t for t in trades if t.get("status") == "OPEN"]),
+            "total_trades": len(full_history),
+            "open_trades": len([t for t in full_history if t.get("status") == "OPEN"]),
             "cumulative_pnl": round(sum(t.get("pnl", 0) or 0 for t in closed_trades), 2),
             "overall_win_rate": round(
                 len(winners)
@@ -967,7 +993,7 @@ def api_paper_trades():
             "avg_winner": round(sum(t.get("pnl", 0) or 0 for t in winners) / max(len(winners), 1), 2) if winners else 0.0,
             "avg_loser": round(sum(t.get("pnl", 0) or 0 for t in losers) / max(len(losers), 1), 2) if losers else 0.0,
         }
-        return jsonify({"trades": trades, "stats": stats})
+        return jsonify({"trades": display_trades, "stats": stats})
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -1192,6 +1218,27 @@ def api_options_structures():
     try:
         db = pt._load_db()
         ops = db.get("option_trades", [])
+        
+        # Enrich open option trades with live premiums and P&L
+        open_ops = [t for t in ops if t.get("status") == "OPEN"]
+        if open_ops:
+            try:
+                price_map = pt._build_option_price_map(open_ops)
+                for t in open_ops:
+                    current_net = pt._option_net_premium(t["legs"], price_map)
+                    
+                    # Store current premium for each leg
+                    for leg in t["legs"]:
+                        key = (leg["strike"], leg["expiry"], leg["type"])
+                        leg["current_premium"] = price_map.get(key)
+                    
+                    if current_net is not None:
+                        t["current_net_premium"] = current_net
+                        entry_net = t.get("net_premium") or t.get("net_credit") or 0.0
+                        t["pnl"] = round(entry_net - current_net, 2)
+            except Exception as e:
+                logging.getLogger(__name__).exception("Failed to enrich open option trades: %s", e)
+                
         return jsonify({"option_trades": ops})
     except Exception as e:
         traceback.print_exc()
@@ -1429,7 +1476,8 @@ def _automation_worker():
                                     if struct:
                                         lot_sz = cfg.get("options", {}).get("lot_size", {}).get(sym, 50)
                                         step = cfg.get("options", {}).get("strike_step", {}).get(sym, 50)
-                                        legs = resolve_legs(struct, chain, spot, lot_sz, step)
+                                        num_lots = pt.get_settings().get("options_lots_per_trade", 1)
+                                        legs = resolve_legs(struct, chain, spot, lot_sz, step, num_lots=num_lots)
                                         if legs:
                                             res = pt.enter_option_structure(struct.name, legs, sym, cfg)
                                             if "error" not in res:

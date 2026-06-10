@@ -719,7 +719,11 @@ def _r360_to_nse_chain(symbol: str, raw: dict, expiry: str) -> dict:
     ltp_ce: dict[float, float] = {}
     ltp_pe: dict[float, float] = {}
     for i, s in enumerate(graphprice):
-        key = float(s)
+        try:
+            key = float(s)
+        except (TypeError, ValueError):
+            continue
+            
         if i < len(graphc_arr) and graphc_arr[i] is not None:
             try:
                 ltp_ce[key] = float(graphc_arr[i])
@@ -1367,7 +1371,7 @@ def fii_dii_cash(days: int = 10) -> pd.DataFrame:
         cols = [c.lower() for c in df.columns]
         if "segment" in cols:
             seg_col = df.columns[cols.index("segment")]
-            df = df[df[seg_col].str.lower().str.contains("cash", na=False)]
+            df = df[df[seg_col].astype(str).str.lower().str.contains("cash", na=False)]
         
         # Sort chronologically
         df = df.sort_values("date").reset_index(drop=True)

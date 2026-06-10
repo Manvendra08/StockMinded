@@ -916,6 +916,7 @@ body::before {
             <th>Structure</th>
             <th>Legs</th>
             <th style="text-align: right;">Net Premium</th>
+            <th style="text-align: right;">CMP</th>
             <th style="text-align: right;">P&L</th>
             <th>Time</th>
             <th>Status</th>
@@ -1125,6 +1126,10 @@ body::before {
           <div class="field-row">
             <span class="field-label">Option Target %<br><span style="font-weight:400;color:var(--text-muted)">Default 50% of premium</span></span>
             <input type="number" id="set-options-tgt" class="input-sm" step="5" placeholder="e.g. 50">
+          </div>
+          <div class="field-row">
+            <span class="field-label">Number of Lots per Option Trade<br><span style="font-weight:400;color:var(--text-muted)">Multiplier for option orders</span></span>
+            <input type="number" id="set-options-lots" class="input-sm" step="1" min="1" placeholder="e.g. 1">
           </div>
           <div class="field-row">
             <span class="field-label">Min. Confidence</span>
@@ -1498,10 +1503,18 @@ async function loadStats() {
     const pf = grossLoss > 0 ? (grossWin / grossLoss).toFixed(2) : (grossWin > 0 ? '∞' : '0.00');
     document.getElementById('s-pf').textContent = pf;
     
-    const resOpen = await fetch('/api/paper/open');
-    const dataOpen = await resOpen.json();
+    const [resOpen, resOps] = await Promise.all([
+      fetch('/api/paper/open'),
+      fetch('/api/options/structures')
+    ]);
+    const [dataOpen, dataOps] = await Promise.all([
+      resOpen.json(),
+      resOps.json()
+    ]);
     const openTrades = dataOpen.trades || [];
-    const totalUnrealized = openTrades.reduce((sum, t) => sum + (t.unrealized_pnl || 0), 0);
+    const openOps = (dataOps.option_trades || []).filter(t => t.status === 'OPEN');
+    const totalUnrealized = openTrades.reduce((sum, t) => sum + (t.unrealized_pnl || 0), 0) + 
+                           openOps.reduce((sum, t) => sum + (t.pnl || 0), 0);
     document.getElementById('s-unrealized').innerHTML = `Live P&L: ${colorPnl(totalUnrealized)}`;
 
     document.getElementById('s-avgw').innerHTML = colorPnl(stats.avg_winner);
@@ -1566,6 +1579,7 @@ async function loadSettings() {
     document.getElementById('set-tgt').value = s.tgt_pct;
     document.getElementById('set-options-sl').value = s.options_sl_pct !== undefined ? s.options_sl_pct : 125;
     document.getElementById('set-options-tgt').value = s.options_tgt_pct !== undefined ? s.options_tgt_pct : 50;
+    document.getElementById('set-options-lots').value = s.options_lots_per_trade !== undefined ? s.options_lots_per_trade : 1;
     document.getElementById('set-conf').value = s.min_confidence;
     document.getElementById('set-regime').checked = s.regime_filter;
     if (document.getElementById('set-eod')) {
@@ -1603,6 +1617,7 @@ async function saveSettings(btn) {
       tgt_pct: parseFloat(document.getElementById('set-tgt').value),
       options_sl_pct: parseFloat(document.getElementById('set-options-sl').value) || 125,
       options_tgt_pct: parseFloat(document.getElementById('set-options-tgt').value) || 50,
+      options_lots_per_trade: parseInt(document.getElementById('set-options-lots').value, 10) || 1,
       min_confidence: document.getElementById('set-conf').value,
       regime_filter: document.getElementById('set-regime').checked,
       auto_close_eod: document.getElementById('set-eod') ? document.getElementById('set-eod').checked : true,
@@ -2152,7 +2167,9 @@ async function loadOptions() {
         const actionClass = isSell ? 'leg-sell' : 'leg-buy';
         const actionLabel = isSell ? 'SELL' : 'BUY';
         const priceLabel = l.exit_premium !== null && l.exit_premium !== undefined ? 
-          `@ ${l.entry_premium} → ${l.exit_premium}` : `@ ${l.entry_premium}`;
+          `@ ${l.entry_premium} → ${l.exit_premium}` : 
+          (l.current_premium !== null && l.current_premium !== undefined ? 
+            `@ ${l.entry_premium} (CMP: ${l.current_premium})` : `@ ${l.entry_premium}`);
           
         return `<div class="option-leg-item ${actionClass}">
           <span class="leg-action">${actionLabel}</span>
@@ -2165,6 +2182,10 @@ async function loadOptions() {
       
       const premiumValue = t.net_premium !== undefined && t.net_premium !== null ? t.net_premium : t.net_credit;
       const displayPremium = fmtInr(premiumValue);
+      const displayCmp = t.status === 'OPEN' ? 
+        (t.current_net_premium !== undefined && t.current_net_premium !== null ? fmtInr(t.current_net_premium) : '—') : 
+        (t.exit_premium !== undefined && t.exit_premium !== null ? fmtInr(t.exit_premium) : 
+          (t.pnl !== undefined && t.pnl !== null ? fmtInr(premiumValue - t.pnl) : '—'));
       const displayPnl = colorPnl(t.pnl);
       const entryTime = t.entry_date && t.entry_time ? `${t.entry_date.slice(8,10)}/${t.entry_date.slice(5,7)} ${t.entry_time.split(' ')[1].slice(0,5)}` : '—';
       const actionHtml = t.status === 'OPEN' ? 
@@ -2177,6 +2198,7 @@ async function loadOptions() {
         <td><span class="badge ${t.structure.includes('BULL') ? 'badge-green' : (t.structure.includes('BEAR') ? 'badge-red' : 'badge-blue')}">${t.structure}</span></td>
         <td><div style="display:flex; flex-direction:column; gap:4px;">${legsHtml}</div></td>
         <td style="text-align: right; font-family:var(--mono);">${displayPremium}</td>
+        <td style="text-align: right; font-family:var(--mono);">${displayCmp}</td>
         <td style="text-align: right; font-family:var(--mono);" class="pnl-cell">${displayPnl}</td>
         <td class="muted" style="font-size:0.72rem;">${entryTime}</td>
         <td><span class="badge ${t.status==='OPEN' ? 'badge-amber' : 'badge-green'}">${t.status}</span></td>

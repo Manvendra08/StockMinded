@@ -3,9 +3,15 @@ from __future__ import annotations
 
 import os
 import logging
+import json
+import re
+import urllib.parse
+import xml.etree.ElementTree as ET
 from typing import Any, Optional
 from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import requests
 from scrapegraphai.graphs import SmartScraperGraph, SearchGraph
 try:
     from scrapegraph_py import ScrapeGraphAI as ScrapeGraphSaaS
@@ -157,17 +163,13 @@ def search_and_scrape(query: str, prompt: str) -> Any:
     if config.get("local") and config["local"]["llm"].get("api_key"):
         try:
             logger.info(f"AI Local RSS Fallback started for query: {query}")
-            import urllib.request
-            import urllib.parse
-            import xml.etree.ElementTree as ET
-            import json
 
             # 1. Fetch RSS from Google News
             rss_query = urllib.parse.quote(query)
             rss_url = f"https://news.google.com/rss/search?q={rss_query}&hl=en-IN&gl=IN&ceid=IN:en"
-            req = urllib.request.Request(rss_url, headers={'User-Agent': 'Mozilla/5.0'})
-            resp = urllib.request.urlopen(req, timeout=10)
-            root = ET.fromstring(resp.read())
+            resp = requests.get(rss_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
+            resp.raise_for_status()
+            root = ET.fromstring(resp.content)
 
             news_items = []
             for item in root.findall('.//item')[:15]:
@@ -193,11 +195,12 @@ def search_and_scrape(query: str, prompt: str) -> Any:
                 "generationConfig": {"response_mime_type": "application/json"}
             }
             
-            greio = urllib.request.Request(gemini_url, data=json.dumps(payload).encode('utf-8'), headers={'Content-Type': 'application/json'})
-            gresp = urllib.request.urlopen(greio, timeout=15)
-            res = json.loads(gresp.read())
+            gresp = requests.post(gemini_url, json=payload, timeout=15)
+            gresp.raise_for_status()
+            res = gresp.json()
+            candidates = res.get("candidates", [])
+            text_resp = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "") if candidates else ""
             
-            text_resp = res.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
             if text_resp:
                 try:
                     return json.loads(text_resp)
@@ -515,31 +518,51 @@ def analyze_sentiment_locally(headlines: list[tuple[str, str]]) -> dict:
     }
 
 
-def fetch_tradingview_news(symbols: list[str] = None) -> list[tuple[str, str]]:
+def _fetch_and_parse_rss(query: str, recency_cutoff: float) -> list[tuple[str, str]]:
+    """Fetch and parse a single Google News RSS feed."""
+    headlines = []
+    try:
+        rss_query = urllib.parse.quote(query)
+        rss_url = (
+            f"https://news.google.com/rss/search?q={rss_query}"
+            "&hl=en-IN&gl=IN&ceid=IN:en"
+        )
+        resp = requests.get(rss_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+        resp.raise_for_status()
+        root = ET.fromstring(resp.content)
+
+        for item in root.findall(".//item"):
+            title_el = item.find("title")
+            date_el = item.find("pubDate")
+            title = title_el.text.strip() if title_el is not None and title_el.text else ""
+            pub_date = date_el.text.strip() if date_el is not None and date_el.text else ""
+            if not title or _is_noise_headline(title) or _is_low_value_headline(title):
+                continue
+            if pub_date and (pub_ts := _parse_rss_date(pub_date)) > 0 and pub_ts < recency_cutoff:
+                continue
+            headlines.append((title, pub_date))
+            if len(headlines) >= 20:
+                break
+    except Exception as e:
+        logger.warning(f"RSS fetch for query '{query}' failed: {e}")
+    return headlines
+
+
+def _fetch_tradingview_news(symbols: list[str] = None) -> list[tuple[str, str]]:
     """Fetch recent headlines from TradingView news-flow for Indian symbols.
     
     Args:
         symbols: List of NSE symbols (e.g., ["NIFTY", "BANKNIFTY"]). 
                 Fetches from news-flow for primary symbol.
-    
-    Returns:
-        List of (headline, timestamp) tuples from TradingView.
     """
     if not symbols:
         symbols = ["NIFTY"]
-    
     headlines = []
     symbol = symbols[0]  # Use primary symbol for news-flow
     url = f"https://in.tradingview.com/news-flow/?symbol=NSE:{symbol}"
     
     try:
         logger.info(f"Fetching TradingView news-flow for {symbol}...")
-        import urllib.request
-        import json
-        import re
-        from time import time
-        
-        # Use fetch_webpage-style request with modern headers
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
@@ -549,10 +572,9 @@ def fetch_tradingview_news(symbols: list[str] = None) -> list[tuple[str, str]]:
             "Upgrade-Insecure-Requests": "1"
         }
         
-        req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            html_content = resp.read().decode('utf-8')
-        
+        resp = requests.get(url, headers=headers, timeout=15)
+        resp.raise_for_status()
+        html_content = resp.text
         # Extract news items from DOM using regex patterns
         # TradingView news items have timestamp, headline, provider in divs/spans
         # Pattern: capture headline text, timestamp, and provider
@@ -612,7 +634,7 @@ def fetch_tradingview_news(symbols: list[str] = None) -> list[tuple[str, str]]:
     return headlines
 
 
-def get_market_news_sentiment(query: str = "Nifty BankNifty stock market India today") -> Optional[dict]:
+def get_market_news_sentiment() -> Optional[dict]:
     """Fetch market news via RSS, summarize sentiment via Gemini or local lexicon fallback.
 
     Pipeline:
@@ -635,92 +657,32 @@ def get_market_news_sentiment(query: str = "Nifty BankNifty stock market India t
         )
         return cached_val
 
-    # 1. Fetch RSS from Google News
+    # 1. Fetch headlines from all sources in parallel
     headlines: list[tuple[str, str]] = []
     recency_cutoff = now - 36 * 3600  # Last 36 hours only
-    try:
-        import urllib.request
-        import urllib.parse
-        import xml.etree.ElementTree as ET
+    
+    queries = [
+        "Nifty BankNifty stock market India today",
+        "Indian stock market corporate news earnings",
+        "Indian economy OR corporate earnings OR RBI OR SEBI",
+    ]
 
-        rss_query = urllib.parse.quote(query)
-        rss_url = (
-            f"https://news.google.com/rss/search?q={rss_query}"
-            "&hl=en-IN&gl=IN&ceid=IN:en"
-        )
-        req = urllib.request.Request(rss_url, headers={"User-Agent": "Mozilla/5.0"})
-        resp = urllib.request.urlopen(req, timeout=10)
-        root = ET.fromstring(resp.read())
+    with ThreadPoolExecutor(max_workers=len(queries) + 1) as executor:
+        future_to_source = {
+            executor.submit(_fetch_and_parse_rss, q, recency_cutoff): f"google_rss_{i}"
+            for i, q in enumerate(queries)
+        }
+        future_to_source[executor.submit(_fetch_tradingview_news, ["NIFTY", "BANKNIFTY"])] = "tradingview"
 
-        for item in root.findall(".//item"):
-            title_el = item.find("title")
-            date_el = item.find("pubDate")
-            title = title_el.text.strip() if title_el is not None and title_el.text else ""
-            pub_date = date_el.text.strip() if date_el is not None and date_el.text else ""
-            if not title or _is_noise_headline(title) or _is_low_value_headline(title):
-                continue
-
-            # Filter stale headlines
-            if pub_date:
-                pub_ts = _parse_rss_date(pub_date)
-                if pub_ts > 0 and pub_ts < recency_cutoff:
-                    continue
-
-            headlines.append((title, pub_date))
-            if len(headlines) >= 20:
-                break
-
-    except Exception as e:
-        logger.error(f"Failed to fetch Google News RSS: {e}")
-
-    # 1b. Fetch TradingView news to supplement Google News
-    try:
-        logger.info("Fetching TradingView news-flow headlines...")
-        tv_headlines = fetch_tradingview_news(["NIFTY", "BANKNIFTY"])
-        headlines.extend(tv_headlines)
-        logger.info(f"Added {len(tv_headlines)} TradingView headlines (total: {len(headlines)})")
-    except Exception as e:
-        logger.error(f"TradingView news fetch failed: {e}")
-
-    # Self-healing Fallback: If primary daily-wrap query is 100% filtered out as noise,
-    # try high-quality business, corporate, and macroeconomic queries.
-    if not headlines:
-        fallback_queries = [
-            "Indian stock market corporate news earnings",
-            "Indian economy OR corporate earnings OR RBI OR SEBI"
-        ]
-        import urllib.request
-        import urllib.parse
-        import xml.etree.ElementTree as ET
-        
-        for f_query in fallback_queries:
+        for future in as_completed(future_to_source):
+            source_name = future_to_source[future]
             try:
-                logger.info(f"Primary news query yielded 0 headlines. Trying fallback query: '{f_query}'")
-                rss_query = urllib.parse.quote(f_query)
-                rss_url = f"https://news.google.com/rss/search?q={rss_query}&hl=en-IN&gl=IN&ceid=IN:en"
-                req = urllib.request.Request(rss_url, headers={"User-Agent": "Mozilla/5.0"})
-                resp = urllib.request.urlopen(req, timeout=10)
-                root = ET.fromstring(resp.read())
-                
-                for item in root.findall(".//item"):
-                    title_el = item.find("title")
-                    date_el = item.find("pubDate")
-                    title = title_el.text.strip() if title_el is not None and title_el.text else ""
-                    pub_date = date_el.text.strip() if date_el is not None and date_el.text else ""
-                    if not title or _is_noise_headline(title) or _is_low_value_headline(title):
-                        continue
-                    if pub_date:
-                        pub_ts = _parse_rss_date(pub_date)
-                        if pub_ts > 0 and pub_ts < recency_cutoff:
-                            continue
-                    headlines.append((title, pub_date))
-                    if len(headlines) >= 20:
-                        break
-                if headlines:
-                    logger.info(f"Successfully recovered {len(headlines)} headlines using fallback query '{f_query}'")
-                    break
-            except Exception as fe:
-                logger.error(f"Fallback news query '{f_query}' failed: {fe}")
+                result = future.result()
+                if result:
+                    headlines.extend(result)
+                    logger.info(f"Source '{source_name}' contributed {len(result)} headlines.")
+            except Exception as exc:
+                logger.error(f"Source '{source_name}' generated an exception: {exc}")
 
     headlines = _dedupe_headlines(headlines)
     if not headlines:
@@ -733,7 +695,7 @@ def get_market_news_sentiment(query: str = "Nifty BankNifty stock market India t
         _set_persistent_sentiment_cache(fallback, now, ttl=900.0)
         return fallback
 
-    logger.info(f"Fetched {len(headlines)} recent headlines from Google News RSS")
+    logger.info(f"Fetched a total of {len(headlines)} unique headlines for analysis.")
 
     # 2. Attempt Gemini API summarization
     config = _get_ai_config()
@@ -743,7 +705,6 @@ def get_market_news_sentiment(query: str = "Nifty BankNifty stock market India t
     if config and config.get("local") and config["local"]["llm"].get("api_key"):
         try:
             logger.info("Attempting Gemini API sentiment analysis on RSS news...")
-            import json
 
             api_key = config["local"]["llm"]["api_key"]
             model_raw = config["local"]["llm"].get("model", "gemini-1.5-flash")
@@ -764,7 +725,7 @@ def get_market_news_sentiment(query: str = "Nifty BankNifty stock market India t
                 "1. 'overall_market_sentiment': Must be one of: BULLISH, BEARISH, or NEUTRAL.\n"
                 "2. 'justification': A sharp, 1-2 sentence market strategist summary explaining the primary driver of today's price action.\n"
                 "3. 'top_catalysts': List of 2-3 specific macro or micro-economic drivers (e.g., earnings beats, FII buying, global cues).\n"
-                "4. 'actionable_trade_ideas': List of 2-3 concrete trading ideas based on broker upgrades, breakout patterns, or corporate actions mentioned in the news, specifying tickers if available."
+                "4. 'actionable_trade_ideas': List of 2-3 concrete trading ideas. You MUST specify a clear DIRECTION (LONG/SHORT) and a specific TICKER for each idea (e.g., 'LONG SBIN' or 'SHORT HDFCBANK'). Do not provide vague sector-only recommendations without a ticker."
             )
             full_prompt = f"{prompt}\n\nHere are the latest news headlines:\n{news_text}"
 
@@ -773,24 +734,18 @@ def get_market_news_sentiment(query: str = "Nifty BankNifty stock market India t
                 "generationConfig": {"response_mime_type": "application/json"},
             }
 
-            greio = urllib.request.Request(
-                gemini_url,
-                data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
-            )
-            gresp = urllib.request.urlopen(greio, timeout=12)
-            res = json.loads(gresp.read())
-
-            text_resp = (
-                res.get("candidates", [{}])[0]
-                .get("content", {})
-                .get("parts", [{}])[0]
-                .get("text", "")
-            )
-            if text_resp:
-                sentiment = json.loads(text_resp)
-                gemini_success = True
-                logger.info("Successfully generated sentiment via Gemini API!")
+            gresp = requests.post(gemini_url, json=payload, timeout=15)
+            gresp.raise_for_status()
+            res = gresp.json()
+            candidates = res.get("candidates", [])
+            if candidates:
+                text_resp = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+                if text_resp:
+                    sentiment = json.loads(text_resp)
+                    gemini_success = True
+                    logger.info("Successfully generated sentiment via Gemini API!")
+            else:
+                logger.warning("Gemini returned empty candidates (possibly blocked by safety filters).")
         except Exception as e:
             logger.warning(f"Gemini API analysis failed: {e}")
 
@@ -801,4 +756,3 @@ def get_market_news_sentiment(query: str = "Nifty BankNifty stock market India t
 
     _set_persistent_sentiment_cache(sentiment, now, ttl=3600.0)
     return sentiment
-

@@ -142,9 +142,10 @@ def iv_rank(symbol, current_iv, db_path):
     return ((current_iv - low) / (high - low)) * 100.0
 
 
-def chain_snapshot(symbol, target_expiries=None) -> pd.DataFrame:
+def chain_snapshot(symbol, target_expiries=None, target_strikes=None) -> pd.DataFrame:
     raw = option_chain(symbol)
     records = raw.get("records", {}).get("data", [])
+    underlying_value = raw.get("records", {}).get("underlyingValue") or 0.0
     if not records:
         return pd.DataFrame()
     expiries = list(set(r.get("expiryDate") for r in records if "expiryDate" in r))
@@ -168,7 +169,6 @@ def chain_snapshot(symbol, target_expiries=None) -> pd.DataFrame:
             return False
     non_zero_dte = [e for e in expiries if not _is_today(e)]
     closest_expiry = non_zero_dte[0] if non_zero_dte else expiries[0]
-    underlying_value = raw.get("records", {}).get("underlyingValue", 0)
     
     valid_expiries = target_expiries if target_expiries else [closest_expiry]
 
@@ -181,10 +181,13 @@ def chain_snapshot(symbol, target_expiries=None) -> pd.DataFrame:
         if exp_date_str not in valid_expiries:
             continue
             
+        strike = rec.get("strikePrice")
+        if target_strikes is not None and strike not in target_strikes:
+            continue
+            
         tte_days = (parse_exp(exp_date_str).date() - datetime.now(timezone(timedelta(hours=5, minutes=30))).date()).days
         t = max(tte_days, 0.5) / 365.0
         
-        strike = rec.get("strikePrice")
         ce = rec.get("CE", {})
         pe = rec.get("PE", {})
         ce_iv = ce.get("impliedVolatility", 0) / 100.0

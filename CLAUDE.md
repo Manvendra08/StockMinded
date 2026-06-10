@@ -191,15 +191,20 @@ Allows sensitive secrets to stay out of version control.
 - `check_option_exits()` market-hours gate + mark-to-market via fresh chain snapshot, exits on SL_HIT_NET / TGT_HIT_NET / GAMMA_SQOFF (≤30 min to 15:30) / EXPIRY_SETTLE
 - P&L formula: `entry_net_debit - current_net_premium` (both sign convention: BUY=-qty*price, SELL=+qty*price)
 - Trade schema: legs array, entry/current/exit premiums per leg, net P&L
+- **Smart Exits**: Implements VIX spike exits, delta breach checks, strike breaches, and theta trail locks.
+- **Risk Guardrails**: Honors real-time config updates (from UI) for daily limits, concurrent risk, and margin.
 
 **`dashboard/server.py`** updates:
 - Routes: `/api/options/chain/<symbol>`, `/api/options/structures`, `/api/options/trades`, `POST /api/options/auto-enter`
 - `_automation_worker` auto-enters structures during market hours if enabled in config
 - Per-leg Telegram alerts via `_format_option_alert(trade)`
 - EOD summary includes option P&L
+- Exposes new endpoints for skipped trades (`/api/paper/skipped`) and verdict tracing (`verdict_trace`).
 
 **`dashboard/paper.html`**:
-- NEW "OPTION TRADES" tab with collapsible legs, live mark, unrealized P&L, SL/TGT display, age
+- "OPTION TRADES" tab with collapsible legs, live mark, unrealized P&L, SL/TGT display, age.
+- "DIAGNOSTICS" tab featuring the Verdict Engine Trace and Skip Log (blocks/reasons).
+- "MAINTENANCE" tab for dynamic Trading Settings, Smart Exits, and Risk Gate configuration.
 
 **`config/config.yaml`** additions:
 ```yaml
