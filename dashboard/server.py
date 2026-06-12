@@ -43,6 +43,7 @@ app.json.ensure_ascii = False  # Allow native UTF-8 (like Rupee symbol) in JSON 
 # -- cache in memory so refresh is instant after first load --------
 _cache: dict = {}
 _cache_ts: datetime | None = None
+_cache_lock = __import__("threading").Lock()
 
 
 def _load_journal_trade_rows() -> list[dict]:
@@ -183,9 +184,14 @@ def _run_engine() -> dict:
     global _cache, _cache_ts
 
     # Re-use if less than 2 min old
-    if _cache_ts and (datetime.now() - _cache_ts).total_seconds() < 120:
+    # Note: guarded by _cache_lock because dashboard endpoints + background worker may call _run_engine concurrently.
+    with _cache_lock:
+        cache_ts = _cache_ts
+        cache_val = _cache
+
+    if cache_ts and (datetime.now() - cache_ts).total_seconds() < 120:
         # Always refresh live fields so UI never shows stale ts / market flag.
-        return {**_cache, **_market_status_now()}
+        return {**cache_val, **_market_status_now()}
 
     cfg = load_config()
     universe = load_universe(cfg)
@@ -464,8 +470,9 @@ def _run_engine() -> dict:
     # distinct from wall-clock ts (which updates every request).
     result["signals_computed_at"] = status["ts"]
     result = _make_safe(result)
-    _cache = result
-    _cache_ts = datetime.now()
+    with _cache_lock:
+        _cache = result
+        _cache_ts = datetime.now()
     return result
 
 
@@ -1381,81 +1388,113 @@ import time
 
 def _automation_worker():
     """Background task to keep the engine fresh and automated."""
+    import logging as _logging
+    _log = _logging.getLogger(__name__)
+
     start_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    print(f"[{start_time}] Background worker started...")
+    _log.info("[%s] Background worker started...", start_time)
+
     last_engine_run = 0
-    data = {} # Maintain scope for exit checks
-    
+    data = {}  # Maintain scope for exit checks
+
     while True:
         try:
             now = time.time()
-            
             market_open = pt.is_market_open()
 
-            # 1. Run engine every 2 min and auto-enter ONLY during market hours.
+            # 1) Run engine every 2 min and auto-enter ONLY during market hours.
             if now - last_engine_run > 120:
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] Engine tick (market_open={market_open})...")
+                _log.info(
+                    "[%s] Engine tick (market_open=%s)...",
+                    datetime.now().strftime('%H:%M:%S'),
+                    market_open,
+                )
                 data = _run_engine()
+
                 if market_open:
-                    alerts = _generate_trade_alerts(data)
                     cfg = load_config()
+
+                    # ---- Phase 1: Equity auto-entry from alerts ----
+                    alerts = _generate_trade_alerts(data)
                     entered = pt.auto_enter_from_alerts(alerts, cfg=cfg)
                     if entered:
-                        print(f"  > Auto-entered {len(entered)} trades: {', '.join(e['symbol'] for e in entered)}")
+                        _log.info(
+                            "  > Auto-entered %s trades: %s",
+                            len(entered),
+                            ", ".join(e["symbol"] for e in entered),
+                        )
+
                         # Fire Telegram alert so user is notified of auto-trades.
                         try:
                             token = cfg.get("alerts", {}).get("telegram_bot_token")
                             chat_id = cfg.get("alerts", {}).get("telegram_chat_id")
-                            # Filter original alerts to only those that were actually entered
+
                             entered_syms = {e["symbol"] for e in entered}
                             entered_alerts = [a for a in alerts if a.get("symbol") in entered_syms]
+
                             msg = _format_telegram_alert(data, entered_alerts)
                             msg = "*[AUTO-EXECUTED]*\n" + msg
+
                             ok = Alerter(token, chat_id).send(msg)
                             if ok:
-                                print(f"  > Telegram alert sent for {len(entered)} auto-trades")
+                                _log.info("  > Telegram alert sent for %s auto-trades", len(entered))
                             else:
                                 import ops.alerts as alerts_mod
-                                print(f"  > Telegram alert failed. Last error: {alerts_mod._last_send.get('error')}")
+                                _log.warning(
+                                    "  > Telegram alert failed. Last error: %s",
+                                    alerts_mod._last_send.get("error"),
+                                )
                         except Exception as te:
-                            print(f"  > Telegram send failed: {te}")
+                            _log.exception("  > Telegram send failed: %s", te)
 
+                    # ---- Phase 2: NIFTY options auto-entry ----
                     try:
                         setups = pt.get_nifty_option_setups(data, cfg)
                         nifty_entered = []
                         for s in setups:
                             if not s.get("suitable") or not s.get("legs"):
                                 continue
+
                             result = pt.enter_nifty_option_structure(
-                                _dict_to_setup(s), _dict_legs_to_resolved(s["legs"]), cfg
+                                _dict_to_setup(s),
+                                _dict_legs_to_resolved(s["legs"]),
+                                cfg,
                             )
                             if "error" not in result:
                                 nifty_entered.append(result)
+
                         if nifty_entered:
                             token = cfg.get("alerts", {}).get("telegram_bot_token")
                             chat_id = cfg.get("alerts", {}).get("telegram_chat_id")
+
                             regime_name = data.get("regime", {}).get("name", "")
                             bias = data.get("flows", {}).get("bias", "NEUTRAL")
                             vix = data.get("regime", {}).get("vix", 15)
                             vix_disp = f"{vix:.1f}" if vix is not None else "N/A"
+
                             for res in nifty_entered:
                                 msg = _format_options_telegram_alert(
                                     res, regime_name, bias, "N/A", vix_disp, is_nifty=True
                                 )
                                 Alerter(token, chat_id).send(msg)
                     except Exception as ne:
-                        print(f"  > NIFTY options automation error: {ne}")
+                        _log.exception("  > NIFTY options automation error: %s", ne)
 
-                    # Phase 3: Options Auto-Execution
+                    # ---- Phase 3: Multi-underlying options auto-execution ----
                     if cfg.get("options", {}).get("enabled"):
                         try:
-                            from signals.options import iv_rank, chain_snapshot
+                            from signals.options import iv_rank, chain_snapshot, atm_iv
                             from signals.option_strategy import pick_structure, resolve_legs
-                            
-                            underlyings = [u for u in cfg.get("options", {}).get("underlyings", ["NIFTY", "BANKNIFTY"]) if u != "NIFTY"]
+
+                            underlyings = [
+                                u
+                                for u in cfg.get("options", {}).get("underlyings", ["NIFTY", "BANKNIFTY"])
+                                if u != "NIFTY"
+                            ]
+
                             token = cfg.get("alerts", {}).get("telegram_bot_token")
                             chat_id = cfg.get("alerts", {}).get("telegram_chat_id")
-                            
+
                             regime_name = data.get("regime", {}).get("name", "")
                             bias = data.get("flows", {}).get("bias", "NEUTRAL")
                             vix = data.get("regime", {}).get("vix", 15)
@@ -1464,56 +1503,73 @@ def _automation_worker():
                             for sym in underlyings:
                                 try:
                                     chain = chain_snapshot(sym)
-                                    spot = (data.get("nifty", {}).get("close") if sym == "NIFTY"
-                                            else data.get("banknifty", {}).get("close")) or 0
+                                    spot = (
+                                        data.get("nifty", {}).get("close")
+                                        if sym == "NIFTY"
+                                        else data.get("banknifty", {}).get("close")
+                                    ) or 0
+
                                     if spot <= 0 or chain.empty:
                                         continue
-                                    from signals.options import atm_iv
+
                                     current_iv = atm_iv(chain, spot)
                                     ivr = iv_rank(sym, current_iv, db_path)
 
                                     struct = pick_structure(regime_name, bias, ivr, vix)
-                                    if struct:
-                                        lot_sz = cfg.get("options", {}).get("lot_size", {}).get(sym, 50)
-                                        step = cfg.get("options", {}).get("strike_step", {}).get(sym, 50)
-                                        num_lots = pt.get_settings().get("options_lots_per_trade", 1)
-                                        legs = resolve_legs(struct, chain, spot, lot_sz, step, num_lots=num_lots)
-                                        if legs:
-                                            res = pt.enter_option_structure(struct.name, legs, sym, cfg)
-                                            if "error" not in res:
-                                                print(f"  > Auto-entered Option Structure: {sym} {struct.name}")
-                                                ivr_disp = f"{ivr:.0f}" if ivr is not None else "N/A"
-                                                vix_disp = f"{vix:.1f}" if vix is not None else "N/A"
-                                                msg = _format_options_telegram_alert(
-                                                    res, regime_name, bias, ivr_disp, vix_disp, is_nifty=False
-                                                )
-                                                Alerter(token, chat_id).send(msg)
+                                    if not struct:
+                                        continue
+
+                                    lot_sz = cfg.get("options", {}).get("lot_size", {}).get(sym, 50)
+                                    step = cfg.get("options", {}).get("strike_step", {}).get(sym, 50)
+                                    num_lots = pt.get_settings().get("options_lots_per_trade", 1)
+
+                                    legs = resolve_legs(struct, chain, spot, lot_sz, step, num_lots=num_lots)
+                                    if not legs:
+                                        continue
+
+                                    res = pt.enter_option_structure(struct.name, legs, sym, cfg)
+                                    if "error" in res:
+                                        continue
+
+                                    _log.info("  > Auto-entered Option Structure: %s %s", sym, struct.name)
+
+                                    ivr_disp = f"{ivr:.0f}" if ivr is not None else "N/A"
+                                    vix_disp = f"{vix:.1f}" if vix is not None else "N/A"
+
+                                    msg = _format_options_telegram_alert(
+                                        res, regime_name, bias, ivr_disp, vix_disp, is_nifty=False
+                                    )
+                                    Alerter(token, chat_id).send(msg)
                                 except Exception as sym_err:
-                                    print(f"  > Underlying {sym} automation failed: {sym_err}")
+                                    _log.exception(
+                                        "  > Underlying %s automation failed: %s",
+                                        sym,
+                                        sym_err,
+                                    )
                         except Exception as oe:
-                            print(f"  > Options automation core error: {oe}")
+                            _log.exception("  > Options automation core error: %s", oe)
+
                 last_engine_run = now
 
-            # except for the 15:25-15:35 EOD flatten window.
+            # 2) Exit checks (runs every minute; EOD flatten window handled inside pt methods).
             pt.check_and_close_trades()
             pt.check_option_exits()
             try:
                 vix_now = data.get("regime", {}).get("vix", 15.0)
                 pt.check_nifty_option_exits(vix_current=vix_now, cfg=load_config())
             except Exception as ex:
-                print(f"  > NIFTY exit check failed: {ex}")
-            
+                _log.exception("  > NIFTY exit check failed: %s", ex)
+
         except Exception as e:
             ts = datetime.now().strftime('%H:%M:%S')
-            print(f"[{ts}] CRITICAL: Automation worker loop error: {e}")
-            traceback.print_exc()
-            
-        time.sleep(60) # Wake up every minute
+            _log.exception("[%s] CRITICAL: Automation worker loop error: %s", ts, e)
+
+        time.sleep(60)  # Wake up every minute
 
 if __name__ == "__main__":
     # Start automation thread
     worker = threading.Thread(target=_automation_worker, daemon=True)
     worker.start()
     
-    print("StockMinded Dashboard -> http://localhost:5050")
+    __import__("logging").getLogger(__name__).info("StockMinded Dashboard -> http://localhost:5050")
     app.run(host="0.0.0.0", port=5050, debug=False)

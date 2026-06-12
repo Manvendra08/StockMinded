@@ -720,6 +720,11 @@ def check_option_exits() -> list[dict]:
             
             if exit_reason:
                 t["status"], t["exit_reason"], t["exit_time"] = "CLOSED", exit_reason, now_ist.strftime("%Y-%m-%d %H:%M:%S")
+                # Populate exit_premium for each leg
+                for leg in t["legs"]:
+                    key = (leg["strike"], leg["expiry"], leg["type"])
+                    price = price_map.get(key) if price_map else None
+                    leg["exit_premium"] = price
                 # current_net guaranteed non-None here
                 t["pnl"] = round((t.get("net_premium") or 0.0) - current_net, 2)
                 closed.append(t)
@@ -756,7 +761,7 @@ def check_nifty_option_exits(vix_current: float = None, cfg: dict = None) -> lis
             # If no current net (missing LTPs), skip exit checks for safety
             if current_net is None:
                 logging.getLogger(__name__).warning(
-                    f"Skipping NIFTY exit checks for trade id={t.get('id')} due to missing LTP data"
+                    f"Skipping exit checks for trade id={t.get('id')} symbol=NIFTY due to missing LTP data"
                 )
                 continue
 
@@ -788,6 +793,11 @@ def check_nifty_option_exits(vix_current: float = None, cfg: dict = None) -> lis
 
             if exit_reason:
                 t["status"], t["exit_reason"], t["exit_time"] = "CLOSED", exit_reason, now_ist.strftime("%Y-%m-%d %H:%M:%S")
+                # Populate exit_premium for each leg
+                for leg in t["legs"]:
+                    key = (leg["strike"], leg["expiry"], leg["type"])
+                    price = price_map.get(key) if price_map else None
+                    leg["exit_premium"] = price
                 t["pnl"] = round(t.get("net_credit", 0.0) - current_net, 2)
                 closed.append(t)
     return closed

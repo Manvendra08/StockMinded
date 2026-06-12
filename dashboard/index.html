@@ -697,9 +697,9 @@
     }
 
     .regime-metrics {
-      display: flex;
-      gap: 32px;
-      flex-wrap: wrap;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
       margin-top: 14px;
     }
 
@@ -1370,6 +1370,30 @@
 
     .bento-item.full {
       grid-column: 1 / -1;
+    }
+
+    /* ── FIRST ROW CARDS ─────────────────────────────────────────── */
+    .first-row-container {
+      grid-column: 1 / -1;
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 20px;
+    }
+
+    .regime-metric:first-child {
+      grid-column: span 2;
+    }
+
+    @media (max-width: 1200px) {
+      .first-row-container {
+        grid-template-columns: repeat(2, 1fr);
+      }
+    }
+
+    @media (max-width: 700px) {
+      .first-row-container {
+        grid-template-columns: 1fr;
+      }
     }
 
     @media (max-width: 1100px) {
@@ -2176,42 +2200,49 @@
       background: var(--glass); 
       backdrop-filter: blur(20px); 
       border: 1px solid var(--glass-border);
-      min-height: 320px;
+      min-height: auto;
     }
     .trace-inputs { 
       display: grid; 
-      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); 
-      gap: 12px; 
-      margin: 16px 0;
+      grid-template-columns: 1fr 1fr; 
+      gap: 8px; 
+      margin: 12px 0;
     }
     .trace-input { 
       display: flex; 
       flex-direction: column; 
+      background: rgba(255, 255, 255, 0.02);
+      border: 1px solid var(--glass-border);
+      padding: 6px 8px;
+      border-radius: var(--radius-xs);
     }
     .trace-key { 
-      font-size: 0.85rem; 
-      color: var(--text-secondary); 
+      font-size: 0.62rem; 
+      color: var(--text-muted); 
       text-transform: uppercase; 
       letter-spacing: 0.5px;
     }
     .trace-value { 
-      font-size: 1.1rem; 
+      font-size: 0.85rem; 
       font-weight: 700; 
       margin-top: 2px;
+      font-family: var(--mono);
     }
     .trace-path { 
       color: var(--accent-amber); 
       font-weight: 600; 
       margin: 12px 0;
+      font-size: 0.82rem;
     }
     .trace-blocks { 
-      background: rgba(239,68,68,0.1); 
-      border-left: 4px solid var(--accent-red); 
-      padding: 16px; 
-      margin-top: 16px;
-      border-radius: var(--radius-sm);
+      background: rgba(239,68,68,0.06); 
+      border-left: 3px solid var(--accent-red); 
+      padding: 10px 12px; 
+      margin-top: 12px;
+      border-radius: var(--radius-xs);
+      font-size: 0.78rem;
     }
-    .trace-blocks li { margin: 6px 0; }
+    .trace-blocks li { margin: 4px 0; }
   </style>
 </head>
 
@@ -2290,36 +2321,41 @@
     <!-- ═══ BENTO GRID LAYOUT ═══ -->
     <div class="bento-grid">
 
-      <!-- Row 1: Regime, Trace, Bias -->
-      <!-- Merged Regime & Money Flows (Span 2) -->
-      <div class="bento-item wide card regime-banner" id="regime-banner" data-regime="" style="padding: 0; display: flex; flex-direction: row; gap: 0;">
-        <div class="content" style="flex: 1.2; padding: 24px 28px; border-right: 1px solid var(--glass-border);">
-          <div class="regime-header">
-            <div class="regime-label">Market Regime</div>
-            <div class="regime-badge" id="regime-badge">—</div>
-            <div class="regime-notes" id="regime-notes"></div>
-          </div>
-          <div class="regime-metrics" id="regime-metrics"></div>
-        </div>
-        <div class="content" style="flex: 1; padding: 24px 28px; background: rgba(0, 0, 0, 0.1);">
-          <div class="card-title" style="margin-bottom: 12px;"><span class="icon">💰</span> Money Flows</div>
-          <div class="bias-indicator" id="bias-indicator" style="padding: 10px; margin-bottom: 12px; font-size: 0.9rem;">—</div>
-          <div class="flow-stats" id="flow-stats"></div>
-          <div id="ai-sentiment-container" style="margin-top: 12px; padding: 12px; border-radius: var(--radius-sm); background: rgba(255,255,255,0.03); border: 1px solid var(--glass-border); font-size: 0.8rem; display:none;">
-            <div style="font-weight:700; color:var(--text-secondary); margin-bottom:6px; display:flex; align-items:center; gap:6px;">
-              <span>🤖</span> AI Market Sentiment
+      <!-- Row 1: 4 adjacent cards container -->
+      <div class="bento-item full first-row-container">
+        
+        <!-- Card 1: Market Regime -->
+        <div class="bento-item card regime-banner" id="regime-banner" data-regime="" style="margin-bottom: 0; padding: 24px 28px;">
+          <div class="content">
+            <div class="regime-header" style="justify-content: space-between; align-items: flex-start; margin-bottom: 12px;">
+              <div class="regime-label" style="margin-bottom: 4px;">Market Regime</div>
+              <div class="regime-badge" id="regime-badge">—</div>
             </div>
-            <div id="ai-sentiment-text" style="color:var(--text-primary); line-height:1.4; font-weight: 500;">—</div>
+            <div class="regime-notes" id="regime-notes" style="min-height: 48px; line-height: 1.4; margin-bottom: 12px;"></div>
+            <div class="regime-metrics" id="regime-metrics"></div>
           </div>
         </div>
-      </div>
 
-      <!-- Verdict Engine Trace (Moved to Row 1) -->
-      <div class="bento-item card trace-panel" id="trace-panel">
-        <div class="card-title"><span class="icon">🔍</span> Verdict Engine Trace</div>
-        <div class="trace-inputs" id="trace-inputs"></div>
-        <div class="trace-path" id="trace-decision"></div>
-        <div class="trace-blocks" id="trace-blocks"></div>
+        <!-- Card 2: Money Flows -->
+        <div class="bento-item card" id="money-flows-card" style="margin-bottom: 0; padding: 24px 28px;">
+          <div class="card-title" style="margin-bottom: 12px;"><span class="icon">💰</span> Money Flows</div>
+          <div class="bias-indicator" id="bias-indicator" style="padding: 10px; margin-bottom: 12px; font-size: 0.9rem; border-radius: var(--radius-sm);">—</div>
+          <div class="flow-stats" id="flow-stats"></div>
+        </div>
+
+        <!-- Card 3: AI Market Sentiment -->
+        <div class="bento-item card" id="ai-sentiment-container" style="margin-bottom: 0; padding: 24px 28px;">
+          <div class="card-title" style="margin-bottom: 12px;"><span class="icon">🤖</span> AI Market Sentiment</div>
+          <div id="ai-sentiment-text" style="color:var(--text-primary); line-height:1.4; font-weight: 500; overflow-y: auto; max-height: 280px;">—</div>
+        </div>
+
+        <!-- Card 4: Verdict Engine Trace -->
+        <div class="bento-item card trace-panel" id="trace-panel" style="margin-bottom: 0; padding: 24px 28px; min-height: auto;">
+          <div class="card-title" style="margin-bottom: 12px;"><span class="icon">🔍</span> Verdict Engine Trace</div>
+          <div class="trace-inputs" id="trace-inputs"></div>
+          <div class="trace-path" id="trace-decision"></div>
+        </div>
+
       </div>
 
       <!-- Trade Verdict Status Card (WIDE) -->
@@ -2465,43 +2501,7 @@
     <!-- Risk bar (MOVED TO PAPER TRADER) -->
 
 
-    <!-- ═══ INTRADAY MONITOR ═══ -->
-    <section class="intraday-section">
-      <div class="card-title" style="margin-bottom:14px;">
-        <span class="icon">⚡</span> Intraday Monitor
-        <span class="intra-refresh-badge">
-          <span class="countdown-ring"><span class="countdown-fill" id="intra-fill" style="height:100%"></span></span>
-          <span id="intra-next">—</span>
-        </span>
-      </div>
 
-      <!-- Ticker strip (MOVED TO TOP) -->
-
-
-      <div class="intra-grid">
-        <!-- Nifty 5-min candle chart -->
-        <div class="card">
-          <div class="card-title" style="justify-content: space-between;">
-            <div style="display:flex; align-items:center; gap:8px;">
-              <span class="icon">📈</span> NIFTY <span id="chart-tf-label">5-Min</span>
-            </div>
-            <select id="tf-select" onchange="changeTimeframe(this.value)"
-              style="background:var(--glass); border:1px solid var(--glass-border); color:var(--text-primary); padding:4px 8px; border-radius:var(--radius-xs); font-size:0.7rem; font-family:var(--mono); cursor:pointer;">
-              <option value="5m">5m</option>
-              <option value="15m">15m</option>
-              <option value="1h">1h</option>
-              <option value="1d">1D</option>
-              <option value="1w">1W</option>
-              <option value="1mo">1M</option>
-            </select>
-          </div>
-          <div class="chart-wrap">
-            <canvas id="nifty-chart"></canvas>
-            <div class="chart-label" id="chart-label">—</div>
-          </div>
-        </div>
-      </div>
-    </section>
 
     <!-- ═══ OPTION CHAIN ═══ -->
     <section class="option-chain-section card" style="margin-top:24px;">
@@ -2931,7 +2931,8 @@
           }
           aiContainer.style.display = 'block';
         } else {
-          aiContainer.style.display = 'none';
+          aiText.innerHTML = '<div style="color:var(--text-muted);font-style:italic;">No AI Sentiment data available</div>';
+          aiContainer.style.display = 'block';
         }
       }
     }
@@ -3119,20 +3120,6 @@ function renderVerdictTrace(trace) {
   const strategy = trace.strategy || '';
   const confidence = trace.confidence || 'LOW';
   document.getElementById('trace-decision').innerHTML = `Action: <strong>${action}</strong> | Strategy: <strong>${strategy}</strong> | Confidence: <strong>${confidence}</strong>`;
-  
-  // Blocks/Reasons
-  const blocks = trace.blocks || [];
-  const reasons = trace.reasons || [];
-  if (blocks.length || reasons.length) {
-    let blocksHtml = '<ul>';
-    [...blocks, ...reasons].slice(0, 6).forEach(block => {
-      blocksHtml += `<li>${block}</li>`;
-    });
-    blocksHtml += '</ul>';
-    document.getElementById('trace-blocks').innerHTML = blocksHtml;
-  } else {
-    document.getElementById('trace-blocks').innerHTML = '<div style="color:var(--text-muted);font-style:italic;">No specific blocks/reasons</div>';
-  }
 }
 
 function renderAll(data) {

@@ -56,7 +56,21 @@ def _is_holiday(dt_date):
 
 def _next_expiry(symbol="NIFTY", preference="weekly"):
     today = datetime.now(timezone(timedelta(hours=5, minutes=30))).date()
-    if symbol == "BANKNIFTY":
+    if preference == "weekly":
+        if symbol == "BANKNIFTY":
+            # NSE weekly BANKNIFTY options expire on Wednesdays
+            days_ahead = calendar.WEDNESDAY - today.weekday()
+            if days_ahead <= 0:
+                days_ahead += 7
+            exp_date = today + timedelta(days=days_ahead)
+        else:
+            # NSE changed NIFTY weekly expiry from Thursday → Tuesday (effective Apr 2025)
+            days_ahead = calendar.TUESDAY - today.weekday()
+            if days_ahead <= 0:           # already Tuesday or past it this week
+                days_ahead += 7
+            exp_date = today + timedelta(days=days_ahead)
+    else:
+        # Monthly last-Thursday expiry logic for both NIFTY and BANKNIFTY
         cal = calendar.monthcalendar(today.year, today.month)
         last_week = cal[-1]
         if last_week[calendar.THURSDAY] != 0:
@@ -72,12 +86,6 @@ def _next_expiry(symbol="NIFTY", preference="weekly"):
                 exp_date = date(next_year, next_month, last_week[calendar.THURSDAY])
             else:
                 exp_date = date(next_year, next_month, cal[-2][calendar.THURSDAY])
-    else:
-        # NSE changed NIFTY weekly expiry from Thursday → Tuesday (effective Apr 2025)
-        days_ahead = calendar.TUESDAY - today.weekday()
-        if days_ahead <= 0:           # already Tuesday or past it this week
-            days_ahead += 7
-        exp_date = today + timedelta(days=days_ahead)
     while _is_holiday(exp_date):
         exp_date -= timedelta(days=1)
     return exp_date.strftime("%d-%b-%Y")
@@ -170,7 +178,16 @@ def chain_snapshot(symbol, target_expiries=None, target_strikes=None) -> pd.Data
     non_zero_dte = [e for e in expiries if not _is_today(e)]
     closest_expiry = non_zero_dte[0] if non_zero_dte else expiries[0]
     
-    valid_expiries = target_expiries if target_expiries else [closest_expiry]
+    standardized_valid = set()
+    if target_expiries:
+        for e in target_expiries:
+            parsed = parse_exp(e)
+            if parsed != datetime.max:
+                standardized_valid.add(parsed.strftime("%Y-%m-%d"))
+    else:
+        parsed_closest = parse_exp(closest_expiry)
+        if parsed_closest != datetime.max:
+            standardized_valid.add(parsed_closest.strftime("%Y-%m-%d"))
 
     rows = []
     r = 0.065
@@ -178,14 +195,21 @@ def chain_snapshot(symbol, target_expiries=None, target_strikes=None) -> pd.Data
 
     for rec in records:
         exp_date_str = rec.get("expiryDate")
-        if exp_date_str not in valid_expiries:
+        if not exp_date_str:
+            continue
+        parsed_rec = parse_exp(exp_date_str)
+        if parsed_rec == datetime.max:
+            continue
+            
+        rec_exp_std = parsed_rec.strftime("%Y-%m-%d")
+        if rec_exp_std not in standardized_valid:
             continue
             
         strike = rec.get("strikePrice")
         if target_strikes is not None and strike not in target_strikes:
             continue
             
-        tte_days = (parse_exp(exp_date_str).date() - datetime.now(timezone(timedelta(hours=5, minutes=30))).date()).days
+        tte_days = (parsed_rec.date() - today_local).days
         t = max(tte_days, 0.5) / 365.0
         
         ce = rec.get("CE", {})
@@ -216,7 +240,7 @@ def chain_snapshot(symbol, target_expiries=None, target_strikes=None) -> pd.Data
             pe_delta = _bs_delta(underlying_value, strike, t, r, pe_iv, "PE")
         rows.append({
             "strike": strike,
-            "expiry": exp_date_str,
+            "expiry": rec_exp_std,
             "ce_oi": ce.get("openInterest", 0),
             "ce_vol": ce.get("totalTradedVolume", 0),
             "ce_iv": ce_iv,

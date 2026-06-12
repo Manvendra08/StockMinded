@@ -262,6 +262,7 @@ def _dhan_find_instrument(symbol: str) -> dict | None:
     inst_col = _dhan_col(df, "SEM_INSTRUMENT_NAME", "INSTRUMENT")
     sym_col = _dhan_col(df, "SM_SYMBOL_NAME", "SYMBOL_NAME", "UNDERLYING_SYMBOL")
     disp_col = _dhan_col(df, "SEM_CUSTOM_SYMBOL", "DISPLAY_NAME")
+    trad_col = _dhan_col(df, "SEM_TRADING_SYMBOL", "TRADING_SYMBOL")
     if not sec_col:
         return None
     work = df
@@ -270,7 +271,7 @@ def _dhan_find_instrument(symbol: str) -> dict | None:
     if seg_col:
         work = work[work[seg_col].astype(str).str.upper().isin(["E", "D", "IDX_I", "NSE_EQ", "NSE_FNO"])]
     candidates = []
-    for col in [sym_col, disp_col]:
+    for col in [sym_col, disp_col, trad_col]:
         if col:
             hit = work[work[col].astype(str).str.upper().eq(symbol)]
             if not hit.empty:
@@ -496,6 +497,133 @@ def _option_chain_from_dhan(symbol: str) -> dict:
     if data.get("records", {}).get("data"):
         _DHAN_OC_CACHE[symbol] = (time.time(), data)
     return data
+
+
+def _public_dhan_to_nse_chain(symbol: str, raw: dict, expiry: str) -> dict:
+    data = raw.get("data") or {}
+    oc = data.get("oc") or {}
+    records = []
+    for strike_raw, row in oc.items():
+        try:
+            strike = float(strike_raw)
+        except (TypeError, ValueError):
+            continue
+        ce = row.get("ce") if isinstance(row.get("ce"), dict) else {}
+        pe = row.get("pe") if isinstance(row.get("pe"), dict) else {}
+        records.append({
+            "strikePrice": strike,
+            "expiryDate": expiry,
+            "CE": {
+                "openInterest": ce.get("OI", 0) or 0,
+                "changeinOpenInterest": ce.get("oichng", 0) or 0,
+                "totalTradedVolume": ce.get("vol", 0) or 0,
+                "lastPrice": ce.get("ltp", 0) or 0,
+                "impliedVolatility": ce.get("iv", 0) or 0,
+                "bidprice": ce.get("bid", 0) or 0,
+                "askPrice": ce.get("ask", 0) or 0,
+                "identifier": ce.get("sid"),
+            },
+            "PE": {
+                "openInterest": pe.get("OI", 0) or 0,
+                "changeinOpenInterest": pe.get("oichng", 0) or 0,
+                "totalTradedVolume": pe.get("vol", 0) or 0,
+                "lastPrice": pe.get("ltp", 0) or 0,
+                "impliedVolatility": pe.get("iv", 0) or 0,
+                "bidprice": pe.get("bid", 0) or 0,
+                "askPrice": pe.get("ask", 0) or 0,
+                "identifier": pe.get("sid"),
+            },
+        })
+    return {
+        "records": {
+            "data": records,
+            "expiryDates": [expiry],
+            "underlyingValue": data.get("sltp"),
+        },
+        "filtered": {"data": records},
+        "_source": "public_dhan_optionchain",
+    }
+
+
+def _option_chain_from_public_dhan(symbol: str) -> dict:
+    symbol = symbol.upper()
+    public_urls = {
+        "NIFTY": "https://dhan.co/indices/nifty-50-option-chain/",
+        "BANKNIFTY": "https://dhan.co/indices/nifty-bank-option-chain/",
+        "FINNIFTY": "https://dhan.co/indices/nifty-financial-services-option-chain/",
+        "MIDCPNIFTY": "https://dhan.co/indices/nifty-midcap-select-option-chain/",
+    }
+    url = public_urls.get(symbol)
+    seg = 0
+    sid = None
+    if url:
+        defaults = {
+            "NIFTY": 13,
+            "BANKNIFTY": 25,
+            "FINNIFTY": 27,
+            "MIDCPNIFTY": 442,
+        }
+        sid = defaults.get(symbol)
+    else:
+        url = "https://dhan.co/indices/nifty-50-option-chain/"
+        seg = 1
+        inst = _dhan_find_instrument(symbol)
+        if inst:
+            sid = int(inst["security_id"])
+    if not sid:
+        return {"records": {"data": []}}
+    try:
+        from curl_cffi import requests as curl_requests
+        session = curl_requests.Session(impersonate="chrome120")
+    except ImportError:
+        session = _create_retry_session(retries=3, backoff_factor=0.5)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Connection": "keep-alive"
+    }
+    r = session.get(url, headers=headers, timeout=15)
+    r.raise_for_status()
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(r.text, "html.parser")
+    script = soup.find("script", id="__NEXT_DATA__")
+    if not script:
+        return {"records": {"data": []}}
+    data = json.loads(script.string)
+    page_props = data.get("props", {}).get("pageProps", {})
+    fno_data = page_props.get("fnoData", {})
+    opsum = fno_data.get("opsum", {})
+    if not opsum:
+        return {"records": {"data": []}}
+    expiries = []
+    for k, v in opsum.items():
+        if seg == 1 and v.get("exptype") != "M":
+            continue
+        expiries.append(int(k))
+    expiries.sort()
+    if not expiries:
+        return {"records": {"data": []}}
+    target_exp = expiries[0]
+    api_url = "https://open-web-scanx.dhan.co/scanx/optchainactive"
+    api_headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Content-Type": "application/json; charset=UTF-8",
+        "Referer": "https://dhan.co/",
+        "Origin": "https://dhan.co"
+    }
+    payload = {
+        "Data": {
+            "Seg": int(seg),
+            "Sid": int(sid),
+            "Exp": int(target_exp)
+        }
+    }
+    api_resp = session.post(api_url, headers=api_headers, json=payload, timeout=15)
+    api_resp.raise_for_status()
+    raw_response = api_resp.json()
+    expiry_date_str = dt.datetime.fromtimestamp(target_exp).strftime("%d-%b-%Y")
+    return _public_dhan_to_nse_chain(symbol, raw_response, expiry_date_str)
 
 
 def option_chain_source(symbol: str = "NIFTY") -> str | None:
@@ -751,14 +879,14 @@ def _r360_to_nse_chain(symbol: str, raw: dict, expiry: str) -> dict:
                 "openInterest": ce_oi,
                 "changeinOpenInterest": ce_oi_chg,
                 "totalTradedVolume": 0,
-                "lastPrice": ltp_ce.get(strike, 0.0),
+                "lastPrice": 0.0,
                 "impliedVolatility": 0.0,
             },
             "PE": {
                 "openInterest": pe_oi,
                 "changeinOpenInterest": pe_oi_chg,
                 "totalTradedVolume": 0,
-                "lastPrice": ltp_pe.get(strike, 0.0),
+                "lastPrice": 0.0,
                 "impliedVolatility": 0.0,
             },
         })
@@ -845,7 +973,10 @@ def _option_chain_from_research360(symbol: str) -> dict:
 
 def _option_chain_from_local_file(symbol: str) -> dict:
     cfg = _data_sources_cfg().get("local_files", {})
-    raw_path = _env_or_value(cfg.get(f"{symbol.lower()}_option_chain") or cfg.get("option_chain"))
+    specific_key = f"{symbol.lower()}_option_chain"
+    raw_path = _env_or_value(cfg.get(specific_key))
+    if not raw_path and symbol.upper() == "NIFTY":
+        raw_path = _env_or_value(cfg.get("option_chain"))
     if not raw_path:
         return {"records": {"data": []}}
     path = Path(raw_path)
@@ -921,6 +1052,71 @@ def india_vix(period: str = "3mo") -> pd.DataFrame:
         return df
 
 
+def _filter_atm_strikes(data: dict) -> dict:
+    """Filter records and filtered data to ATM +/- 15 strikes."""
+    if not data or not isinstance(data, dict):
+        return data
+
+    records = data.get("records")
+    if not records or not isinstance(records, dict):
+        return data
+
+    underlying_value = records.get("underlyingValue")
+    if not underlying_value:
+        underlying_value = data.get("filtered", {}).get("underlyingValue")
+
+    if not underlying_value:
+        rows = records.get("data") or []
+        for r in rows:
+            if r.get("CE", {}).get("underlyingValue"):
+                underlying_value = r["CE"]["underlyingValue"]
+                break
+            if r.get("PE", {}).get("underlyingValue"):
+                underlying_value = r["PE"]["underlyingValue"]
+                break
+
+    try:
+        underlying_value = float(underlying_value)
+    except (TypeError, ValueError):
+        underlying_value = 0.0
+
+    if underlying_value <= 0:
+        return data
+
+    rows = records.get("data") or []
+    if not rows:
+        return data
+
+    # Extract unique strikes
+    strikes = sorted(list({r["strikePrice"] for r in rows if r.get("strikePrice") is not None}))
+    if not strikes:
+        return data
+
+    # Find the ATM strike (closest to underlying_value)
+    atm_strike = min(strikes, key=lambda x: abs(x - underlying_value))
+    atm_idx = strikes.index(atm_strike)
+
+    # Slice the strikes to ATM +/- 15 strikes
+    start_idx = max(0, atm_idx - 15)
+    end_idx = min(len(strikes) - 1, atm_idx + 15)
+    allowed_strikes = set(strikes[start_idx : end_idx + 1])
+
+    # Filter data rows
+    filtered_rows = [r for r in rows if r.get("strikePrice") in allowed_strikes]
+    records["data"] = filtered_rows
+    if "strikePrices" in records:
+        records["strikePrices"] = sorted(list(allowed_strikes))
+
+    # Filter filtered['data']
+    if "filtered" in data and isinstance(data["filtered"], dict):
+        filt_rows = data["filtered"].get("data") or []
+        data["filtered"]["data"] = [r for r in filt_rows if r.get("strikePrice") in allowed_strikes]
+        if "strikePrices" in data["filtered"]:
+            data["filtered"]["strikePrices"] = sorted(list(allowed_strikes))
+
+    return data
+
+
 def option_chain(symbol: str = "NIFTY") -> dict:
     """Live option chain via nsepython or direct robust fetch. Returns {'records': ..., 'filtered': ...}."""
     global _NSE_SESSION, _NSE_SESSION_TS
@@ -928,6 +1124,7 @@ def option_chain(symbol: str = "NIFTY") -> dict:
     cache_file = CACHE_DIR / f"option_chain_{symbol}.json"
 
     def _save_chain(data: dict) -> dict:
+        data = _filter_atm_strikes(data)
         try:
             CACHE_DIR.mkdir(parents=True, exist_ok=True)
             cache_file.write_text(json.dumps({"ts": time.time(), "data": data}, default=str), encoding="utf-8")
@@ -942,6 +1139,7 @@ def option_chain(symbol: str = "NIFTY") -> dict:
                 cached = json.loads(cache_file.read_text(encoding="utf-8"))
                 data = cached.get("data") or {}
                 if data.get("records", {}).get("data"):
+                    data = _filter_atm_strikes(data)
                     data.setdefault("_cache", {})
                     data["_cache"].update({"stale": True, "ts": cached.get("ts")})
                     _OPTION_CHAIN_SOURCE[symbol] = f"cache:{data.get('_source') or 'unknown'}"
@@ -972,6 +1170,14 @@ def option_chain(symbol: str = "NIFTY") -> dict:
             return _save_chain(data)
     except Exception as e:
         logging.getLogger(__name__).warning("[option_chain dhan] failed for %s: %s", symbol, e)
+
+    # 1.5. Public Dhan Scraper (bypass-safe, unauthenticated, full data).
+    try:
+        data = _option_chain_from_public_dhan(symbol)
+        if data and data.get("records", {}).get("data"):
+            return _save_chain(data)
+    except Exception as e:
+        logging.getLogger(__name__).warning("[option_chain public dhan] failed for %s: %s", symbol, e)
 
     # 2. Research360 — no auth required, provides OI for all strikes + LTP
     #    for ~10 near-ATM strikes via graphprice/graphc/graphp arrays.
@@ -1466,14 +1672,14 @@ def universe_ohlc(tickers: list[str], period: str = "6mo") -> dict[str, pd.DataF
     import yfinance as yf
     from pathlib import Path
     from datetime import timezone, timedelta
-    
+
     cache_dir = Path("data/cache/ohlc")
     cache_dir.mkdir(parents=True, exist_ok=True)
     today_str = dt.datetime.now().strftime("%Y-%m-%d")
 
-    results = {}
-    missing_tickers = []
-    
+    results: dict[str, pd.DataFrame] = {}
+    missing_tickers: list[str] = []
+
     # Check market status for cache invalidation
     ist_now = dt.datetime.now(timezone(timedelta(hours=5, minutes=30)))
     is_weekday = ist_now.weekday() < 5
@@ -1494,7 +1700,7 @@ def universe_ohlc(tickers: list[str], period: str = "6mo") -> dict[str, pd.DataF
                 missing_tickers.append(t)
         else:
             missing_tickers.append(t)
-            
+
     if not missing_tickers:
         return results
 
@@ -1515,69 +1721,153 @@ def universe_ohlc(tickers: list[str], period: str = "6mo") -> dict[str, pd.DataF
         missing_tickers = dhan_failed
         if not missing_tickers:
             return results
-        
+
     # 3. Batch fetch remaining from yfinance fallback.
     yf_tickers = [f"{s}.NS" if "." not in s else s for s in missing_tickers]
     chunks = [yf_tickers[i:i + 100] for i in range(0, len(yf_tickers), 100)]
     fetched, failed, skipped = 0, 0, 0
-    
+
+    # If yfinance batch returns a structure but we extract zero symbols,
+    # re-try per-symbol to avoid poisoning the whole universe run.
+    PER_SYMBOL_RETRY_CAP = 60
+
+    def _persist_symbol(sym: str, sym_df: pd.DataFrame) -> bool:
+        """Persist only if non-empty and has a close column after flattening."""
+        if sym_df is None or sym_df.empty:
+            return False
+        # Flatten might produce 'close' or 'Close' depending on source; normalize to lowercase.
+        sym_df = _flatten_columns(sym_df)
+        if sym_df.empty:
+            return False
+        if "close" not in sym_df.columns:
+            return False
+        sym_df.index.name = "date"
+        sym_df.to_pickle(cache_dir / f"{sym}_{today_str}.pkl")
+        results[sym] = sym_df
+        return True
+
     for chunk in chunks:
         try:
-            df_dict = yf.download(tickers=" ".join(chunk), period=period, group_by='ticker', threads=False, progress=False)
-            time.sleep(1) # rate limit spacing
+            df_dict = yf.download(
+                tickers=" ".join(chunk),
+                period=period,
+                group_by="ticker",
+                threads=False,
+                progress=False,
+            )
+            time.sleep(1)  # rate limit spacing
         except Exception as e:
             print(f"yfinance batch download failed, retrying once: {e}")
             time.sleep(2)
             try:
-                df_dict = yf.download(tickers=" ".join(chunk), period=period, group_by='ticker', threads=False, progress=False)
+                df_dict = yf.download(
+                    tickers=" ".join(chunk),
+                    period=period,
+                    group_by="ticker",
+                    threads=False,
+                    progress=False,
+                )
             except Exception:
                 failed += len(chunk)
                 continue
-                
+
+        fetched_in_batch = 0
+
         if len(chunk) == 1:
-            sym = chunk[0].replace('.NS', '')
+            sym = chunk[0].replace(".NS", "")
             sym_df = df_dict.copy()
-            sym_df = _flatten_columns(sym_df)
-            if not sym_df.empty:
-                sym_df.index.name = "date"
-                sym_df.to_pickle(cache_dir / f"{sym}_{today_str}.pkl")
-                results[sym] = sym_df
+            if _persist_symbol(sym, sym_df):
+                fetched_in_batch = 1
                 fetched += 1
             else:
                 skipped += 1
+
         elif isinstance(df_dict.columns, pd.MultiIndex):
-            # Dynamic ticker level detection
-            ticker_level = 0
-            if 'Close' in df_dict.columns.levels[0] or 'close' in df_dict.columns.levels[0]:
-                ticker_level = 1
-            elif 'Close' in df_dict.columns.levels[1] or 'close' in df_dict.columns.levels[1]:
-                ticker_level = 0
-            else:
-                # Default to looking for tickers in level 0
-                ticker_level = 0
-                
-            for yf_t in chunk:
-                sym = yf_t.replace('.NS', '')
+            # Robust ticker level detection:
+            # Identify which MultiIndex level contains the ticker symbols from this chunk.
+            levels = list(df_dict.columns.levels)
+            chunk_set = set(chunk)
+
+            level_candidates: list[int] = []
+            for i in (0, 1):
                 try:
-                    if yf_t in df_dict.columns.levels[ticker_level]:
+                    if any(x in levels[i] for x in chunk_set):
+                        level_candidates.append(i)
+                except Exception:
+                    pass
+
+            if len(level_candidates) == 1:
+                ticker_level = level_candidates[0]
+            else:
+                # If ambiguous, try both levels by picking the one with higher overlap
+                overlaps = {}
+                for i in (0, 1):
+                    try:
+                        overlaps[i] = sum(1 for x in chunk_set if x in levels[i])
+                    except Exception:
+                        overlaps[i] = 0
+                ticker_level = max(overlaps, key=lambda k: overlaps.get(k, 0))
+
+            for yf_t in chunk:
+                sym = yf_t.replace(".NS", "")
+                extracted = False
+                for lvl in (ticker_level, 1 - ticker_level):
+                    try:
+                        if yf_t in df_dict.columns.levels[lvl]:
+                            sym_df = df_dict.xs(yf_t, level=lvl, axis=1).copy()
+                            sym_df = sym_df.dropna(how="all")
+                            if _persist_symbol(sym, sym_df):
+                                fetched_in_batch += 1
+                                extracted = True
+                                break
+                    except Exception:
+                        continue
+
+                if not extracted:
+                    # Last-chance: try xs even if membership checks failed
+                    try:
                         sym_df = df_dict.xs(yf_t, level=ticker_level, axis=1).copy()
-                        sym_df = _flatten_columns(sym_df)
-                        # Drop rows where all elements are NaN
-                        sym_df = sym_df.dropna(how='all')
-                        if not sym_df.empty:
-                            sym_df.index.name = "date"
-                            sym_df.to_pickle(cache_dir / f"{sym}_{today_str}.pkl")
-                            results[sym] = sym_df
-                            fetched += 1
-                        else:
-                            skipped += 1
-                    else:
-                        failed += 1
-                except Exception as ex:
+                        sym_df = sym_df.dropna(how="all")
+                        if _persist_symbol(sym, sym_df):
+                            fetched_in_batch += 1
+                            extracted = True
+                    except Exception:
+                        pass
+
+                if not extracted:
                     failed += 1
-                    print(f"universe_ohlc: {yf_t} err: {type(ex).__name__}: {ex}")
+
+            fetched += fetched_in_batch
+
         else:
             failed += len(chunk)
+
+        # Per-symbol retry only when we extracted zero tickers from the whole batch.
+        if fetched_in_batch == 0 and isinstance(df_dict, (pd.DataFrame, type(None))):
+            # Cap to keep dashboard responsive.
+            tried = 0
+            for yf_t in chunk:
+                if tried >= PER_SYMBOL_RETRY_CAP:
+                    break
+                sym = yf_t.replace(".NS", "")
+                try:
+                    # Retry individual ticker for parsing sanity.
+                    one = yf.download(
+                        tickers=yf_t,
+                        period=period,
+                        group_by="ticker",
+                        threads=False,
+                        progress=False,
+                    )
+                    one = _flatten_columns(one)
+                    if _persist_symbol(sym, one):
+                        fetched += 1
+                        fetched_in_batch += 1
+                    else:
+                        skipped += 1
+                except Exception:
+                    failed += 1
+                tried += 1
 
     print(f"universe_ohlc: fetched={fetched} failed={failed} skipped={skipped}")
     return results
