@@ -912,8 +912,12 @@ def _generate_trade_alerts(data: dict) -> list[dict]:
     # --- STOCK ALERTS ---
     risk_amt = capital * per_trade_risk_pct
 
-    # --- AI Sentiment Gating ---
-    # Extract structured fields from the sentiment dict returned by get_market_news_sentiment().
+    # --- AI Sentiment Direction Guidance ---
+    # AI sentiment steers direction rather than blocking trades.
+    # The verdict engine (verdict.py) already factors AI into direction + confidence.
+    # Here we only:
+    #   1. Caution in choppy + LOW confidence (avoid noise)
+    #   2. Add AI ticker mentions as evidence to individual alerts
     ai_signal = str(ai_sentiment.get("overall_market_sentiment") or "").upper()
     ai_conf = str(ai_sentiment.get("confidence") or "").upper()
     # Build a lookup of AI-mentioned tickers: {SYMBOL: "LONG"|"SHORT"}
@@ -923,18 +927,11 @@ def _generate_trade_alerts(data: dict) -> list[dict]:
         if idea.get("ticker") and idea.get("direction") in ("LONG", "SHORT")
     }
 
-    # Gate 1 (unchanged): block in choppy range when AI confidence is LOW
+    # Safety filter: in choppy range when AI has LOW confidence, avoid noise trading
+    # AI sentiment already factored into verdict direction — this is an extra safety net
     if ai_conf == "LOW" and regime_name == "RANGE_HIGH_VOL":
         allow_longs = False
         allow_shorts = False
-
-    # Gate 2: when AI carries a HIGH-confidence contra-signal, suppress that direction.
-    # e.g. regime says TREND_UP (allow longs) but AI news is strongly BEARISH → skip longs.
-    if ai_conf == "HIGH":
-        if ai_signal == "BEARISH" and allow_longs:
-            allow_longs = False
-        if ai_signal == "BULLISH" and allow_shorts:
-            allow_shorts = False
 
     if allow_longs:
         for stock in leaders[:8]:

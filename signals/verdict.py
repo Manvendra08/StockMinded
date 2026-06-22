@@ -1,20 +1,24 @@
 """Split Trade verdict builder: Directional Stock Picking vs. Nifty Option Selling."""
+
 from __future__ import annotations
+
 from dataclasses import asdict, dataclass
 
 # Issue #11: confidence label -> numeric score mapping (0-100)
 _CONF_SCORE: dict[str, int] = {"HIGH": 80, "MEDIUM": 50, "LOW": 20}
 
+
 def _conf_score(label: str) -> int:
     """Return numeric confidence score (0-100) backing the label."""
     return _CONF_SCORE.get(label.upper(), 0)
+
 
 @dataclass
 class StockVerdict:
     action: str  # LONG_ONLY, SHORT_ONLY, LONG_AND_SHORT, WAIT
     tone: str
     confidence: str
-    confidence_score: int           # Issue #11: numeric 0-100 backing the label
+    confidence_score: int  # Issue #11: numeric 0-100 backing the label
     strategy: str
     top_long: str | None
     top_short: str | None
@@ -22,23 +26,25 @@ class StockVerdict:
     reasons: list[str]
     blocks: list[str]
 
+
 @dataclass
 class NiftyVerdict:
     action: str  # OPTION_SELL_DEFINED_RISK, NAKED_OPTION_SELL, WAIT
     tone: str
     bias: str
     confidence: str
-    confidence_score: int           # Issue #11: numeric 0-100 backing the label
+    confidence_score: int  # Issue #11: numeric 0-100 backing the label
     strategy: str
     can_trade: bool
     reasons: list[str]
     blocks: list[str]
 
+
 @dataclass
 class CombinedVerdict:
     stock: StockVerdict
     nifty: NiftyVerdict
-    
+
     def to_dict(self) -> dict:
         return {
             "stock": asdict(self.stock),
@@ -50,8 +56,11 @@ class CombinedVerdict:
             "can_trade_options": self.nifty.can_trade,
             "blocks": list(set(self.stock.blocks + self.nifty.blocks)),
             "reasons": list(set(self.stock.reasons + self.nifty.reasons)),
-            "confidence": self.stock.confidence if self.stock.can_trade else self.nifty.confidence,
+            "confidence": self.stock.confidence
+            if self.stock.can_trade
+            else self.nifty.confidence,
         }
+
 
 def _num(v, default=0.0) -> float:
     try:
@@ -59,10 +68,12 @@ def _num(v, default=0.0) -> float:
     except (TypeError, ValueError):
         return default
 
+
 def _get_val(obj, key, default=None):
     if isinstance(obj, dict):
         return obj.get(key, default)
     return getattr(obj, key, default)
+
 
 def build_trade_verdict(data: dict) -> CombinedVerdict:
     regime = data.get("regime", {}) or {}
@@ -80,6 +91,18 @@ def build_trade_verdict(data: dict) -> CombinedVerdict:
     vix = _num(regime.get("vix"))
     breadth = _num(regime.get("breadth_pct_above_50dma"), 50.0)
 
+    # --- AI Sentiment Extraction ---
+    ai_sentiment = flows.get("ai_sentiment") or {}
+    ai_overall = str(ai_sentiment.get("overall_market_sentiment") or "NEUTRAL").upper()
+    ai_conf_lbl = str(ai_sentiment.get("confidence") or "LOW").upper()
+    ai_score_raw = _num(ai_sentiment.get("sentiment_score"))
+    # AI direction score: +1 BULLISH, -1 BEARISH, 0 NEUTRAL/other
+    ai_dir = 1 if ai_overall == "BULLISH" else (-1 if ai_overall == "BEARISH" else 0)
+    # AI confidence weight: HIGH=1.0, MEDIUM=0.5, LOW=0.2
+    ai_weight = {"HIGH": 1.0, "MEDIUM": 0.5, "LOW": 0.2}.get(ai_conf_lbl, 0.0)
+    # Combined AI influence: direction strength * confidence weight, range [-1, 1]
+    ai_influence = ai_dir * ai_weight
+
     pcr = flows.get("pcr_oi")
     max_pain = flows.get("max_pain")
     option_stale = bool(flows.get("pcr_stale")) or bool(flows.get("mp_stale"))
@@ -93,9 +116,12 @@ def build_trade_verdict(data: dict) -> CombinedVerdict:
         f"VIX {vix:.1f}",
     ]
     common_blocks = []
-    if data_stale: common_blocks.append("Market data stale")
-    if source_errors: common_blocks.append("Source errors present")
-    if vix >= 25: common_blocks.append("VIX extreme (>25)")
+    if data_stale:
+        common_blocks.append("Market data stale")
+    if source_errors:
+        common_blocks.append("Source errors present")
+    if vix >= 25:
+        common_blocks.append("VIX extreme (>25)")
 
     top_long = _get_val(leaders[0], "symbol") if leaders else None
     top_short = _get_val(laggards[0], "symbol") if laggards else None
@@ -107,20 +133,58 @@ def build_trade_verdict(data: dict) -> CombinedVerdict:
     stock_tone = "unclear"
     stock_conf = "LOW"
     stock_blocks = list(common_blocks)
-    
+
     if not data_stale and vix < 25:
         if regime_name == "TREND_UP" and trend >= 3 and breadth >= 45:
             stock_action = "LONG_ONLY"
             stock_tone = "bull"
             stock_can_trade = True
-            stock_conf = "HIGH" if bias == "LONG" else "MEDIUM"
+            # AI boost: if AI agrees (BULLISH + HIGH/MED conf), upgrade to HIGH
+            if ai_influence > 0.4:
+                stock_conf = "HIGH"
+                stock_reasons_extra = [
+                    f"AI sentiment {ai_overall} ({ai_conf_lbl}) aligns with trend up"
+                ]
+            elif bias == "LONG":
+                stock_conf = "HIGH"
+                stock_reasons_extra = []
+            else:
+                stock_conf = "MEDIUM"
+                stock_reasons_extra = []
+            # If AI is strongly bearish, note caution but don't block
+            if ai_influence < -0.4:
+                stock_conf = "MEDIUM"
+                stock_reasons_extra = [
+                    f"AI sentiment BEARISH ({ai_conf_lbl}) — caution on long entries"
+                ]
             stock_strategy = "Long A-Grade leaders with RS Slope > 50."
+            if not stock_reasons_extra:
+                stock_reasons_extra = []
         elif regime_name == "TREND_DOWN" and trend <= -3 and breadth <= 55:
             stock_action = "SHORT_ONLY"
             stock_tone = "bear"
             stock_can_trade = True
-            stock_conf = "HIGH" if bias == "SHORT" else "MEDIUM"
+            # AI boost: if AI agrees (BEARISH + HIGH/MED conf), upgrade to HIGH
+            if ai_influence < -0.4:
+                stock_conf = "HIGH"
+                stock_reasons_extra = [
+                    f"AI sentiment {ai_overall} ({ai_conf_lbl}) aligns with trend down"
+                ]
+            elif bias == "SHORT":
+                stock_conf = "HIGH"
+                stock_reasons_extra = []
+            else:
+                stock_conf = "MEDIUM"
+                stock_reasons_extra = []
+            # If AI is strongly bullish, note caution but don't block
+            if ai_influence > 0.4:
+                stock_conf = "MEDIUM"
+                stock_reasons_extra = [
+                    f"AI sentiment BULLISH ({ai_conf_lbl}) — caution on short entries"
+                ]
             stock_strategy = "Short A-Grade laggards with RS Slope < -50."
+            if not stock_reasons_extra:
+                stock_reasons_extra = []
         elif regime_name in ("RANGE_HIGH_VOL", "RANGE_LOW_VOL", "VOL_CONTRACTION"):
             # Range regimes: directional stock picking only when leadership is
             # exceptionally strong.  Marginal setups bleed via EOD close in
@@ -130,8 +194,21 @@ def build_trade_verdict(data: dict) -> CombinedVerdict:
 
             # Gate: need >=5 Q5 names on at least one side to even consider
             if q5_longs >= 5 or q5_shorts >= 5:
-                long_str = q5_longs + (2 if bias == "LONG" else 0) + (4 if trend > 0 else 0)
-                short_str = q5_shorts + (2 if bias == "SHORT" else 0) + (4 if trend < 0 else 0)
+                # AI sentiment influence: add +3 if AI confirms direction, -3 if contradicts
+                ai_long_bonus = int(ai_influence * 3) if ai_influence > 0 else 0
+                ai_short_bonus = int(abs(ai_influence) * 3) if ai_influence < 0 else 0
+                long_str = (
+                    q5_longs
+                    + (2 if bias == "LONG" else 0)
+                    + (4 if trend > 0 else 0)
+                    + ai_long_bonus
+                )
+                short_str = (
+                    q5_shorts
+                    + (2 if bias == "SHORT" else 0)
+                    + (4 if trend < 0 else 0)
+                    + ai_short_bonus
+                )
 
                 if q5_longs >= 5 and q5_shorts >= 5:
                     stock_action = "LONG_AND_SHORT"
@@ -154,14 +231,34 @@ def build_trade_verdict(data: dict) -> CombinedVerdict:
                         stock_tone = "bear"
                     stock_can_trade = True
                     # Confidence stays LOW unless leadership is overwhelming
-                    stock_conf = "MEDIUM" if (q5_longs >= 7 or q5_shorts >= 7) else "LOW"
+                    stock_conf = (
+                        "MEDIUM" if (q5_longs >= 7 or q5_shorts >= 7) else "LOW"
+                    )
                     stock_strategy = f"Range leadership {stock_action}: Only Q5 RS candidates (high bar)."
-    
+
+    stock_reasons = list(common_reasons)
+    if ai_weight > 0 and ai_dir != 0:
+        stock_reasons.append(
+            f"AI sentiment {ai_overall} ({ai_conf_lbl}, influence {ai_influence:+.1f})"
+        )
+    try:
+        for extra in stock_reasons_extra:  # type: ignore
+            if extra not in stock_reasons:
+                stock_reasons.append(extra)
+    except NameError:
+        pass
+
     stock_v = StockVerdict(
-        action=stock_action, tone=stock_tone,
-        confidence=stock_conf, confidence_score=_conf_score(stock_conf),  # Issue #11
-        strategy=stock_strategy, top_long=top_long, top_short=top_short,
-        can_trade=stock_can_trade, reasons=list(common_reasons), blocks=stock_blocks
+        action=stock_action,
+        tone=stock_tone,
+        confidence=stock_conf,
+        confidence_score=_conf_score(stock_conf),  # Issue #11
+        strategy=stock_strategy,
+        top_long=top_long,
+        top_short=top_short,
+        can_trade=stock_can_trade,
+        reasons=stock_reasons,
+        blocks=stock_blocks,
     )
 
     # --- 2. NIFTY OPTIONS SELLING SYSTEM ---
@@ -171,7 +268,8 @@ def build_trade_verdict(data: dict) -> CombinedVerdict:
     nifty_tone = "range"
     nifty_conf = "LOW"
     nifty_blocks = list(common_blocks)
-    if not option_ok: nifty_blocks.append("Option chain stale/missing")
+    if not option_ok:
+        nifty_blocks.append("Option chain stale/missing")
 
     if not data_stale and vix < 25 and option_ok:
         nifty_can_trade = True
@@ -181,7 +279,9 @@ def build_trade_verdict(data: dict) -> CombinedVerdict:
                 iv_rank_val = float(iv_rank_val)
             except (ValueError, TypeError):
                 iv_rank_val = None
-        iv_rank_ok  = (iv_rank_val is None) or (iv_rank_val >= 40)  # None = unknown -> allow but flag
+        iv_rank_ok = (iv_rank_val is None) or (
+            iv_rank_val >= 40
+        )  # None = unknown -> allow but flag
 
         if regime_name in ("TREND_UP", "TREND_DOWN") and abs(trend) >= 4:
             # Issue #6: require IV rank >= 40 before naked sell; thin-premium environments
@@ -190,12 +290,14 @@ def build_trade_verdict(data: dict) -> CombinedVerdict:
                 nifty_action = "OPTION_SELL_DEFINED_RISK"
                 nifty_conf = "LOW"
                 nifty_tone = "bull" if trend > 0 else "bear"
-                nifty_strategy = (
-                    f"IV rank {iv_rank_val:.0f} < 40 - downgrade naked -> defined-risk spread."
-                )
+                nifty_strategy = f"IV rank {iv_rank_val:.0f} < 40 - downgrade naked -> defined-risk spread."
             else:
                 nifty_action = "NAKED_OPTION_SELL"
-                nifty_conf = "HIGH" if (trend > 0 and bias == "LONG") or (trend < 0 and bias == "SHORT") else "MEDIUM"
+                nifty_conf = (
+                    "HIGH"
+                    if (trend > 0 and bias == "LONG") or (trend < 0 and bias == "SHORT")
+                    else "MEDIUM"
+                )
                 nifty_tone = "bull" if trend > 0 else "bear"
                 side = "PUTS" if trend > 0 else "CALLS"
                 ivr_display = f"{iv_rank_val:.0f}" if iv_rank_val is not None else "N/A"
@@ -204,7 +306,9 @@ def build_trade_verdict(data: dict) -> CombinedVerdict:
             # Range-bound -> Defined risk (Iron Condor / Iron Fly)
             nifty_action = "OPTION_SELL_DEFINED_RISK"
             nifty_conf = "MEDIUM"
-            nifty_strategy = structure.get("primary") or "Sell premium via Iron Condor/Fly (Range)."
+            nifty_strategy = (
+                structure.get("primary") or "Sell premium via Iron Condor/Fly (Range)."
+            )
         else:
             # Issue #6: fallback naked sell also requires IV rank >= 40
             if bias in ("LONG", "SHORT") and iv_rank_ok:
@@ -212,14 +316,20 @@ def build_trade_verdict(data: dict) -> CombinedVerdict:
                 nifty_conf = "MEDIUM"
                 side = "PUTS" if bias == "LONG" else "CALLS"
                 ivr_display = f"{iv_rank_val:.0f}" if iv_rank_val is not None else "N/A"
-                nifty_strategy = f"Naked {side} selling basis Smart Money Bias (IVR {ivr_display})."
+                nifty_strategy = (
+                    f"Naked {side} selling basis Smart Money Bias (IVR {ivr_display})."
+                )
 
     nifty_v = NiftyVerdict(
-        action=nifty_action, tone=nifty_tone, bias=bias,
-        confidence=nifty_conf, confidence_score=_conf_score(nifty_conf),  # Issue #11
-        strategy=nifty_strategy, can_trade=nifty_can_trade,
+        action=nifty_action,
+        tone=nifty_tone,
+        bias=bias,
+        confidence=nifty_conf,
+        confidence_score=_conf_score(nifty_conf),  # Issue #11
+        strategy=nifty_strategy,
+        can_trade=nifty_can_trade,
         reasons=list(common_reasons) + [f"PCR {pcr}", f"MaxPain {max_pain}"],
-        blocks=nifty_blocks
+        blocks=nifty_blocks,
     )
 
     return CombinedVerdict(stock=stock_v, nifty=nifty_v)

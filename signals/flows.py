@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import warnings
 from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
-import logging
 
 from data import feed
 
@@ -316,20 +316,27 @@ def _bias(
         elif stk_fut < -2000:
             score -= 1.0
 
-    # --- AI Sentiment tiebreaker (weight 0.5, only when score in (-2, 2)) ---
-    if ai_sentiment is not None and -2.0 < score < 2.0:
+    # --- AI Sentiment direction influence (weight 1.0, range (-3, 3)) ---
+    # Wider range than before: AI can now tip bias when core signals are indecisive.
+    # The verdict engine also uses AI independently, so this is a secondary influence.
+    if ai_sentiment is not None and -3.0 < score < 3.0:
         # ai_sentiment may arrive as a full dict (from get_market_news_sentiment)
         # or as a plain string. Extract the relevant field when it's a dict.
         if isinstance(ai_sentiment, dict):
             _sentiment_str = str(
                 ai_sentiment.get("overall_market_sentiment") or ""
             ).upper()
+            _ai_conf = str(ai_sentiment.get("confidence") or "LOW").upper()
         else:
             _sentiment_str = str(ai_sentiment).upper()
+            _ai_conf = "MEDIUM"
+        # Scale weight by confidence: HIGH=1.0, MEDIUM=0.6, LOW=0.3
+        _conf_mult = {"HIGH": 1.0, "MEDIUM": 0.6, "LOW": 0.3}.get(_ai_conf, 0.3)
+        _ai_weight = 1.0 * _conf_mult
         if _sentiment_str in ("BULLISH", "POSITIVE", "LONG"):
-            score += 0.5
+            score += _ai_weight
         elif _sentiment_str in ("BEARISH", "NEGATIVE", "SHORT"):
-            score -= 0.5
+            score -= _ai_weight
 
     # --- Conviction threshold: ±2.0 on a max possible ~6.5 scale ---
     if score >= 2.0:
