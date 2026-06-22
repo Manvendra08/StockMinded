@@ -365,7 +365,7 @@ def _run_engine() -> dict:
             max_pain=None,
             smart_money_bias="NEUTRAL",
         )
-        source_errors.append(f"Option chain feed failed: {e}")
+        source_errors.append(f"Flow snapshot failed: {e}")
 
     bench = feed.ohlc_cached("NIFTY", period="1y")
     ranks = lead_mod.rank_universe(stock_data, bench)
@@ -918,7 +918,6 @@ def _generate_trade_alerts(data: dict) -> list[dict]:
     # Here we only:
     #   1. Caution in choppy + LOW confidence (avoid noise)
     #   2. Add AI ticker mentions as evidence to individual alerts
-    ai_signal = str(ai_sentiment.get("overall_market_sentiment") or "").upper()
     ai_conf = str(ai_sentiment.get("confidence") or "").upper()
     # Build a lookup of AI-mentioned tickers: {SYMBOL: "LONG"|"SHORT"}
     ai_ideas: dict[str, str] = {

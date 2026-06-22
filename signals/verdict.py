@@ -91,13 +91,38 @@ def build_trade_verdict(data: dict) -> CombinedVerdict:
     vix = _num(regime.get("vix"))
     breadth = _num(regime.get("breadth_pct_above_50dma"), 50.0)
 
-    # --- AI Sentiment Extraction ---
-    ai_sentiment = flows.get("ai_sentiment") or {}
-    ai_overall = str(ai_sentiment.get("overall_market_sentiment") or "NEUTRAL").upper()
-    ai_conf_lbl = str(ai_sentiment.get("confidence") or "LOW").upper()
-    ai_score_raw = _num(ai_sentiment.get("sentiment_score"))
-    # AI direction score: +1 BULLISH, -1 BEARISH, 0 NEUTRAL/other
-    ai_dir = 1 if ai_overall == "BULLISH" else (-1 if ai_overall == "BEARISH" else 0)
+    # --- AI Sentiment Extraction (dict + legacy string-safe) ---
+    ai_sentiment = flows.get("ai_sentiment")
+    ai_overall = "NEUTRAL"
+    ai_conf_lbl = "LOW"
+    ai_score_raw = 0.0
+    if isinstance(ai_sentiment, dict):
+        ai_overall = str(
+            ai_sentiment.get("overall_market_sentiment") or "NEUTRAL"
+        ).upper()
+        ai_conf_lbl = str(ai_sentiment.get("confidence") or "LOW").upper()
+        ai_score_raw = _num(ai_sentiment.get("sentiment_score"), 0.0)
+    elif isinstance(ai_sentiment, str):
+        s = ai_sentiment.strip().upper()
+        if s in ("BULLISH", "POSITIVE", "LONG"):
+            ai_overall = "BULLISH"
+        elif s in ("BEARISH", "NEGATIVE", "SHORT"):
+            ai_overall = "BEARISH"
+        else:
+            ai_overall = "NEUTRAL"
+
+    # AI direction score: +1 BULLISH, -1 BEARISH, else sign(sentiment_score) fallback
+    if ai_overall == "BULLISH":
+        ai_dir = 1
+    elif ai_overall == "BEARISH":
+        ai_dir = -1
+    elif ai_score_raw > 0.15:
+        ai_dir = 1
+    elif ai_score_raw < -0.15:
+        ai_dir = -1
+    else:
+        ai_dir = 0
+
     # AI confidence weight: HIGH=1.0, MEDIUM=0.5, LOW=0.2
     ai_weight = {"HIGH": 1.0, "MEDIUM": 0.5, "LOW": 0.2}.get(ai_conf_lbl, 0.0)
     # Combined AI influence: direction strength * confidence weight, range [-1, 1]
@@ -133,6 +158,7 @@ def build_trade_verdict(data: dict) -> CombinedVerdict:
     stock_tone = "unclear"
     stock_conf = "LOW"
     stock_blocks = list(common_blocks)
+    stock_reasons_extra: list[str] = []
 
     if not data_stale and vix < 25:
         if regime_name == "TREND_UP" and trend >= 3 and breadth >= 45:
@@ -158,8 +184,6 @@ def build_trade_verdict(data: dict) -> CombinedVerdict:
                     f"AI sentiment BEARISH ({ai_conf_lbl}) — caution on long entries"
                 ]
             stock_strategy = "Long A-Grade leaders with RS Slope > 50."
-            if not stock_reasons_extra:
-                stock_reasons_extra = []
         elif regime_name == "TREND_DOWN" and trend <= -3 and breadth <= 55:
             stock_action = "SHORT_ONLY"
             stock_tone = "bear"
@@ -183,8 +207,6 @@ def build_trade_verdict(data: dict) -> CombinedVerdict:
                     f"AI sentiment BULLISH ({ai_conf_lbl}) — caution on short entries"
                 ]
             stock_strategy = "Short A-Grade laggards with RS Slope < -50."
-            if not stock_reasons_extra:
-                stock_reasons_extra = []
         elif regime_name in ("RANGE_HIGH_VOL", "RANGE_LOW_VOL", "VOL_CONTRACTION"):
             # Range regimes: directional stock picking only when leadership is
             # exceptionally strong.  Marginal setups bleed via EOD close in
@@ -194,20 +216,20 @@ def build_trade_verdict(data: dict) -> CombinedVerdict:
 
             # Gate: need >=5 Q5 names on at least one side to even consider
             if q5_longs >= 5 or q5_shorts >= 5:
-                # AI sentiment influence: add +3 if AI confirms direction, -3 if contradicts
-                ai_long_bonus = int(ai_influence * 3) if ai_influence > 0 else 0
-                ai_short_bonus = int(abs(ai_influence) * 3) if ai_influence < 0 else 0
+                # AI sentiment influence: symmetric shift across both sides.
+                # +ve shift favors longs and penalizes shorts, -ve shift does opposite.
+                ai_shift = int(round(ai_influence * 3))
                 long_str = (
                     q5_longs
                     + (2 if bias == "LONG" else 0)
                     + (4 if trend > 0 else 0)
-                    + ai_long_bonus
+                    + ai_shift
                 )
                 short_str = (
                     q5_shorts
                     + (2 if bias == "SHORT" else 0)
                     + (4 if trend < 0 else 0)
-                    + ai_short_bonus
+                    - ai_shift
                 )
 
                 if q5_longs >= 5 and q5_shorts >= 5:
@@ -230,23 +252,28 @@ def build_trade_verdict(data: dict) -> CombinedVerdict:
                     else:
                         stock_tone = "bear"
                     stock_can_trade = True
-                    # Confidence stays LOW unless leadership is overwhelming
-                    stock_conf = (
-                        "MEDIUM" if (q5_longs >= 7 or q5_shorts >= 7) else "LOW"
-                    )
+                    # Confidence: AI alignment can boost from LOW to MEDIUM
+                    ai_range_boost = abs(ai_influence) > 0.4
+                    base_high = q5_longs >= 7 or q5_shorts >= 7
+                    if ai_range_boost or base_high:
+                        stock_conf = "MEDIUM"
+                    else:
+                        stock_conf = "LOW"
                     stock_strategy = f"Range leadership {stock_action}: Only Q5 RS candidates (high bar)."
+                    # Log AI influence on range direction decision
+                    if ai_shift != 0:
+                        stock_reasons_extra.append(
+                            f"AI sentiment {ai_overall} ({ai_conf_lbl}) shifts range {ai_shift:+d}pt toward {'longs' if ai_shift > 0 else 'shorts'}"
+                        )
 
     stock_reasons = list(common_reasons)
     if ai_weight > 0 and ai_dir != 0:
         stock_reasons.append(
             f"AI sentiment {ai_overall} ({ai_conf_lbl}, influence {ai_influence:+.1f})"
         )
-    try:
-        for extra in stock_reasons_extra:  # type: ignore
-            if extra not in stock_reasons:
-                stock_reasons.append(extra)
-    except NameError:
-        pass
+    for extra in stock_reasons_extra:
+        if extra not in stock_reasons:
+            stock_reasons.append(extra)
 
     stock_v = StockVerdict(
         action=stock_action,

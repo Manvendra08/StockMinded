@@ -3482,6 +3482,7 @@
             }
 
             function renderSectors(d) {
+                if (!d.flows) return;
                 const all = [
                     ...(d.flows.top_inflow || []),
                     ...(d.flows.top_outflow || []),
