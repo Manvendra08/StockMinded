@@ -2617,6 +2617,54 @@
                                 </div>
                             </div>
                         </div>
+                        <!-- AI Verdict Review Section -->
+                        <div
+                            id="verdict-review-container"
+                            class="status-pick-item"
+                            style="
+                                border-top: 1px solid var(--glass-border);
+                                padding-top: 8px;
+                                margin-top: 4px;
+                                display: none;
+                            "
+                        >
+                            <div
+                                style="
+                                    display: flex;
+                                    align-items: center;
+                                    gap: 8px;
+                                    font-size: 0.75rem;
+                                "
+                            >
+                                <span>🧠</span>
+                                <span
+                                    style="
+                                        font-weight: 600;
+                                        color: var(--text-secondary);
+                                    "
+                                    >Verdict Review:</span
+                                >
+                                <span
+                                    id="verdict-review-status"
+                                    style="font-weight: 600"
+                                ></span>
+                                <span
+                                    id="verdict-review-model"
+                                    style="
+                                        font-size: 0.65rem;
+                                        color: var(--text-muted);
+                                    "
+                                ></span>
+                            </div>
+                            <div
+                                id="verdict-review-reason"
+                                style="
+                                    font-size: 0.75rem;
+                                    color: var(--text-secondary);
+                                    margin-top: 4px;
+                                "
+                            ></div>
+                        </div>
                     </div>
                 </div>
 
@@ -3081,6 +3129,42 @@
                 const tsEl = document.getElementById("status-top-short");
                 if (tlEl) tlEl.textContent = topLong;
                 if (tsEl) tsEl.textContent = topShort;
+
+                // 4. Render AI Verdict Review
+                const vr = d.verdict_review || null;
+                const vrContainer = document.getElementById(
+                    "verdict-review-container",
+                );
+                const vrStatus = document.getElementById(
+                    "verdict-review-status",
+                );
+                const vrModel = document.getElementById("verdict-review-model");
+                const vrReason = document.getElementById(
+                    "verdict-review-reason",
+                );
+                if (
+                    vrContainer &&
+                    vr &&
+                    vr.model_used &&
+                    vr.model_used !== "None"
+                ) {
+                    const isApproved = vr.approved !== false;
+                    const tone = isApproved
+                        ? vr.suggested_action === "SKIP"
+                            ? "range"
+                            : "bull"
+                        : "bear";
+                    const icon = isApproved ? "✅" : "⚠️";
+                    vrStatus.textContent = `${icon} ${vr.suggested_action || "PROCEED"}`;
+                    vrStatus.style.color = isApproved
+                        ? "var(--accent-green)"
+                        : "var(--accent-red)";
+                    vrModel.textContent = `| ${vr.model_used}`;
+                    vrReason.textContent = vr.reason || "";
+                    vrContainer.style.display = "block";
+                } else if (vrContainer) {
+                    vrContainer.style.display = "none";
+                }
             }
 
             function renderRegime(d) {
@@ -3416,9 +3500,11 @@
                                     parsed.trade_ideas ||
                                     parsed.ideas;
 
+                                const _modelUsed = parsed.model_used || "";
                                 let html = `
                 <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
                   <span class="decision-pill ${tone}" style="display:inline-block; padding: 4px 10px; font-size:0.75rem; font-weight:700; border-radius:4px;">${sent.toUpperCase()}</span>
+                  ${_modelUsed ? `<span style="font-size:0.65rem; color:var(--text-muted); background:rgba(255,255,255,0.06); padding:2px 8px; border-radius:3px;">🧠 ${_modelUsed}</span>` : ""}
                 </div>
                 ${just ? `<div style="font-size:0.8rem; color:var(--text-secondary); line-height:1.4; margin-bottom: 12px; font-style: italic;">"${just}"</div>` : ""}
               `;
@@ -3482,10 +3568,12 @@
             }
 
             function renderSectors(d) {
-                if (!d.flows) return;
+                if (!d || !d.flows) return;
                 const all = [
-                    ...(d.flows.top_inflow || []),
-                    ...(d.flows.top_outflow || []),
+                    ...(d.flows.top_inflow || d.flows.top_inflow_sectors || []),
+                    ...(d.flows.top_outflow ||
+                        d.flows.top_outflow_sectors ||
+                        []),
                 ];
                 const sorted = all.sort((a, b) => b[1] - a[1]);
                 const maxAbs = Math.max(

@@ -426,14 +426,35 @@ def _run_engine() -> dict:
         round(100 * (nifty_close - nifty_prev) / nifty_prev, 2) if nifty_prev else 0
     )
 
-    # BankNifty
+    # BankNifty — fallback to ^NSEBANK via yfinance if primary feed fails
+    bn_df = pd.DataFrame()
+    bn_fallback_used = False
     try:
         bn_df = feed.ohlc_cached("BANKNIFTY", period="1mo")
         if not bn_df.empty:
             bn_df = bn_df.dropna(subset=["close"])
     except Exception as e:
-        bn_df = pd.DataFrame()
-        source_errors.append(f"BankNifty feed failed: {e}")
+        source_errors.append(f"BankNifty primary feed failed: {e}")
+    if bn_df.empty:
+        try:
+            import yfinance as yf
+
+            bn_ticker = yf.Ticker("^NSEBANK")
+            bn_df = bn_ticker.history(period="1mo")
+            if not bn_df.empty:
+                bn_df = bn_df.rename(
+                    columns={
+                        "Open": "open",
+                        "High": "high",
+                        "Low": "low",
+                        "Close": "close",
+                        "Volume": "volume",
+                    }
+                )
+                bn_fallback_used = True
+                source_errors.append("BankNifty: used yfinance fallback")
+        except Exception as e2:
+            source_errors.append(f"BankNifty fallback also failed: {e2}")
 
     bn_close = float(bn_df["close"].iloc[-1]) if not bn_df.empty else 0
     bn_prev = float(bn_df["close"].iloc[-2]) if len(bn_df) >= 2 else bn_close
@@ -696,6 +717,15 @@ def _run_engine() -> dict:
     # Tag the heavy signal computation time so the UI can show freshness
     # distinct from wall-clock ts (which updates every request).
     result["signals_computed_at"] = status["ts"]
+
+    # Run Brain Verdict Review (LLM second opinion on trading verdict)
+    # Fail-open: if LLM unavailable, verdict_review is None and downstream ignores it.
+    try:
+        result["verdict_review"] = _brain_verdict_review(result)
+    except Exception as vr_e:
+        logging.getLogger(__name__).exception("Brain Verdict Review failed: %s", vr_e)
+        result["verdict_review"] = None
+
     result = _make_safe(result)
     with _cache_lock:
         _cache = result
@@ -764,12 +794,28 @@ def _generate_trade_alerts(data: dict) -> list[dict]:
     allow_shorts = can_trade_equity and stock_action in ("SHORT_ONLY", "LONG_AND_SHORT")
 
     # 2. Entry Window Tightening:
-    # Avoid entries after 14:15 IST (EOD volatility) and ensure AI confidence is sufficient
+    # Avoid equity entries after 14:15 IST (EOD volatility). Options use their own
+    # window from config (is_within_entry_window) which allows until 14:30.
     now_ist = datetime.now(timezone(timedelta(hours=5, minutes=30)))
     if (now_ist.hour, now_ist.minute) >= (14, 15):
         allow_longs = False
         allow_shorts = False
-        can_trade_options = False
+        # Do NOT block can_trade_options here — options entry window handles this
+
+    # 2b. Expiry Day Restriction: no equity trades after 12:00 IST on expiry day
+    try:
+        from signals.options import is_symbol_expiry_today
+
+        if is_symbol_expiry_today("NIFTY"):
+            if (now_ist.hour, now_ist.minute) >= (12, 0):
+                allow_longs = False
+                allow_shorts = False
+        if is_symbol_expiry_today("BANKNIFTY"):
+            if (now_ist.hour, now_ist.minute) >= (12, 0):
+                allow_longs = False
+                allow_shorts = False
+    except Exception:
+        pass  # fail-open if expiry check unavailable
 
     # 2. VIX Filter
     if vix > 24:
@@ -1574,12 +1620,26 @@ def api_paper_auto_enter():
             if "error" not in result:
                 entered_nifty_options.append(result)
 
+        # BANKNIFTY options
+        entered_banknifty_options = []
+        banknifty_setups = pt.get_banknifty_option_setups(data, cfg)
+        for s in banknifty_setups:
+            if not s.get("suitable") or not s.get("legs"):
+                continue
+            result = pt.enter_banknifty_option_structure(
+                _dict_to_setup(s), _dict_legs_to_resolved(s["legs"]), cfg
+            )
+            if "error" not in result:
+                entered_banknifty_options.append(result)
+
         return jsonify(
             {
                 "entered": entered,
                 "entered_nifty_options": entered_nifty_options,
+                "entered_banknifty_options": entered_banknifty_options,
                 "alert_count": len(alerts),
                 "nifty_setup_count": len(setups),
+                "banknifty_setup_count": len(banknifty_setups),
             }
         )
     except Exception as e:
@@ -1597,12 +1657,17 @@ def api_paper_check():
         closed_opts = pt.check_nifty_option_exits(
             vix_current=data.get("regime", {}).get("vix", 15.0), cfg=cfg
         )
+        closed_banknifty_opts = pt.check_banknifty_option_exits(
+            vix_current=data.get("regime", {}).get("vix", 15.0), cfg=cfg
+        )
         return jsonify(
             {
                 "closed": closed,
                 "count": len(closed),
                 "closed_nifty_options": closed_opts,
                 "nifty_option_count": len(closed_opts),
+                "closed_banknifty_options": closed_banknifty_opts,
+                "banknifty_option_count": len(closed_banknifty_opts),
             }
         )
     except Exception as e:
@@ -1943,12 +2008,19 @@ def _dict_legs_to_resolved(legs: list[dict]):
 
 @app.route("/api/options/alerts")
 def api_options_alerts():
-    """Generate NIFTY option-selling setups."""
+    """Generate NIFTY and BANKNIFTY option-selling setups."""
     try:
         cfg = load_config()
         data = _run_engine()
         setups = pt.get_nifty_option_setups(data, cfg)
-        return jsonify({"ts": data.get("ts"), "setups": setups})
+        banknifty_setups = pt.get_banknifty_option_setups(data, cfg)
+        return jsonify(
+            {
+                "ts": data.get("ts"),
+                "setups": setups,
+                "banknifty_setups": banknifty_setups,
+            }
+        )
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -1956,10 +2028,11 @@ def api_options_alerts():
 
 @app.route("/api/options/auto-enter")
 def api_options_auto_enter():
-    """Auto-enter suitable NIFTY option setups."""
+    """Auto-enter suitable NIFTY and BANKNIFTY option setups."""
     try:
         cfg = load_config()
         data = _run_engine()
+        # NIFTY
         setups = pt.get_nifty_option_setups(data, cfg)
         entered = []
         for s in setups:
@@ -1970,7 +2043,25 @@ def api_options_auto_enter():
             )
             if "error" not in result:
                 entered.append(result)
-        return jsonify({"entered": entered, "setups": setups})
+        # BANKNIFTY
+        banknifty_setups = pt.get_banknifty_option_setups(data, cfg)
+        entered_banknifty = []
+        for s in banknifty_setups:
+            if not s.get("suitable") or not s.get("legs"):
+                continue
+            result = pt.enter_banknifty_option_structure(
+                _dict_to_setup(s), _dict_legs_to_resolved(s["legs"]), cfg
+            )
+            if "error" not in result:
+                entered_banknifty.append(result)
+        return jsonify(
+            {
+                "entered": entered,
+                "entered_banknifty": entered_banknifty,
+                "setups": setups,
+                "banknifty_setups": banknifty_setups,
+            }
+        )
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -2037,6 +2128,182 @@ import time
 # (regime/bias/vix/pcr + alert basket). This stops token burn loops.
 _brain_audit_cache: dict[str, bool] = {}
 _brain_audit_cache_ts: dict[str, float] = {}
+
+
+_VERDICT_REVIEW_HISTORY_FILE = Path("data/cache/verdict_review_history.json")
+
+
+def _load_verdict_review_history() -> list[dict]:
+    """Load past verdict review history for self-improvement context."""
+    try:
+        if _VERDICT_REVIEW_HISTORY_FILE.exists():
+            with open(_VERDICT_REVIEW_HISTORY_FILE, "r") as f:
+                data = json.load(f)
+                return data if isinstance(data, list) else []
+    except Exception as e:
+        logging.getLogger(__name__).exception(
+            "Failed to load verdict review history: %s", e
+        )
+    return []
+
+
+def _save_verdict_review_run(run: dict) -> None:
+    """Save a verdict review run to persistent history for self-improvement."""
+    try:
+        _VERDICT_REVIEW_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        history = _load_verdict_review_history()
+        history.append(run)
+        history = history[-20:]  # keep last 20
+        with open(_VERDICT_REVIEW_HISTORY_FILE, "w") as f:
+            json.dump(history, f, indent=2)
+    except Exception as e:
+        logging.getLogger(__name__).exception(
+            "Failed to save verdict review history: %s", e
+        )
+
+
+def _build_verdict_review_context() -> str:
+    """Build self-improvement context from past verdict reviews."""
+    history = _load_verdict_review_history()
+    if not history:
+        return ""
+    recent = history[-5:]
+    ctx = "\n\n--- PREVIOUS VERDICT REVIEW HISTORY (Self-Improvement Memory) ---\n"
+    ctx += (
+        "Review how your previous assessments performed. Learn from past decisions:\n"
+    )
+    for h in recent:
+        ts = h.get("timestamp", "N/A")
+        act = h.get("action", "N/A")
+        appr = h.get("approved", "N/A")
+        sug = h.get("suggested_action", "N/A")
+        reas = h.get("reason", "")
+        ctx += f"- [{ts}] Verdict: {act} | Approved: {appr} | Suggested: {sug} | Reason: {reas}\n"
+    ctx += "\nUse this memory to avoid repeating past errors in your assessment.\n"
+    return ctx
+
+
+def _brain_verdict_review(data: dict) -> dict:
+    """LLM reviews the Final Trading Verdict for Directional Stock Strategy.
+
+    The verdict engine already computes a data-driven verdict. This LLM review
+    adds a second-opinion layer that considers:
+    - Regime context
+    - AI sentiment (from news)
+    - Smart money bias
+    - PCR, VIX, trend
+
+    Self-Improvement: past reviews are loaded and injected as context so the
+    LLM can learn from prior assessments and improve future decision-making.
+
+    Returns: {"approved": bool, "reason": str, "suggested_action": str}
+    Returns fail-open default if LLM unavailable.
+    """
+    import json as _json
+    import time as _time
+
+    from data.ai_scraper import call_llm
+
+    verdict = data.get("verdict", {})
+    stock_v = verdict.get("stock", {})
+    regime = data.get("regime", {})
+    flows = data.get("flows", {})
+
+    regime_name = regime.get("name", "UNKNOWN")
+    trend_score = regime.get("trend_score", 0)
+    vix = regime.get("vix", 15)
+    adx = regime.get("adx", 0)
+    bias = flows.get("bias", "NEUTRAL")
+    pcr = flows.get("pcr_oi")
+    breadth = regime.get("breadth_pct_above_50dma", 50)
+    ai_sentiment = flows.get("ai_sentiment", {})
+    if isinstance(ai_sentiment, dict):
+        ai_overall = ai_sentiment.get("overall_market_sentiment", "NEUTRAL")
+        ai_conf = ai_sentiment.get("confidence", "LOW")
+    else:
+        ai_overall = "NEUTRAL"
+        ai_conf = "LOW"
+
+    stock_action = stock_v.get("action", "WAIT")
+    stock_conf = stock_v.get("confidence", "LOW")
+    stock_strategy = stock_v.get("strategy", "")
+    stock_reasons = stock_v.get("reasons", [])
+
+    # Load self-improvement context from past reviews
+    _improvement_context = _build_verdict_review_context()
+
+    prompt = (
+        "You are a senior Indian equities risk manager. Review this trading verdict.\n\n"
+        f"DIRECTIONAL STOCK VERDICT: {stock_action} (Confidence: {stock_conf})\n"
+        f"Strategy: {stock_strategy}\n"
+        f"Regime: {regime_name} | Trend: {trend_score}/10 | ADX: {adx:.1f} | VIX: {vix:.1f}\n"
+        f"Breadth >50DMA: {breadth}% | Bias: {bias} | PCR: {pcr}\n"
+        f"AI Sentiment: {ai_overall} ({ai_conf})\n"
+        f"Reasons: {'; '.join(stock_reasons[-3:])}\n"
+        f"{_improvement_context}"
+        "Return ONLY valid JSON:\n"
+        '{"approved": true/false, '
+        '"reason": "<=15 words explaining concern or approval", '
+        '"suggested_action": "PROCEED" | "CAUTION" | "SKIP"}'
+    )
+
+    try:
+        decision, model_used = call_llm(
+            prompt,
+            system_prompt="You are a risk manager. Return strict JSON only.",
+            json_mode=True,
+            max_tokens=100,
+            return_provider=True,
+        )
+        if decision is None:
+            return {
+                "approved": True,
+                "reason": "LLM unavailable, proceeding",
+                "model_used": "None",
+            }
+
+        approved = bool(decision.get("approved", True))
+        reason = str(decision.get("reason", ""))
+        suggested = str(decision.get("suggested_action", "PROCEED"))
+
+        logging.getLogger(__name__).info(
+            "🧠 Verdict Review (%s): %s | %s | %s",
+            model_used,
+            approved,
+            suggested,
+            reason,
+        )
+
+        # Build and save the review run for self-improvement
+        review_run = {
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "model_used": model_used,
+            "action": stock_action,
+            "confidence": stock_conf,
+            "approved": approved,
+            "suggested_action": suggested,
+            "reason": reason,
+            "regime": regime_name,
+            "trend_score": trend_score,
+            "vix": vix,
+            "bias": bias,
+            "ai_overall_sentiment": ai_overall,
+        }
+        _save_verdict_review_run(review_run)
+
+        return {
+            "approved": approved,
+            "reason": reason,
+            "suggested_action": suggested,
+            "model_used": model_used,
+        }
+    except Exception as e:
+        logging.getLogger(__name__).error("🧠 Verdict Review ERROR: %s", e)
+        return {
+            "approved": True,
+            "reason": "Review unavailable, proceeding",
+            "model_used": "None",
+        }
 
 
 def _brain_audit(data: dict, alerts: list[dict]) -> bool:
@@ -2256,7 +2523,39 @@ def _automation_worker():
                     except Exception as ne:
                         _log.exception("  > NIFTY options automation error: %s", ne)
 
-                    # ---- Phase 3: Multi-underlying options auto-execution ----
+                    # ---- Phase 3: BANKNIFTY options auto-entry ----
+                    try:
+                        banknifty_setups = pt.get_banknifty_option_setups(data, cfg)
+                        banknifty_entered = []
+                        for s in banknifty_setups:
+                            if not s.get("suitable") or not s.get("legs"):
+                                continue
+                            result = pt.enter_banknifty_option_structure(
+                                _dict_to_setup(s),
+                                _dict_legs_to_resolved(s["legs"]),
+                                cfg,
+                            )
+                            if "error" not in result:
+                                banknifty_entered.append(result)
+                        if banknifty_entered:
+                            token = cfg.get("alerts", {}).get("telegram_bot_token")
+                            chat_id = cfg.get("alerts", {}).get("telegram_chat_id")
+                            for res in banknifty_entered:
+                                msg = _format_options_telegram_alert(
+                                    res,
+                                    regime_name,
+                                    bias,
+                                    "N/A",
+                                    vix_disp,
+                                    is_nifty=False,
+                                )
+                                Alerter(token, chat_id).send(msg)
+                    except Exception as bne:
+                        _log.exception(
+                            "  > BANKNIFTY options automation error: %s", bne
+                        )
+
+                    # ---- Phase 4: Multi-underlying options auto-execution ----
                     if cfg.get("options", {}).get("enabled"):
                         try:
                             from signals.option_strategy import (
@@ -2377,6 +2676,12 @@ def _automation_worker():
                 )
             except Exception as ex:
                 _log.exception("  > NIFTY exit check failed: %s", ex)
+            try:
+                pt.check_banknifty_option_exits(
+                    vix_current=vix_now, cfg=load_config(), current_regime=regime_now
+                )
+            except Exception as ex:
+                _log.exception("  > BANKNIFTY exit check failed: %s", ex)
 
         except Exception as e:
             ts = datetime.now().strftime("%H:%M:%S")
