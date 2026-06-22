@@ -159,7 +159,7 @@ def classify(index_symbol: str = "NIFTY", stock_universe_data: dict | None = Non
             vix_5d_change_pct=0.0,
             vix_rank=None,
             adx=0.0,
-            breadth_pct_above_50dma=0.0,
+            breadth_pct_above_50dma=None,
             notes="fallback due to missing data",
         )
 
@@ -177,8 +177,8 @@ def classify(index_symbol: str = "NIFTY", stock_universe_data: dict | None = Non
     # Issue #7: VOL_EXPANSION requires VIX spike sustained across >= 2 consecutive sessions
     # (single-day spikes are too noisy to justify regime change)
     vix_prev = float(vix["close"].iloc[-2]) if len(vix) >= 2 else vix_now
-    vix_prev5 = float(vix["close"].iloc[-7]) if len(vix) >= 7 else vix_5d_ago
-    prev_day_chg = 100 * (vix_prev - vix_prev5) / vix_prev5 if vix_prev5 else 0.0
+    vix_prev_close = float(vix["close"].iloc[-3]) if len(vix) >= 3 else vix_prev
+    prev_day_chg = 100 * (vix_prev - vix_prev_close) / vix_prev_close if vix_prev_close else 0.0
     two_session_spike = (vix_chg > 25 and vix_now > 16) and (prev_day_chg > 20 or vix_chg > 35)
     if two_session_spike:
         regime = Regime.VOL_EXPANSION

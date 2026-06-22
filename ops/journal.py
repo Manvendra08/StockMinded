@@ -151,3 +151,12 @@ class Journal:
         self.conn.commit()
         return cur.rowcount
 
+    def close(self) -> None:
+        try:
+            self.conn.close()
+        except Exception:
+            pass
+
+    def __del__(self):
+        self.close()
+

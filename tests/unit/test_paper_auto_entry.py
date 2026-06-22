@@ -23,7 +23,8 @@ def mock_atomic_db_update(tmp_path):
     with patch("dashboard.paper_trader.DATA_FILE", test_db), \
          patch("dashboard.paper_trader.LOCK_FILE", test_db.with_suffix(".lock")), \
          patch("dashboard.paper_trader.BAK_FILE", test_db.with_suffix(".bak")), \
-         patch("dashboard.paper_trader.TMP_FILE", test_db.with_suffix(".tmp")):
+         patch("dashboard.paper_trader.TMP_FILE", test_db.with_suffix(".tmp")), \
+         patch("dashboard.paper_trader.get_fno_lot_sizes", return_value={}):
 
         @contextlib.contextmanager
         def mock_update():

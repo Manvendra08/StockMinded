@@ -3,16 +3,17 @@ r"""StockMinded visual dashboard -- Flask server.
 Run:  .venv312\Scripts\python dashboard/server.py
 Open: http://localhost:5050
 """
+
 from __future__ import annotations
 
+import datetime as dt_mod
 import json
 import os
-import sys
 import sqlite3
+import sys
 import traceback
 from dataclasses import asdict
-from datetime import datetime, date, timezone, timedelta
-import datetime as dt_mod
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 # Ensure project root is on sys.path so signal imports work
@@ -20,30 +21,35 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from dotenv import load_dotenv
+
 load_dotenv(PROJECT_ROOT / ".env")
 
-from flask import Flask, jsonify, request, send_from_directory
 import logging
+
 import numpy as np
 import pandas as pd
+from flask import Flask, jsonify, request, send_from_directory
 
 from config.loader import load_config, load_universe
 from data import feed
-from signals import regime as regime_mod
-from signals import flows as flows_mod
-from signals import leadership as lead_mod
-from signals import structure_map as sm
-from signals import verdict as verdict_mod
 from ops.alerts import Alerter
 from ops.journal import Journal
+from signals import flows as flows_mod
+from signals import leadership as lead_mod
+from signals import regime as regime_mod
+from signals import structure_map as sm
+from signals import verdict as verdict_mod
 
 app = Flask(__name__, static_folder=str(Path(__file__).parent))
-app.json.ensure_ascii = False  # Allow native UTF-8 (like Rupee symbol) in JSON responses
+app.json.ensure_ascii = (
+    False  # Allow native UTF-8 (like Rupee symbol) in JSON responses
+)
 
 # -- cache in memory so refresh is instant after first load --------
 _cache: dict = {}
 _cache_ts: datetime | None = None
 _cache_lock = __import__("threading").Lock()
+_engine_busy = False
 
 
 def _load_journal_trade_rows() -> list[dict]:
@@ -65,14 +71,18 @@ def _journal_trade_to_ui_trade(row: dict) -> dict:
     side = str(row.get("side") or "LONG").upper()
 
     def _to_ist(dt_str: str) -> str | None:
-        if not dt_str: return None
+        if not dt_str:
+            return None
         try:
             clean = dt_str.replace("Z", "").replace("T", " ")[:19]
-            dt = datetime.strptime(clean, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+            dt = datetime.strptime(clean, "%Y-%m-%d %H:%M:%S").replace(
+                tzinfo=timezone.utc
+            )
             ist = timezone(timedelta(hours=5, minutes=30))
             return dt.astimezone(ist).strftime("%Y-%m-%d %H:%M:%S")
         except Exception:
             return dt_str.replace("T", " ")[:19]
+
     entry = row.get("entry")
     exit_price = row.get("exit_price")
     qty = int(row.get("qty") or 0)
@@ -131,9 +141,13 @@ def _merged_paper_trades(limit: int = 100) -> tuple[list[dict], list[dict]]:
         if t.get("source") != "journal" and "journal_id" in t:
             seen_jids.add(t["journal_id"])
 
-    deduped = [t for t in trades if not (t.get("source") == "journal" and t.get("id") in seen_jids)]
+    deduped = [
+        t
+        for t in trades
+        if not (t.get("source") == "journal" and t.get("id") in seen_jids)
+    ]
     deduped.sort(key=lambda t: str(t.get("entry_time") or t.get("entry_date") or ""))
-    
+
     full_history = list(reversed(deduped))
     return full_history, full_history[:limit]
 
@@ -142,7 +156,9 @@ def _merged_open_trades() -> list[dict]:
     """Return all open stock and paper trades."""
     trades = []
     try:
-        journal_rows = [row for row in _load_journal_trade_rows() if not row.get("closed_at")]
+        journal_rows = [
+            row for row in _load_journal_trade_rows() if not row.get("closed_at")
+        ]
         trades.extend(_journal_trade_to_ui_trade(row) for row in journal_rows)
     except Exception:
         traceback.print_exc()
@@ -150,19 +166,24 @@ def _merged_open_trades() -> list[dict]:
         trades.extend(pt.get_open_trades())
     except Exception:
         traceback.print_exc()
-        
+
     # Deduplicate by journal_id
     seen_jids = set()
     for t in trades:
         if t.get("source") != "journal" and "journal_id" in t:
             seen_jids.add(t["journal_id"])
 
-    return [t for t in trades if not (t.get("source") == "journal" and t.get("id") in seen_jids)]
+    return [
+        t
+        for t in trades
+        if not (t.get("source") == "journal" and t.get("id") in seen_jids)
+    ]
 
 
 def _market_status_now() -> dict:
     """Compute live market status — never cached."""
-    from datetime import timezone, timedelta
+    from datetime import timedelta, timezone
+
     ist_now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
     is_weekday = ist_now.weekday() < 5
     tt = ist_now.time()
@@ -174,38 +195,151 @@ def _market_status_now() -> dict:
     return {
         "ts": ist_now.strftime("%Y-%m-%d %H:%M:%S IST"),
         "market_open": market_open,
-        "market_status": "OPEN" if market_open else ("WEEKEND" if not is_weekday else "CLOSED"),
+        "market_status": "OPEN"
+        if market_open
+        else ("WEEKEND" if not is_weekday else "CLOSED"),
         "session_date": ist_now.strftime("%Y-%m-%d"),
     }
 
 
+def _calculate_atr(df: pd.DataFrame, period: int = 14) -> float:
+    """Compute simple ATR from OHLC DataFrame."""
+    if df.empty or len(df) < period + 1:
+        return 0.0
+    h = df["high"]
+    l = df["low"]
+    c_prev = df["close"].shift(1)
+    tr = pd.concat([h - l, (h - c_prev).abs(), (l - c_prev).abs()], axis=1).max(axis=1)
+    return float(tr.rolling(period).mean().iloc[-1])
+
+
 def _run_engine() -> dict:
     """Execute the full 4-signal pipeline and return a JSON-safe dict."""
-    global _cache, _cache_ts
+    global _cache, _cache_ts, _engine_busy
 
-    # Re-use if less than 2 min old
-    # Note: guarded by _cache_lock because dashboard endpoints + background worker may call _run_engine concurrently.
     with _cache_lock:
         cache_ts = _cache_ts
         cache_val = _cache
+        if _engine_busy:
+            return {**cache_val, "engine_status": "BUSY", **_market_status_now()}
 
     if cache_ts and (datetime.now() - cache_ts).total_seconds() < 120:
-        # Always refresh live fields so UI never shows stale ts / market flag.
         return {**cache_val, **_market_status_now()}
 
+    with _cache_lock:
+        _engine_busy = True
+
+    # _engine_busy is cleared after cache is written (happy path) or in the
+    # automation worker's exception handler (error path).
     cfg = load_config()
     universe = load_universe(cfg)
     sectors = cfg["sectors"]
 
     source_errors = []
-    
+
     # Fetch stock data with error tracking
     try:
-        stock_data = feed.universe_ohlc(universe, period="6mo")
+        stock_data_result = feed.universe_ohlc(universe, period="6mo")
+        # Some implementations return {"fetched": N, "data": {...}} while others return the raw dict.
+        if isinstance(stock_data_result, dict) and "data" in stock_data_result:
+            stock_data = stock_data_result.get("data") or {}
+            fetched = stock_data_result.get("fetched", 0) or 0
+        else:
+            stock_data = stock_data_result or {}
+            fetched = len(stock_data) if hasattr(stock_data, "__len__") else 0
+
+        # Hard early exit: stop the pipeline (and LLM) when no usable OHLC DataFrames exist.
+        # Some feeds may return a non-empty dict but with empty DataFrames (stale/unusable).
+        usable_symbol_count = sum(
+            1
+            for df in (stock_data.values() if isinstance(stock_data, dict) else [])
+            if df is not None and hasattr(df, "empty") and not df.empty
+        )
+
+        if usable_symbol_count == 0:
+            market_now = _market_status_now()
+            result = {
+                **market_now,
+                "source_errors": source_errors
+                + [
+                    f"No usable OHLC data (usable_symbol_count=0, fetched={fetched}). Skipping Brain Audit."
+                ],
+                "nifty": {"close": 0, "change_pct": 0},
+                "banknifty": {"close": 0, "change_pct": 0},
+                "regime": {
+                    "name": "UNKNOWN",
+                    "trend_score": 0,
+                    "vix": 0,
+                    "vix_5d_change_pct": 0,
+                    "adx": 0,
+                    "breadth_pct_above_50dma": 0,
+                    "notes": "No fresh universe OHLC; engine short-circuited.",
+                },
+                "flows": {
+                    "fii_dii_5d": {},
+                    "top_inflow": [],
+                    "top_outflow": [],
+                    "pcr_oi": None,
+                    "pcr_vol": None,
+                    "max_pain": None,
+                    "bias": "NEUTRAL",
+                    "pcr_stale": True,
+                    "mp_stale": True,
+                    "pcr_updated_at": None,
+                    "mp_updated_at": None,
+                    "notes": "",
+                    "option_source": None,
+                    "ai_sentiment": None,
+                    "fii_derivatives_5d": {},
+                    "fii_derivatives_stale": False,
+                    "trendlyne_kpis": {},
+                    "modified_max_pain": None,
+                    "iv_percentile": None,
+                },
+                "leaders": [],
+                "laggards": [],
+                "all_ranks": [],
+                "sector_rs": [],
+                "structure": {"primary": None, "secondary": None, "notes": "N/A"},
+                "risk": {
+                    "capital": load_config().get("account", {}).get("capital", 0),
+                    "per_trade_pct": load_config()
+                    .get("risk", {})
+                    .get("per_trade_pct", 0),
+                    "daily_stop_pct": load_config()
+                    .get("risk", {})
+                    .get("daily_stop_pct", 0),
+                    "monthly_stop_pct": load_config()
+                    .get("risk", {})
+                    .get("monthly_stop_pct", 0),
+                    "margin_util_cap": load_config()
+                    .get("risk", {})
+                    .get("margin_util_cap", 0),
+                },
+                "verdict": verdict_mod.build_trade_verdict(
+                    {"regime": {"name": "UNKNOWN"}, "flows": {"bias": "NEUTRAL"}}
+                ).to_dict()
+                if hasattr(verdict_mod, "build_trade_verdict")
+                else {"action": "WAIT"},
+                "skips": {
+                    "today": [],
+                    "summary": {"total": 0, "by_reason": {}, "by_gate": {}},
+                },
+                "verdict_trace": {
+                    "inputs": {"fetched": 0},
+                    "blocks": [],
+                    "reasons": [],
+                },
+                "signals_computed_at": market_now.get("ts"),
+            }
+            with _cache_lock:
+                _cache = result
+                _cache_ts = datetime.now()
+            return result
     except Exception as e:
         stock_data = {}
         source_errors.append(f"Stock feed failed: {e}")
-        
+
     # Fetch sector data with error tracking
     try:
         sector_data = feed.sector_ohlc(sectors, period="6mo")
@@ -221,6 +355,7 @@ def _run_engine() -> dict:
     except Exception as e:
         # Create a dummy flow_snap so the rest of the engine can continue
         from signals.flows import FlowSnapshot
+
         flow_snap = FlowSnapshot(
             fii_dii_5d_net_cr={"fii": 0.0, "dii": 0.0},
             top_inflow_sectors=[],
@@ -228,14 +363,49 @@ def _run_engine() -> dict:
             pcr_oi=None,
             pcr_vol=None,
             max_pain=None,
-            smart_money_bias="NEUTRAL"
+            smart_money_bias="NEUTRAL",
         )
         source_errors.append(f"Option chain feed failed: {e}")
 
     bench = feed.ohlc_cached("NIFTY", period="1y")
     ranks = lead_mod.rank_universe(stock_data, bench)
     inflow_syms = [s for s, _ in flow_snap.top_inflow_sectors]
-    longs, shorts = lead_mod.a_grade(ranks, inflow_sectors=inflow_syms, sector_map=None)
+
+    # --- MOMENTUM BREAKOUT ENRICHMENT ---
+    # Add ATR and Breakout metrics to ranks
+    enriched_ranks = []
+    for r in ranks:
+        df = stock_data.get(r.symbol, pd.DataFrame())
+        if df.empty:
+            continue
+
+        atr = _calculate_atr(df)
+        # Relative Volume (Today vs 20D Avg)
+        vols = df["volume"].tail(21)
+        rel_vol = vols.iloc[-1] / vols.iloc[:-1].mean() if len(vols) > 1 else 1.0
+        # Breakout check: Price near or above 20-day high
+        high_20d = df["high"].iloc[:-1].tail(20).max()
+        is_breakout = df["close"].iloc[-1] >= (high_20d * 0.99)
+        # Volatility Score: Annualized volatility (20D window) for beta analysis
+        vol_score = round(df["close"].pct_change().tail(20).std() * (252**0.5) * 100, 2)
+
+        # Momentum Score: Prioritize RS + Breakout + Volume
+        # This moves breakout candidates to the top of the A-Grade list
+        m_score = r.rs_slope_20d + (20.0 if is_breakout else 0.0) + (rel_vol * 5.0)
+
+        # Inject enrichment (low-beta prioritization enabled via vol_score)
+        r.momentum_score = m_score
+        r.atr = atr
+        r.volatility_score = vol_score
+        r.rel_vol = rel_vol
+        enriched_ranks.append(r)
+
+    # Sort by momentum_score instead of default RS slope
+    enriched_ranks.sort(key=lambda x: getattr(x, "momentum_score", 0), reverse=True)
+
+    longs, shorts = lead_mod.a_grade(
+        enriched_ranks, inflow_sectors=inflow_syms, sector_map=None
+    )
 
     structure = sm.plan_for(regime_snap.regime)
 
@@ -247,10 +417,14 @@ def _run_engine() -> dict:
     except Exception as e:
         nifty_df = pd.DataFrame()
         source_errors.append(f"Nifty feed failed: {e}")
-        
+
     nifty_close = float(nifty_df["close"].iloc[-1]) if not nifty_df.empty else 0
-    nifty_prev = float(nifty_df["close"].iloc[-2]) if len(nifty_df) >= 2 else nifty_close
-    nifty_chg_pct = round(100 * (nifty_close - nifty_prev) / nifty_prev, 2) if nifty_prev else 0
+    nifty_prev = (
+        float(nifty_df["close"].iloc[-2]) if len(nifty_df) >= 2 else nifty_close
+    )
+    nifty_chg_pct = (
+        round(100 * (nifty_close - nifty_prev) / nifty_prev, 2) if nifty_prev else 0
+    )
 
     # BankNifty
     try:
@@ -260,7 +434,7 @@ def _run_engine() -> dict:
     except Exception as e:
         bn_df = pd.DataFrame()
         source_errors.append(f"BankNifty feed failed: {e}")
-        
+
     bn_close = float(bn_df["close"].iloc[-1]) if not bn_df.empty else 0
     bn_prev = float(bn_df["close"].iloc[-2]) if len(bn_df) >= 2 else bn_close
     bn_chg_pct = round(100 * (bn_close - bn_prev) / bn_prev, 2) if bn_prev else 0
@@ -271,6 +445,7 @@ def _run_engine() -> dict:
 
     # Compute data freshness based on cache file ages
     import time
+
     cache_dir = Path("data/cache/ohlc")
     today_str = datetime.now().strftime("%Y-%m-%d")
     max_age_secs = 0
@@ -283,18 +458,22 @@ def _run_engine() -> dict:
                 if age > max_age_secs:
                     max_age_secs = age
                 checked += 1
-                
+
     market_now = _market_status_now()
     if checked == 0:
         freshness_status = "MISSING"
     elif market_now["market_open"]:
-        freshness_status = "LIVE" if max_age_secs < 900 else ("STALE" if max_age_secs < 3600 else "OLD")
+        freshness_status = (
+            "LIVE"
+            if max_age_secs < 900
+            else ("STALE" if max_age_secs < 3600 else "OLD")
+        )
     else:
         freshness_status = "EOD"
     data_freshness = {
         "status": freshness_status,
         "max_age_minutes": round(max_age_secs / 60, 1),
-        "cache_files_checked": checked
+        "cache_files_checked": checked,
     }
 
     status = market_now
@@ -302,7 +481,11 @@ def _run_engine() -> dict:
     if not nifty_df.empty:
         try:
             last_idx = nifty_df.index[-1]
-            last_trading_date = last_idx.strftime("%Y-%m-%d") if hasattr(last_idx, "strftime") else str(last_idx)[:10]
+            last_trading_date = (
+                last_idx.strftime("%Y-%m-%d")
+                if hasattr(last_idx, "strftime")
+                else str(last_idx)[:10]
+            )
         except Exception:
             last_trading_date = None
 
@@ -342,17 +525,45 @@ def _run_engine() -> dict:
             "ai_sentiment": getattr(flow_snap, "ai_sentiment", None),
             "fii_derivatives_5d": getattr(flow_snap, "fii_derivatives_5d", {}),
             "fii_derivatives_stale": getattr(flow_snap, "fii_derivatives_stale", False),
+            "trendlyne_kpis": getattr(flow_snap, "trendlyne_kpis", {}),
+            "modified_max_pain": getattr(flow_snap, "trendlyne_kpis", {}).get(
+                "modified_max_pain"
+            ),
+            "iv_percentile": getattr(flow_snap, "trendlyne_kpis", {}).get(
+                "iv_percentile"
+            ),
         },
         "leaders": [
-            {"symbol": r.symbol, "rs_slope": max(-150.0, min(150.0, r.rs_slope_20d)), "pct_vs_50dma": r.pct_vs_50dma, "quintile": r.quintile}
+            {
+                "symbol": r.symbol,
+                "rs_slope": r.rs_slope_20d,
+                "pct_vs_50dma": r.pct_vs_50dma,
+                "quintile": r.quintile,
+                "atr": getattr(r, "atr", 0),
+                "vol_score": getattr(r, "volatility_score", 0),
+            }
             for r in longs[:6]
         ],
         "laggards": [
-            {"symbol": r.symbol, "rs_slope": max(-150.0, min(150.0, r.rs_slope_20d)), "pct_vs_50dma": r.pct_vs_50dma, "quintile": r.quintile}
+            {
+                "symbol": r.symbol,
+                "rs_slope": r.rs_slope_20d,
+                "pct_vs_50dma": r.pct_vs_50dma,
+                "quintile": r.quintile,
+                "atr": getattr(r, "atr", 0),
+                "vol_score": getattr(r, "volatility_score", 0),
+            }
             for r in shorts[:6]
         ],
         "all_ranks": [
-            {"symbol": r.symbol, "rs_slope": max(-150.0, min(150.0, r.rs_slope_20d)), "pct_vs_50dma": r.pct_vs_50dma, "quintile": r.quintile, "above_50dma": r.above_50dma}
+            {
+                "symbol": r.symbol,
+                "rs_slope": max(-150.0, min(150.0, r.rs_slope_20d)),
+                "pct_vs_50dma": r.pct_vs_50dma,
+                "quintile": r.quintile,
+                "above_50dma": r.above_50dma,
+                "vol_score": getattr(r, "volatility_score", 0),
+            }
             for r in sorted(ranks, key=lambda x: (-x.quintile, -x.rs_slope_20d))
         ],
         "sector_rs": flow_snap.top_inflow_sectors + flow_snap.top_outflow_sectors,
@@ -372,21 +583,30 @@ def _run_engine() -> dict:
     # Issue #6 callsite fix: compute iv_rank and pass it so naked-sell gate works
     _iv_rank_for_verdict = None
     try:
-        from signals.options import iv_rank as _iv_rank_fn, chain_snapshot as _chain_snap, atm_iv as _atm_iv
-        _db_path = cfg.get("options", {}).get("iv_history_db", "./data/iv_history.sqlite")
+        from signals.options import atm_iv as _atm_iv
+        from signals.options import chain_snapshot as _chain_snap
+        from signals.options import iv_rank as _iv_rank_fn
+
+        _db_path = cfg.get("options", {}).get(
+            "iv_history_db", "./data/iv_history.sqlite"
+        )
         _chain = _chain_snap("NIFTY")
-        _spot  = nifty_close
+        _spot = nifty_close
         if not _chain.empty and _spot > 0:
-            _iv_rank_for_verdict = _iv_rank_fn("NIFTY", _atm_iv(_chain, _spot), _db_path)
+            _iv_rank_for_verdict = _iv_rank_fn(
+                "NIFTY", _atm_iv(_chain, _spot), _db_path
+            )
     except Exception as e:
-        logging.getLogger(__name__).exception("Failed computing iv_rank for verdict: %s", e)
+        logging.getLogger(__name__).exception(
+            "Failed computing iv_rank for verdict: %s", e
+        )
 
     # Compute verdict using FULL data before slicing leaders/laggards for UI
     result_for_verdict = {
         **result,
         "leaders": [{"quintile": r.quintile, "symbol": r.symbol} for r in longs],
         "laggards": [{"quintile": r.quintile, "symbol": r.symbol} for r in shorts],
-        "iv_rank": _iv_rank_for_verdict
+        "iv_rank": _iv_rank_for_verdict,
     }
     result["verdict"] = verdict_mod.build_trade_verdict(result_for_verdict).to_dict()
 
@@ -399,7 +619,9 @@ def _run_engine() -> dict:
         logical_date = (now_ist - timedelta(hours=6)).date()
         start_ist = datetime.combine(logical_date, dt_mod.time(6, 0), tzinfo=ist)
         start_utc = start_ist.astimezone(timezone.utc).replace(tzinfo=None)
-        skip_rows = journal.get_skipped_trades(limit=50, since_date=start_utc.isoformat())
+        skip_rows = journal.get_skipped_trades(
+            limit=50, since_date=start_utc.isoformat()
+        )
 
         by_reason: dict[str, int] = {}
         by_gate: dict[str, int] = {}
@@ -415,10 +637,14 @@ def _run_engine() -> dict:
                 "total": len(skip_rows),
                 "by_reason": by_reason,
                 "by_gate": by_gate,
-            }
+            },
         }
     except Exception as e:
-        result["skips"] = {"today": [], "summary": {"total": 0, "by_reason": {}, "by_gate": {}}, "error": str(e)}
+        result["skips"] = {
+            "today": [],
+            "summary": {"total": 0, "by_reason": {}, "by_gate": {}},
+            "error": str(e),
+        }
 
     # --- Verdict Engine Trace ---
     verdict = result["verdict"]
@@ -455,6 +681,7 @@ def _run_engine() -> dict:
         if isinstance(obj, (np.floating, float)):
             val = float(obj)
             import math
+
             if math.isnan(val) or math.isinf(val):
                 return None
             return val
@@ -473,14 +700,16 @@ def _run_engine() -> dict:
     with _cache_lock:
         _cache = result
         _cache_ts = datetime.now()
+        _engine_busy = False  # Clear busy flag only after successful cache write
     return result
 
 
 # -- Trade Alert Generation ----------------------------------------
 
+
 def _generate_trade_alerts(data: dict) -> list[dict]:
     """Generate structured, actionable trade objects based on signal evidence.
-    
+
     Returns list of trade dicts with:
       symbol, direction, entry_trigger, entry_price, stop, target1, target2,
       trail_rule, qty, risk_rupees, confidence, no_trade_reason, evidence
@@ -498,7 +727,7 @@ def _generate_trade_alerts(data: dict) -> list[dict]:
     bias = flows.get("bias", "NEUTRAL")
     capital = risk.get("capital", 7000000)
     per_trade_risk_pct = risk.get("per_trade_pct", 0.0075)
-    
+
     nifty_px = nifty.get("close", 0)
     nifty_chg = nifty.get("change_pct", 0)
     bn_px = banknifty.get("close", 0)
@@ -508,14 +737,17 @@ def _generate_trade_alerts(data: dict) -> list[dict]:
     vix = regime.get("vix", 0)
     breadth = regime.get("breadth_pct_above_50dma", 0)
     trend_score = regime.get("trend_score", 0)
-    trade_verdict = data.get("verdict") or verdict_mod.build_trade_verdict(data).to_dict()
+    ai_sentiment = flows.get("ai_sentiment") or {}
+    trade_verdict = (
+        data.get("verdict") or verdict_mod.build_trade_verdict(data).to_dict()
+    )
     # --- VERDICT EXTRACTION ---
     stock_v = trade_verdict.get("stock", {})
     nifty_v = trade_verdict.get("nifty", {})
-    
+
     stock_action = stock_v.get("action", "WAIT")
     nifty_action = nifty_v.get("action", "WAIT")
-    
+
     can_trade_equity = bool(stock_v.get("can_trade"))
     can_trade_options = bool(nifty_v.get("can_trade"))
 
@@ -530,107 +762,252 @@ def _generate_trade_alerts(data: dict) -> list[dict]:
     # --- PRO FILTERS & GATING ---
     allow_longs = can_trade_equity and stock_action in ("LONG_ONLY", "LONG_AND_SHORT")
     allow_shorts = can_trade_equity and stock_action in ("SHORT_ONLY", "LONG_AND_SHORT")
-    
-    # 2. Time filter: avoid entries after 15:00 to reduce EOD churn
+
+    # 2. Entry Window Tightening:
+    # Avoid entries after 14:15 IST (EOD volatility) and ensure AI confidence is sufficient
     now_ist = datetime.now(timezone(timedelta(hours=5, minutes=30)))
-    if (now_ist.hour, now_ist.minute) > (15, 0):
+    if (now_ist.hour, now_ist.minute) >= (14, 15):
         allow_longs = False
         allow_shorts = False
         can_trade_options = False
-    
+
     # 2. VIX Filter
     if vix > 24:
         allow_longs = False
         allow_shorts = False
-        alerts.append({
-            "symbol": "NIFTY", "direction": "AVOID", "entry_trigger": "VIX > 24",
-            "entry_price": None, "stop": None, "target1": None, "target2": None,
-            "trail_rule": "", "qty": 0, "risk_rupees": 0, "confidence": "HIGH",
-            "no_trade_reason": "Extreme volatility (VIX > 24). Stay flat.",
-            "evidence": [f"VIX: {vix:.1f}", f"Regime: {regime_name}"]
-        })
+        alerts.append(
+            {
+                "symbol": "NIFTY",
+                "direction": "AVOID",
+                "entry_trigger": "VIX > 24",
+                "entry_price": None,
+                "stop": None,
+                "target1": None,
+                "target2": None,
+                "trail_rule": "",
+                "qty": 0,
+                "risk_rupees": 0,
+                "confidence": "HIGH",
+                "no_trade_reason": "Extreme volatility (VIX > 24). Stay flat.",
+                "evidence": [f"VIX: {vix:.1f}", f"Regime: {regime_name}"],
+            }
+        )
         return alerts
 
-    if verdict_action in ("WAIT", "NO_TRADE_DATA_STALE") and not can_trade_equity and not can_trade_options:
-        alerts.append({
-            "symbol": "NIFTY", "direction": "AVOID", "entry_trigger": verdict_action,
-            "entry_price": None, "stop": None, "target1": None, "target2": None,
-            "trail_rule": "", "qty": 0, "risk_rupees": 0, "confidence": trade_verdict.get("confidence", "LOW"),
-            "no_trade_reason": trade_verdict.get("strategy", "No clean edge."),
-            "evidence": trade_verdict.get("reasons", []) + trade_verdict.get("blocks", [])
-        })
+    if (
+        verdict_action in ("WAIT", "NO_TRADE_DATA_STALE")
+        and not can_trade_equity
+        and not can_trade_options
+    ):
+        alerts.append(
+            {
+                "symbol": "NIFTY",
+                "direction": "AVOID",
+                "entry_trigger": verdict_action,
+                "entry_price": None,
+                "stop": None,
+                "target1": None,
+                "target2": None,
+                "trail_rule": "",
+                "qty": 0,
+                "risk_rupees": 0,
+                "confidence": trade_verdict.get("confidence", "LOW"),
+                "no_trade_reason": trade_verdict.get("strategy", "No clean edge."),
+                "evidence": trade_verdict.get("reasons", [])
+                + trade_verdict.get("blocks", []),
+            }
+        )
         return alerts
 
     # --- NIFTY OPTIONS ALERTS ---
     if can_trade_options:
-        if nifty_action == "OPTION_SELL_DEFINED_RISK" and regime_name in ("RANGE_LOW_VOL", "RANGE_HIGH_VOL", "VOL_CONTRACTION"):
+        if nifty_action == "OPTION_SELL_DEFINED_RISK" and regime_name in (
+            "RANGE_LOW_VOL",
+            "RANGE_HIGH_VOL",
+            "VOL_CONTRACTION",
+        ):
             if max_pain:
-                alerts.append({
-                    "symbol": "NIFTY", "direction": "NEUTRAL", "entry_trigger": f"Iron Condor @ Max Pain {max_pain:.0f}",
-                    "entry_price": nifty_px, "stop": "Defined Risk", "target1": "Theta Decay", "target2": None,
-                    "trail_rule": "Adjust wings if breached", "qty": 50, "risk_rupees": round(nifty_px * 0.01 * 50, 2),
-                    "confidence": "MEDIUM", "no_trade_reason": None,
-                    "evidence": [f"Regime: {regime_name}", f"PCR: {pcr}", f"Max Pain: {max_pain}"],
-                    "verdict_action": "OPTION_SELL_DEFINED_RISK"
-                })
+                alerts.append(
+                    {
+                        "symbol": "NIFTY",
+                        "direction": "NEUTRAL",
+                        "entry_trigger": f"Iron Condor @ Max Pain {max_pain:.0f}",
+                        "entry_price": nifty_px,
+                        "stop": "Defined Risk",
+                        "target1": "Theta Decay",
+                        "target2": None,
+                        "trail_rule": "Adjust wings if breached",
+                        "qty": 50,
+                        "risk_rupees": round(nifty_px * 0.01 * 50, 2),
+                        "confidence": "MEDIUM",
+                        "no_trade_reason": None,
+                        "evidence": [
+                            f"Regime: {regime_name}",
+                            f"PCR: {pcr}",
+                            f"Max Pain: {max_pain}",
+                        ],
+                        "verdict_action": "OPTION_SELL_DEFINED_RISK",
+                    }
+                )
         elif nifty_action == "NAKED_OPTION_SELL":
-            direction = "LONG" if (nifty_v.get("tone") == "bull" or bias == "LONG") else "SHORT"
+            direction = (
+                "LONG" if (nifty_v.get("tone") == "bull" or bias == "LONG") else "SHORT"
+            )
             side = "PUTS" if direction == "LONG" else "CALLS"
-            alerts.append({
-                "symbol": "NIFTY", "direction": direction, "entry_trigger": f"Naked {side} Sell ({nifty_v.get('confidence')} Conf)",
-                "entry_price": nifty_px, "stop": "20% Premium SL", "target1": "80% Premium Decay", "target2": None,
-                "trail_rule": "Trail SL to cost after 50% decay", "qty": 50, "risk_rupees": 5000,
-                "confidence": nifty_v.get("confidence", "MEDIUM"), "no_trade_reason": None,
-                "evidence": [f"Regime: {regime_name}", f"Trend: {trend_score}", f"Bias: {bias}"],
-                "verdict_action": "NAKED_OPTION_SELL"
-            })
+            alerts.append(
+                {
+                    "symbol": "NIFTY",
+                    "direction": direction,
+                    "entry_trigger": f"Naked {side} Sell ({nifty_v.get('confidence')} Conf)",
+                    "entry_price": nifty_px,
+                    "stop": "20% Premium SL",
+                    "target1": "80% Premium Decay",
+                    "target2": None,
+                    "trail_rule": "Trail SL to cost after 50% decay",
+                    "qty": 50,
+                    "risk_rupees": 5000,
+                    "confidence": nifty_v.get("confidence", "MEDIUM"),
+                    "no_trade_reason": None,
+                    "evidence": [
+                        f"Regime: {regime_name}",
+                        f"Trend: {trend_score}",
+                        f"Bias: {bias}",
+                    ],
+                    "verdict_action": "NAKED_OPTION_SELL",
+                }
+            )
 
     # BankNifty Divergence
     if abs(bn_chg - nifty_chg) > 0.5:
         direction = "LONG" if bn_chg > nifty_chg else "SHORT"
-        if (direction == "LONG" and allow_longs) or (direction == "SHORT" and allow_shorts):
+        if (direction == "LONG" and allow_longs) or (
+            direction == "SHORT" and allow_shorts
+        ):
             sl_dist = bn_px * 0.005
-            alerts.append({
-                "symbol": "BANKNIFTY", "direction": direction, "entry_trigger": f"Divergence play ({bn_chg:+.2f}% vs Nifty {nifty_chg:+.2f}%)",
-                "entry_price": bn_px, "stop": round(bn_px - sl_dist if direction == "LONG" else bn_px + sl_dist, 2),
-                "target1": round(bn_px + sl_dist * 2 if direction == "LONG" else bn_px - sl_dist * 2, 2), "target2": None,
-                "trail_rule": "Fixed SL", "qty": 30, "risk_rupees": round(sl_dist * 30, 2),
-                "confidence": "LOW", "no_trade_reason": None,
-                "evidence": [f"BN Divergence: {abs(bn_chg - nifty_chg):.2f}%"]
-            })
+            alerts.append(
+                {
+                    "symbol": "BANKNIFTY",
+                    "direction": direction,
+                    "entry_trigger": f"Divergence play ({bn_chg:+.2f}% vs Nifty {nifty_chg:+.2f}%)",
+                    "entry_price": bn_px,
+                    "stop": round(
+                        bn_px - sl_dist if direction == "LONG" else bn_px + sl_dist, 2
+                    ),
+                    "target1": round(
+                        bn_px + sl_dist * 2
+                        if direction == "LONG"
+                        else bn_px - sl_dist * 2,
+                        2,
+                    ),
+                    "target2": None,
+                    "trail_rule": "Fixed SL",
+                    "qty": 30,
+                    "risk_rupees": round(sl_dist * 30, 2),
+                    "confidence": "LOW",
+                    "no_trade_reason": None,
+                    "evidence": [f"BN Divergence: {abs(bn_chg - nifty_chg):.2f}%"],
+                }
+            )
 
     # --- STOCK ALERTS ---
     risk_amt = capital * per_trade_risk_pct
-    
+
+    # --- AI Sentiment Gating ---
+    # Extract structured fields from the sentiment dict returned by get_market_news_sentiment().
+    ai_signal = str(ai_sentiment.get("overall_market_sentiment") or "").upper()
+    ai_conf = str(ai_sentiment.get("confidence") or "").upper()
+    # Build a lookup of AI-mentioned tickers: {SYMBOL: "LONG"|"SHORT"}
+    ai_ideas: dict[str, str] = {
+        str(idea.get("ticker", "")).upper(): str(idea.get("direction", "")).upper()
+        for idea in (ai_sentiment.get("actionable_trade_ideas") or [])
+        if idea.get("ticker") and idea.get("direction") in ("LONG", "SHORT")
+    }
+
+    # Gate 1 (unchanged): block in choppy range when AI confidence is LOW
+    if ai_conf == "LOW" and regime_name == "RANGE_HIGH_VOL":
+        allow_longs = False
+        allow_shorts = False
+
+    # Gate 2: when AI carries a HIGH-confidence contra-signal, suppress that direction.
+    # e.g. regime says TREND_UP (allow longs) but AI news is strongly BEARISH → skip longs.
+    if ai_conf == "HIGH":
+        if ai_signal == "BEARISH" and allow_longs:
+            allow_longs = False
+        if ai_signal == "BULLISH" and allow_shorts:
+            allow_shorts = False
+
     if allow_longs:
         for stock in leaders[:8]:
             sym = stock["symbol"]
-            q = int(stock.get("quintile", 0))
+            q_val = stock.get("quintile")
+            q = int(q_val) if pd.notna(q_val) else 0
+
+            # Logic Flaw Fix: Avoid "Late Entry" by skipping stocks overextended from 50DMA (>12%)
+            if stock.get("pct_vs_50dma", 0) > 12.0:
+                continue
+
             conf = "HIGH" if q >= 5 else ("MEDIUM" if q >= 4 else "LOW")
-            alerts.append({
-                "symbol": sym, "direction": "LONG", "entry_trigger": "A-Grade RS leader: pullback/breakout",
-                "entry_price": None, "stop": None,
-                "target1": None, "target2": None,
-                "trail_rule": "Move SL to cost at T1", "qty": 0, "risk_rupees": round(risk_amt, 2),
-                "confidence": conf,
-                "no_trade_reason": None,
-                "evidence": [f"RS Slope: {stock['rs_slope']}", f"Q: {q}", f"vs 50DMA: {stock['pct_vs_50dma']}%"]
-            })
+            evidence = [
+                f"RS Slope: {stock['rs_slope']}",
+                f"Q: {q}",
+                f"vs 50DMA: {stock['pct_vs_50dma']}%",
+            ]
+            if ai_ideas.get(sym) == "LONG":
+                evidence.append("AI: LONG mentioned in news")
+            alerts.append(
+                {
+                    "symbol": sym,
+                    "direction": "LONG",
+                    "entry_trigger": "A-Grade RS leader: pullback/breakout",
+                    "entry_price": None,
+                    "stop": None,
+                    "target1": None,
+                    "target2": None,
+                    "trail_rule": "Move SL to cost at T1",
+                    "qty": 0,
+                    "risk_rupees": round(risk_amt, 2),
+                    "confidence": conf,
+                    "no_trade_reason": None,
+                    "atr": stock.get("atr"),
+                    "evidence": evidence,
+                }
+            )
 
     if allow_shorts:
         for stock in laggards[:5]:
             sym = stock["symbol"]
-            q = int(stock.get("quintile", 0))
+            q_val = stock.get("quintile")
+            q = int(q_val) if pd.notna(q_val) else 0
+
+            # Logic Flaw Fix: Avoid "Late Entry" on shorts (already collapsed stocks)
+            if stock.get("pct_vs_50dma", 0) < -10.0:
+                continue
+
             conf = "HIGH" if q >= 5 else ("MEDIUM" if q >= 4 else "LOW")
-            alerts.append({
-                "symbol": sym, "direction": "SHORT", "entry_trigger": "A-Grade RS laggard: bounce/breakdown",
-                "entry_price": None, "stop": None,
-                "target1": None, "target2": None,
-                "trail_rule": "Move SL to cost at T1", "qty": 0, "risk_rupees": round(risk_amt, 2),
-                "confidence": conf,
-                "no_trade_reason": None,
-                "evidence": [f"RS Slope: {stock['rs_slope']}", f"Q: {q}", f"vs 50DMA: {stock['pct_vs_50dma']}%"]
-            })
+            evidence = [
+                f"RS Slope: {stock['rs_slope']}",
+                f"Q: {q}",
+                f"vs 50DMA: {stock['pct_vs_50dma']}%",
+            ]
+            if ai_ideas.get(sym) == "SHORT":
+                evidence.append("AI: SHORT mentioned in news")
+            alerts.append(
+                {
+                    "symbol": sym,
+                    "direction": "SHORT",
+                    "entry_trigger": "A-Grade RS laggard: bounce/breakdown",
+                    "entry_price": None,
+                    "stop": None,
+                    "target1": None,
+                    "target2": None,
+                    "trail_rule": "Move SL to cost at T1",
+                    "qty": 0,
+                    "risk_rupees": round(risk_amt, 2),
+                    "confidence": conf,
+                    "no_trade_reason": None,
+                    "evidence": evidence,
+                }
+            )
 
     for alert in alerts:
         if alert.get("direction") not in ("LONG", "SHORT", "NEUTRAL"):
@@ -655,8 +1032,12 @@ def _format_telegram_alert(data: dict, alerts: list[dict]) -> str:
     lines.append("*STOCKMINDED TRADE ALERT*")
     lines.append(f"`{ts}`")
     lines.append("")
-    lines.append(f"Regime: `{regime.get('name', '?')}`  |  Bias: `{flows.get('bias', '?')}`")
-    lines.append(f"NIFTY: {nifty.get('close', 0):.0f} ({nifty.get('change_pct', 0):+.2f}%)")
+    lines.append(
+        f"Regime: `{regime.get('name', '?')}`  |  Bias: `{flows.get('bias', '?')}`"
+    )
+    lines.append(
+        f"NIFTY: {nifty.get('close', 0):.0f} ({nifty.get('change_pct', 0):+.2f}%)"
+    )
     lines.append("")
 
     actionable = [a for a in alerts if a.get("direction") != "AVOID"]
@@ -671,13 +1052,23 @@ def _format_telegram_alert(data: dict, alerts: list[dict]) -> str:
     if actionable:
         lines.append("*-- ACTIONABLE TRADES --*")
         for a in actionable:
-            arrow = "🟢 BUY" if a["direction"] == "LONG" else ("🔴 SELL" if a["direction"] == "SHORT" else "⚪ NEUTRAL")
+            arrow = (
+                "🟢 BUY"
+                if a["direction"] == "LONG"
+                else ("🔴 SELL" if a["direction"] == "SHORT" else "⚪ NEUTRAL")
+            )
             conf = a.get("confidence", "")
             lines.append(f"  {arrow} *{a['symbol']}* [{conf}]")
             lines.append(f"    Trigger: {a.get('entry_trigger', 'N/A')}")
-            lines.append(f"    Entry: {a.get('entry_price', 'N/A')} | SL: {a.get('stop', 'N/A')}")
-            lines.append(f"    T1: {a.get('target1', 'N/A')} | T2: {a.get('target2', 'N/A')}")
-            lines.append(f"    Risk: ₹{a.get('risk_rupees', 0):,.0f} | Qty: {a.get('qty', 0)}")
+            lines.append(
+                f"    Entry: {a.get('entry_price', 'N/A')} | SL: {a.get('stop', 'N/A')}"
+            )
+            lines.append(
+                f"    T1: {a.get('target1', 'N/A')} | T2: {a.get('target2', 'N/A')}"
+            )
+            lines.append(
+                f"    Risk: ₹{a.get('risk_rupees', 0):,.0f} | Qty: {a.get('qty', 0)}"
+            )
             for ev in a.get("evidence", []):
                 lines.append(f"    - {ev}")
             lines.append("")
@@ -691,7 +1082,14 @@ def _format_telegram_alert(data: dict, alerts: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _format_options_telegram_alert(trade: dict, regime_name: str, bias: str, ivr_disp: str, vix_disp: str, is_nifty: bool = False) -> str:
+def _format_options_telegram_alert(
+    trade: dict,
+    regime_name: str,
+    bias: str,
+    ivr_disp: str,
+    vix_disp: str,
+    is_nifty: bool = False,
+) -> str:
     """Format options trade execution details for Telegram."""
     lines = []
     header = "AUTO-EXECUTED NIFTY OPTIONS" if is_nifty else "AUTO-EXECUTED OPTIONS"
@@ -711,8 +1109,10 @@ def _format_options_telegram_alert(trade: dict, regime_name: str, bias: str, ivr
         expiry = leg.get("expiry")
         qty = leg.get("qty")
         premium = leg.get("entry_premium")
-        lines.append(f"  {side_emoji} {side_text} {leg_type} {strike:.0f} ({expiry}) x {qty} @ ₹{premium:.2f}")
-    
+        lines.append(
+            f"  {side_emoji} {side_text} {leg_type} {strike:.0f} ({expiry}) x {qty} @ ₹{premium:.2f}"
+        )
+
     lines.append("")
     lines.append("*Position Summary:*")
     net_prem = trade.get("net_premium", 0)
@@ -724,10 +1124,15 @@ def _format_options_telegram_alert(trade: dict, regime_name: str, bias: str, ivr
     return "\n".join(lines)
 
 
-
 # -- Routes --------------------------------------------------------
+@app.route("/favicon.ico")
+def favicon():
+    return "", 204
+
+
 @app.route("/")
 def index():
+    # Serve dashboard UI at root so http://localhost:5050/ works.
     return send_from_directory(str(Path(__file__).parent), "index.html")
 
 
@@ -764,9 +1169,9 @@ def api_option_chain():
             records["timestamp"] = datetime.now().strftime("%d-%b-%Y %H:%M:%S")
         # Use default=str to handle any non-serializable edge cases
         import json as _json
+
         return app.response_class(
-            _json.dumps(raw, default=str),
-            mimetype="application/json"
+            _json.dumps(raw, default=str), mimetype="application/json"
         )
     except Exception as e:
         traceback.print_exc()
@@ -780,24 +1185,34 @@ def api_intraday():
         cfg = load_config()
         top_n = cfg.get("intraday_top_n", 30)
         universe = load_universe(cfg)
-        
+
         if _cache and _cache.get("all_ranks"):
             ranked_syms = [r["symbol"] for r in _cache["all_ranks"]]
             top_syms = ranked_syms[:top_n]
         else:
             top_syms = universe[:top_n]
-            
-        instruments = [f"{s}.NS" if not s.startswith("^") and "." not in s else s for s in top_syms]
+
+        instruments = [
+            f"{s}.NS" if not s.startswith("^") and "." not in s else s for s in top_syms
+        ]
         broker_quotes = feed.quote_batch(top_syms)
         import yfinance as yf
+
         tickers = yf.Tickers(" ".join(instruments))
-        
+
         # Fetch enough daily history for 20D average volume calculation
         try:
-            hist_df = yf.download(" ".join(instruments), period="3mo", interval="1d", progress=False, group_by='ticker', auto_adjust=False)
+            hist_df = yf.download(
+                " ".join(instruments),
+                period="3mo",
+                interval="1d",
+                progress=False,
+                group_by="ticker",
+                auto_adjust=False,
+            )
         except Exception:
             hist_df = pd.DataFrame()
-            
+
         rows = []
         for sym, raw in zip(top_syms, instruments):
             try:
@@ -807,27 +1222,53 @@ def api_intraday():
                     open_ = round(float(q["open"]), 2) if q.get("open") else None
                     high = round(float(q["high"]), 2) if q.get("high") else None
                     low = round(float(q["low"]), 2) if q.get("low") else None
-                    prev = round(float(q["prev_close"]), 2) if q.get("prev_close") else None
+                    prev = (
+                        round(float(q["prev_close"]), 2)
+                        if q.get("prev_close")
+                        else None
+                    )
                     avg_vol = int(q.get("volume") or 0)
                     chg_pct = q.get("change_pct")
                 else:
                     info = tickers.tickers[raw].fast_info
-                    ltp   = round(float(info.last_price), 2) if hasattr(info, "last_price") and info.last_price else None
-                    open_ = round(float(info.open),       2) if hasattr(info, "open")       and info.open       else None
-                    high  = round(float(info.day_high),   2) if hasattr(info, "day_high")   and info.day_high   else None
-                    low   = round(float(info.day_low),    2) if hasattr(info, "day_low")    and info.day_low    else None
-                    prev  = round(float(info.previous_close), 2) if hasattr(info, "previous_close") and info.previous_close else None
+                    ltp = (
+                        round(float(info.last_price), 2)
+                        if hasattr(info, "last_price") and info.last_price
+                        else None
+                    )
+                    open_ = (
+                        round(float(info.open), 2)
+                        if hasattr(info, "open") and info.open
+                        else None
+                    )
+                    high = (
+                        round(float(info.day_high), 2)
+                        if hasattr(info, "day_high") and info.day_high
+                        else None
+                    )
+                    low = (
+                        round(float(info.day_low), 2)
+                        if hasattr(info, "day_low") and info.day_low
+                        else None
+                    )
+                    prev = (
+                        round(float(info.previous_close), 2)
+                        if hasattr(info, "previous_close") and info.previous_close
+                        else None
+                    )
                     avg_vol = int(info.three_month_average_volume or 0)
-                    chg_pct = round(100 * (ltp - prev) / prev, 2) if ltp and prev else None
-                
+                    chg_pct = (
+                        round(100 * (ltp - prev) / prev, 2) if ltp and prev else None
+                    )
+
                 # Calculate today's volume and relative volume
                 today_vol = 0
                 rel_vol = None
                 if not hist_df.empty and raw in hist_df.columns.get_level_values(0):
                     try:
                         sym_hist = hist_df[raw]
-                        if not sym_hist.empty and 'Volume' in sym_hist:
-                            volumes = sym_hist['Volume'].dropna()
+                        if not sym_hist.empty and "Volume" in sym_hist:
+                            volumes = sym_hist["Volume"].dropna()
                             if not volumes.empty:
                                 today_vol = float(volumes.iloc[-1])
                                 last_date = volumes.index[-1]
@@ -839,19 +1280,50 @@ def api_intraday():
                                     today_vol *= lead_mod._projected_volume_multiplier()
                                 today_vol = int(today_vol)
                                 hist_20 = volumes.iloc[:-1].tail(20)
-                                avg_20d = float(hist_20.mean()) if len(hist_20) >= 5 else float(avg_vol)
+                                avg_20d = (
+                                    float(hist_20.mean())
+                                    if len(hist_20) >= 5
+                                    else float(avg_vol)
+                                )
                                 if avg_20d > 0:
                                     rel_vol = round(today_vol / avg_20d, 2)
                     except Exception as e:
-                        logging.getLogger(__name__).exception("Failed computing relative volume for %s: %s", raw, e)
-                        
-                rows.append({"symbol": sym, "ltp": ltp, "open": open_, "high": high,
-                             "low": low, "prev_close": prev, "chg_pct": chg_pct, 
-                             "vol": avg_vol, "today_vol": today_vol, "rel_vol": rel_vol})
+                        logging.getLogger(__name__).exception(
+                            "Failed computing relative volume for %s: %s", raw, e
+                        )
+
+                rows.append(
+                    {
+                        "symbol": sym,
+                        "ltp": ltp,
+                        "open": open_,
+                        "high": high,
+                        "low": low,
+                        "prev_close": prev,
+                        "chg_pct": chg_pct,
+                        "vol": avg_vol,
+                        "today_vol": today_vol,
+                        "rel_vol": rel_vol,
+                    }
+                )
             except Exception as e:
-                logging.getLogger(__name__).exception("Failed to fetch ticker data for %s: %s", sym, e)
-                rows.append({"symbol": sym, "ltp": None, "open": None, "high": None,
-                             "low": None, "prev_close": None, "chg_pct": None, "vol": None, "today_vol": 0, "rel_vol": None})
+                logging.getLogger(__name__).exception(
+                    "Failed to fetch ticker data for %s: %s", sym, e
+                )
+                rows.append(
+                    {
+                        "symbol": sym,
+                        "ltp": None,
+                        "open": None,
+                        "high": None,
+                        "low": None,
+                        "prev_close": None,
+                        "chg_pct": None,
+                        "vol": None,
+                        "today_vol": 0,
+                        "rel_vol": None,
+                    }
+                )
 
         # Nifty intraday candles (dynamic timeframe)
         tf = request.args.get("tf", "5m")
@@ -864,32 +1336,42 @@ def api_intraday():
             "1mo": {"interval": "1mo", "period": "2y"},
         }
         tf_cfg = tf_map.get(tf, tf_map["5m"])
-        
+
         candles = []
         try:
-            nifty_intra = feed.ohlc_cached("NIFTY", period=tf_cfg["period"], interval=tf_cfg["interval"])
+            nifty_intra = feed.ohlc_cached(
+                "NIFTY", period=tf_cfg["period"], interval=tf_cfg["interval"]
+            )
             if not nifty_intra.empty:
                 # Flatten MultiIndex columns from newer yfinance
-                if isinstance(nifty_intra.columns, __import__('pandas').MultiIndex):
-                    nifty_intra.columns = [c[0] if isinstance(c, tuple) else c for c in nifty_intra.columns]
+                if isinstance(nifty_intra.columns, __import__("pandas").MultiIndex):
+                    nifty_intra.columns = [
+                        c[0] if isinstance(c, tuple) else c for c in nifty_intra.columns
+                    ]
                 for ts, row in nifty_intra.iterrows():
-                    candles.append({
-                        "t": ts.strftime("%H:%M" if tf in ["5m", "15m", "1h"] else "%d-%m"),
-                        "o": round(float(row.get("Open", row.get("open"))),  2),
-                        "h": round(float(row.get("High", row.get("high"))),  2),
-                        "l": round(float(row.get("Low", row.get("low"))),   2),
-                        "c": round(float(row.get("Close", row.get("close"))), 2),
-                    })
+                    candles.append(
+                        {
+                            "t": ts.strftime(
+                                "%H:%M" if tf in ["5m", "15m", "1h"] else "%d-%m"
+                            ),
+                            "o": round(float(row.get("Open", row.get("open"))), 2),
+                            "h": round(float(row.get("High", row.get("high"))), 2),
+                            "l": round(float(row.get("Low", row.get("low"))), 2),
+                            "c": round(float(row.get("Close", row.get("close"))), 2),
+                        }
+                    )
         except Exception as e:
             print(f"[intraday candle error] {e}")
             traceback.print_exc()
 
-        return jsonify({
-            "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S IST"),
-            "watchlist": rows,
-            "nifty_candles": candles,
-            "timeframe": tf,
-        })
+        return jsonify(
+            {
+                "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S IST"),
+                "watchlist": rows,
+                "nifty_candles": candles,
+                "timeframe": tf,
+            }
+        )
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -934,23 +1416,29 @@ def api_test_telegram():
         p_settings = pt.get_settings()
         cfg = load_config()
 
-        token = p_settings.get("telegram_bot_token") or cfg.get("alerts", {}).get("telegram_bot_token", "")
-        chat_id = p_settings.get("telegram_chat_id") or cfg.get("alerts", {}).get("telegram_chat_id")
+        token = p_settings.get("telegram_bot_token") or cfg.get("alerts", {}).get(
+            "telegram_bot_token", ""
+        )
+        chat_id = p_settings.get("telegram_chat_id") or cfg.get("alerts", {}).get(
+            "telegram_chat_id"
+        )
         alerter = Alerter(token, chat_id)
 
-        
         # We need to peek into ops/alerts.py for the status
         import ops.alerts as alerts_mod
+
         success = alerter.send("Test ping from StockMinded dashboard.")
-        
+
         last = alerts_mod._last_send
         suffix = token[-4:] if token and len(token) >= 4 else None
-        return jsonify({
-            "ok": success,
-            "status_code": last.get("status"),
-            "telegram_description": last.get("error"),
-            "token_suffix": suffix
-        })
+        return jsonify(
+            {
+                "ok": success,
+                "status_code": last.get("status"),
+                "telegram_description": last.get("error"),
+                "token_suffix": suffix,
+            }
+        )
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -959,15 +1447,20 @@ def api_test_telegram():
 @app.route("/api/telegram/status")
 def api_telegram_status():
     import ops.alerts as alerts_mod
+
     return jsonify(alerts_mod._last_send)
 
 
 import importlib.util as _ilu
-_pt_spec = _ilu.spec_from_file_location("paper_trader", Path(__file__).parent / "paper_trader.py")
+
+_pt_spec = _ilu.spec_from_file_location(
+    "paper_trader", Path(__file__).parent / "paper_trader.py"
+)
 pt = _ilu.module_from_spec(_pt_spec)
 _pt_spec.loader.exec_module(pt)
 
 # ── Paper Trading Routes ─────────────────────────────────────────
+
 
 @app.route("/paper")
 def paper_page():
@@ -987,31 +1480,28 @@ def api_paper_trades():
         stats = {
             "total_trades": len(full_history),
             "open_trades": len([t for t in full_history if t.get("status") == "OPEN"]),
-            "cumulative_pnl": round(sum(t.get("pnl", 0) or 0 for t in closed_trades), 2),
+            "cumulative_pnl": round(
+                sum(t.get("pnl", 0) or 0 for t in closed_trades), 2
+            ),
             "overall_win_rate": round(
-                len(winners)
-                / max(len(resolved_trades), 1)
-                * 100,
+                len(winners) / max(len(resolved_trades), 1) * 100,
                 1,
             ),
             "total_winners": len(winners),
             "total_losers": len(losers),
             "closed_trades": len(closed_trades),
-            "avg_winner": round(sum(t.get("pnl", 0) or 0 for t in winners) / max(len(winners), 1), 2) if winners else 0.0,
-            "avg_loser": round(sum(t.get("pnl", 0) or 0 for t in losers) / max(len(losers), 1), 2) if losers else 0.0,
+            "avg_winner": round(
+                sum(t.get("pnl", 0) or 0 for t in winners) / max(len(winners), 1), 2
+            )
+            if winners
+            else 0.0,
+            "avg_loser": round(
+                sum(t.get("pnl", 0) or 0 for t in losers) / max(len(losers), 1), 2
+            )
+            if losers
+            else 0.0,
         }
         return jsonify({"trades": display_trades, "stats": stats})
-    except Exception as e:
-        traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/paper/learned-filters")
-def api_paper_learned_filters():
-    """Get active learned filters."""
-    try:
-        filters = pt.get_learned_filters()
-        return jsonify({"filters": filters})
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -1032,11 +1522,19 @@ def api_paper_open():
                 ltp = prices.get(t["symbol"])
                 if ltp is not None and t.get("entry_price"):
                     if t.get("direction") == "SHORT":
-                        t["unrealized_pnl"] = round((t["entry_price"] - ltp) * t["qty"], 2)
-                        t["unrealized_pct"] = round(100 * (t["entry_price"] - ltp) / t["entry_price"], 2)
+                        t["unrealized_pnl"] = round(
+                            (t["entry_price"] - ltp) * t["qty"], 2
+                        )
+                        t["unrealized_pct"] = round(
+                            100 * (t["entry_price"] - ltp) / t["entry_price"], 2
+                        )
                     else:
-                        t["unrealized_pnl"] = round((ltp - t["entry_price"]) * t["qty"], 2)
-                        t["unrealized_pct"] = round(100 * (ltp - t["entry_price"]) / t["entry_price"], 2)
+                        t["unrealized_pnl"] = round(
+                            (ltp - t["entry_price"]) * t["qty"], 2
+                        )
+                        t["unrealized_pct"] = round(
+                            100 * (ltp - t["entry_price"]) / t["entry_price"], 2
+                        )
                     t["current_price"] = ltp
         return jsonify({"trades": trades})
     except Exception as e:
@@ -1074,16 +1572,20 @@ def api_paper_auto_enter():
         for s in setups:
             if not s.get("suitable") or not s.get("legs"):
                 continue
-            result = pt.enter_nifty_option_structure(_dict_to_setup(s), _dict_legs_to_resolved(s["legs"]), cfg)
+            result = pt.enter_nifty_option_structure(
+                _dict_to_setup(s), _dict_legs_to_resolved(s["legs"]), cfg
+            )
             if "error" not in result:
                 entered_nifty_options.append(result)
 
-        return jsonify({
-            "entered": entered,
-            "entered_nifty_options": entered_nifty_options,
-            "alert_count": len(alerts),
-            "nifty_setup_count": len(setups),
-        })
+        return jsonify(
+            {
+                "entered": entered,
+                "entered_nifty_options": entered_nifty_options,
+                "alert_count": len(alerts),
+                "nifty_setup_count": len(setups),
+            }
+        )
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -1096,8 +1598,17 @@ def api_paper_check():
         cfg = load_config()
         data = _run_engine()
         closed = pt.check_and_close_trades()
-        closed_opts = pt.check_nifty_option_exits(vix_current=data.get("regime", {}).get("vix", 15.0), cfg=cfg)
-        return jsonify({"closed": closed, "count": len(closed), "closed_nifty_options": closed_opts, "nifty_option_count": len(closed_opts)})
+        closed_opts = pt.check_nifty_option_exits(
+            vix_current=data.get("regime", {}).get("vix", 15.0), cfg=cfg
+        )
+        return jsonify(
+            {
+                "closed": closed,
+                "count": len(closed),
+                "closed_nifty_options": closed_opts,
+                "nifty_option_count": len(closed_opts),
+            }
+        )
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -1109,7 +1620,9 @@ def api_paper_close(trade_id):
     try:
         result = pt.close_trade_manual(trade_id, reason="MANUAL")
         if result is None:
-            return jsonify({"error": f"Trade {trade_id} not found or already closed"}), 404
+            return jsonify(
+                {"error": f"Trade {trade_id} not found or already closed"}
+            ), 404
         return jsonify(result)
     except Exception as e:
         traceback.print_exc()
@@ -1122,7 +1635,9 @@ def api_options_close(trade_id):
     try:
         result = pt.close_option_trade_manual(trade_id, reason="MANUAL")
         if result is None:
-            return jsonify({"error": f"Option trade {trade_id} not found or already closed"}), 404
+            return jsonify(
+                {"error": f"Option trade {trade_id} not found or already closed"}
+            ), 404
         return jsonify(result)
     except Exception as e:
         traceback.print_exc()
@@ -1152,15 +1667,120 @@ def api_paper_history():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/api/paper/strategy-notes")
-def api_paper_strategy_notes():
-    """Get strategy correction notes."""
+@app.route("/api/paper/intelligence")
+def api_paper_intelligence():
+    """Use AI to analyze last 20 closed trades and suggest config updates."""
     try:
-        notes = pt.get_strategy_notes()
-        return jsonify({"notes": notes})
+        from data.ai_scraper import call_llm
+
+        # Get last 20 closed trades for performance analysis
+        all_trades = pt.get_all_trades(limit=100)
+        closed_trades = [t for t in all_trades if t.get("status") == "CLOSED"][:20]
+        settings = pt.get_settings()
+
+        if not closed_trades:
+            return jsonify(
+                {
+                    "analysis": "No closed trades available for analysis yet.",
+                    "suggestions": [],
+                }
+            )
+
+        # Use centralized logic from paper_trader for context enrichment
+        intel_context = pt.get_intelligence_context(closed_trades)
+
+        # Extract new metrics for Smart Exits vs Standard Exits
+        smart_metrics = intel_context.get("smart_exits_metrics", {})
+        standard_metrics = intel_context.get("standard_exits_metrics", {})
+
+        # Get past intelligence history to preserve memory
+        try:
+            db_data = pt._load_db()
+            intel_history = db_data.get("ai_intelligence_history", [])
+        except Exception:
+            intel_history = []
+
+        # Limit history to the last 5 runs to keep prompt size small and relevant
+        recent_history = intel_history[-5:]
+
+        history_context = ""
+        if recent_history:
+            history_context = "\n--- PREVIOUS AI OPTIMIZATION HISTORY & MEMORY ---\n"
+            for i, hist in enumerate(recent_history):
+                history_context += (
+                    f"Run {i + 1} ({hist.get('timestamp', 'N/A')}):\n"
+                    f"  Analysis Summary: {hist.get('analysis', '')}\n"
+                    f"  Suggestions Made: {json.dumps(hist.get('suggestions', []))}\n\n"
+                )
+
+        prompt = (
+            f"Analyze these 20 recent paper trades (Profit Factor: {intel_context['profit_factor']}, Drawdown: {intel_context['drawdown']}) to optimize intelligence-led trading.\n"
+            f"Trades: {json.dumps(intel_context['summary'])}\n"
+            f"Current Settings: {json.dumps(settings)}\n\n"
+            f"Performance of Smart Exits (AI-driven): Count={smart_metrics.get('count')}, Win Rate={smart_metrics.get('win_rate')}%, Profit Factor={smart_metrics.get('profit_factor')}, Total PnL={smart_metrics.get('total_pnl')}\n"
+            f"Performance of Standard Exits (SL/TGT): Count={standard_metrics.get('count')}, Win Rate={standard_metrics.get('win_rate')}%, Profit Factor={standard_metrics.get('profit_factor')}, Total PnL={standard_metrics.get('total_pnl')}\n\n"
+            f"{history_context}"
+            "Specifically evaluate if 'smart_exits_enabled' and 'smart_reentry_enabled' are performing optimally. "
+            "If VIX spikes or Delta breaches caused large losses before exits, suggest enabling/disabling these intelligence features. "
+            "If the 'Smart Exits' group shows a high win rate (e.g., >60%) but a low profit factor (e.g., <1.0), suggest enabling 'smart_reentry_enabled' to capitalize on potential reversals after smart exits. "
+            "Also look for patterns like 'stop loss too tight' or 'overtrading'.\n"
+            "Review the PREVIOUS AI OPTIMIZATION HISTORY & MEMORY above. Identify if previous suggestions were made, and if they were applied, evaluate their success against the new metrics. This is a continuous learning loop: build on your previous insights and self-improve. Do not repeat failed recommendations.\n"
+            "Return JSON with 'analysis' (professional summary incorporating historical comparison) and 'suggestions' (list of {param, current, suggest, reason})."
+        )
+
+        result, model_used = call_llm(
+            prompt,
+            system_prompt="You are a senior hedge fund risk manager specializing in Indian Equities.",
+            return_provider=True,
+        )
+        if result and isinstance(result, dict):
+            result["model_used"] = model_used
+
+            # Save the run to intelligence history to preserve the memory for next run
+            try:
+                new_run = {
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S IST"),
+                    "model_used": model_used,
+                    "analysis": result.get("analysis", ""),
+                    "suggestions": result.get("suggestions", []),
+                }
+                with pt.atomic_db_update() as update_db:
+                    if "ai_intelligence_history" not in update_db:
+                        update_db["ai_intelligence_history"] = []
+                    update_db["ai_intelligence_history"].append(new_run)
+                    # Limit saved history to 10 runs in DB to prevent unbounded growth
+                    update_db["ai_intelligence_history"] = update_db[
+                        "ai_intelligence_history"
+                    ][-10:]
+            except Exception as save_err:
+                app.logger.error("Failed to save intelligence history: %s", save_err)
+
+        return jsonify(result or {"error": "Intelligence engine unavailable"})
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/paper/intelligence/apply", methods=["POST"])
+def api_paper_intelligence_apply():
+    """Apply a suggested configuration change."""
+    try:
+        suggestion = request.json
+        if not suggestion or "param" not in suggestion:
+            return jsonify({"error": "Missing suggestion data"}), 400
+
+        settings = pt.get_settings()
+        param = suggestion["param"]
+        if param in settings:
+            settings[param] = suggestion["suggest"]
+            pt.save_settings(settings)
+            return jsonify({"success": True, "updated_param": param})
+        return jsonify({"error": f"Parameter '{param}' not found in settings"}), 404
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/paper/skipped")
 def api_paper_skipped():
     """Return skipped trade reasons for an IST date (default: today)."""
@@ -1191,17 +1811,20 @@ def api_paper_skipped():
             by_reason[reason] = by_reason.get(reason, 0) + 1
             by_gate[gate] = by_gate.get(gate, 0) + 1
 
-        return jsonify({
-            "date": target_date.isoformat(),
-            "skipped": rows,
-            "summary": {
-                "total": len(rows),
-                "by_reason": by_reason,
-                "by_gate": by_gate,
-            },
-        })
+        return jsonify(
+            {
+                "date": target_date.isoformat(),
+                "skipped": rows,
+                "summary": {
+                    "total": len(rows),
+                    "by_reason": by_reason,
+                    "by_gate": by_gate,
+                },
+            }
+        )
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
 
 @app.route("/api/paper/skipped/clear", methods=["POST"])
 def api_paper_skipped_clear():
@@ -1211,7 +1834,7 @@ def api_paper_skipped_clear():
         days = data.get("days")
         if days is None:
             return jsonify({"error": "Missing days"}), 400
-        
+
         cfg = load_config()
         journal = Journal(cfg["paths"]["journal_db"])
         count = journal.clear_skipped_trades(int(days))
@@ -1220,12 +1843,13 @@ def api_paper_skipped_clear():
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
+
 @app.route("/api/options/structures")
 def api_options_structures():
     try:
         db = pt._load_db()
         ops = db.get("option_trades", [])
-        
+
         # Enrich open option trades with live premiums and P&L
         open_ops = [t for t in ops if t.get("status") == "OPEN"]
         if open_ops:
@@ -1233,19 +1857,21 @@ def api_options_structures():
                 price_map = pt._build_option_price_map(open_ops)
                 for t in open_ops:
                     current_net = pt._option_net_premium(t["legs"], price_map)
-                    
+
                     # Store current premium for each leg
                     for leg in t["legs"]:
                         key = (leg["strike"], leg["expiry"], leg["type"])
                         leg["current_premium"] = price_map.get(key)
-                    
+
                     if current_net is not None:
                         t["current_net_premium"] = current_net
                         entry_net = t.get("net_premium") or t.get("net_credit") or 0.0
                         t["pnl"] = round(entry_net - current_net, 2)
             except Exception as e:
-                logging.getLogger(__name__).exception("Failed to enrich open option trades: %s", e)
-                
+                logging.getLogger(__name__).exception(
+                    "Failed to enrich open option trades: %s", e
+                )
+
         return jsonify({"option_trades": ops})
     except Exception as e:
         traceback.print_exc()
@@ -1254,6 +1880,7 @@ def api_options_structures():
 
 def _dict_to_setup(d: dict):
     from signals.option_strategy import NiftyOptionSetup
+
     return NiftyOptionSetup(
         symbol=d.get("symbol", "NIFTY"),
         mode=d.get("mode", "positional"),
@@ -1278,22 +1905,43 @@ def _dict_to_setup(d: dict):
 
 
 def _dict_legs_to_resolved(legs: list[dict]):
-    from signals.option_strategy import ResolvedLeg
     from config.loader import load_config
+    from signals.option_strategy import ResolvedLeg
+
     cfg = load_config()
-    min_lots = cfg.get("nifty_options", {}).get("min_lots_per_leg", 10)
+    min_lots = max(1, cfg.get("nifty_options", {}).get("min_lots_per_leg", 1))
     out = []
     for leg in legs:
         qty = max(1, int(leg.get("qty", 1)))
-        out.append(ResolvedLeg(
-            side=leg.get("side", ""),
-            type=leg.get("type", ""),
-            strike=leg.get("strike", 0),
-            expiry=leg.get("expiry", ""),
-            lots=min_lots,
-            lot_size=qty,
-            premium=leg.get("premium", 0.0),
-        ))
+        lots = leg.get("lots")
+        lot_size = leg.get("lot_size")
+        if lots is None or lot_size is None:
+            try:
+                settings = pt.get_settings()
+                lots = max(1, settings.get("options_lots_per_trade", 1))
+            except Exception:
+                lots = min_lots
+            exchange_lot_size = (
+                cfg.get("nifty_options", {}).get("lot_size", {}).get("NIFTY")
+                or cfg.get("options", {}).get("lot_size", {}).get("NIFTY")
+                or 75
+            )
+            if qty % lots == 0:
+                lot_size = qty // lots
+            else:
+                lot_size = exchange_lot_size
+                lots = max(1, qty // lot_size)
+        out.append(
+            ResolvedLeg(
+                side=leg.get("side", ""),
+                type=leg.get("type", ""),
+                strike=leg.get("strike", 0),
+                expiry=leg.get("expiry", ""),
+                lots=lots,
+                lot_size=lot_size,
+                premium=leg.get("premium", 0.0),
+            )
+        )
     return out
 
 
@@ -1321,14 +1969,15 @@ def api_options_auto_enter():
         for s in setups:
             if not s.get("suitable") or not s.get("legs"):
                 continue
-            result = pt.enter_nifty_option_structure(_dict_to_setup(s), _dict_legs_to_resolved(s["legs"]), cfg)
+            result = pt.enter_nifty_option_structure(
+                _dict_to_setup(s), _dict_legs_to_resolved(s["legs"]), cfg
+            )
             if "error" not in result:
                 entered.append(result)
         return jsonify({"entered": entered, "setups": setups})
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
-
 
 
 @app.route("/api/paper/settings", methods=["GET", "POST"])
@@ -1354,10 +2003,13 @@ def api_paper_export():
     try:
         csv_data = pt.export_trades_to_csv()
         from flask import Response
+
         return Response(
             csv_data,
             mimetype="text/csv",
-            headers={"Content-disposition": f"attachment; filename=paper_trades_{date.today().isoformat()}.csv"}
+            headers={
+                "Content-disposition": f"attachment; filename=paper_trades_{date.today().isoformat()}.csv"
+            },
         )
     except Exception as e:
         traceback.print_exc()
@@ -1365,7 +2017,6 @@ def api_paper_export():
 
 
 @app.route("/api/paper/cleanup", methods=["POST"])
-
 def api_paper_cleanup():
     """Clean up DB with filters."""
     try:
@@ -1386,12 +2037,97 @@ def api_paper_cleanup():
 import threading
 import time
 
+# In-memory cache to prevent repeated LLM brain audits for the same
+# (regime/bias/vix/pcr + alert basket). This stops token burn loops.
+_brain_audit_cache: dict[str, bool] = {}
+_brain_audit_cache_ts: dict[str, float] = {}
+
+
+def _brain_audit(data: dict, alerts: list[dict]) -> bool:
+    """Ask LLM Brain for final approval before auto-executing trades.
+
+    Cost safeguards:
+    - Cache LLM decision for 10 minutes per snapshot key.
+    - Keep prompt short; request strict JSON only.
+    """
+    import json as _json
+    import time as _time
+
+    from data.ai_scraper import call_llm
+
+    regime_name = data.get("regime", {}).get("name")
+    trend_score = data.get("regime", {}).get("trend_score")
+    vix = data.get("regime", {}).get("vix")
+    vix_chg = data.get("regime", {}).get("vix_5d_change_pct")
+    bias = data.get("flows", {}).get("bias")
+    pcr = data.get("flows", {}).get("pcr_oi")
+
+    symbols_sig = ",".join(
+        sorted({str(a.get("symbol")) for a in alerts if a.get("symbol")})
+    )
+    directions_sig = ",".join(
+        sorted({str(a.get("direction")).upper() for a in alerts if a.get("direction")})
+    )
+
+    vix_key = round(vix) if isinstance(vix, (int, float)) else 0
+    pcr_key = round(pcr, 1) if isinstance(pcr, (int, float)) else 0.0
+    cache_key = f"{regime_name}|{trend_score}|{vix_key}|{bias}|{pcr_key}|{symbols_sig}|{directions_sig}"
+    ttl = 600.0
+
+    ts = _brain_audit_cache_ts.get(cache_key)
+    if ts is not None and (_time.time() - ts) < ttl:
+        return _brain_audit_cache.get(cache_key, True)
+
+    proposed = [
+        {"symbol": a.get("symbol"), "direction": a.get("direction")} for a in alerts
+    ]
+    prompt = (
+        f"Evaluate this trade signal. "
+        f"Regime={regime_name}, TrendScore={trend_score}, VIX={vix}, Bias={bias}, PCR={pcr}. "
+        f"Signals={_json.dumps(proposed)}. "
+        "Return ONLY valid JSON: "
+        '{"approved": true/false, "reason": "<=10 words"}.'
+    )
+
+    try:
+        decision = call_llm(
+            prompt,
+            system_prompt="You are a risk manager for Indian trading. Reply with strict JSON only.",
+            json_mode=True,
+            max_tokens=50,
+        )
+        approved = True if decision is None else bool(decision.get("approved"))
+        _brain_audit_cache[cache_key] = approved
+        _brain_audit_cache_ts[cache_key] = _time.time()
+
+        if not approved:
+            reason = (
+                decision.get("reason") if isinstance(decision, dict) else "Rejected"
+            )
+            logging.getLogger(__name__).warning("🧠 Brain Audit REJECTED: %s", reason)
+        else:
+            logging.getLogger(__name__).info("🧠 Brain Audit APPROVED")
+
+        return approved
+    except Exception as e:
+        # Fail open to avoid blocking engine execution if LLM is down.
+        logging.getLogger(__name__).error("🧠 Brain Audit ERROR: %s", e)
+        _brain_audit_cache[cache_key] = True
+        _brain_audit_cache_ts[cache_key] = _time.time()
+        return True
+
+
 def _automation_worker():
     """Background task to keep the engine fresh and automated."""
     import logging as _logging
+
     _log = _logging.getLogger(__name__)
 
-    start_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    start_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # Cooldown for LLM brain audit to manage API costs.
+    # This means the LLM is consulted at most once every `_brain_audit_cooldown_seconds`.
+    _last_brain_audit_ts = 0.0
+    _brain_audit_cooldown_seconds = 300  # Audit LLM at most once every 5 minutes
     _log.info("[%s] Background worker started...", start_time)
 
     last_engine_run = 0
@@ -1406,7 +2142,7 @@ def _automation_worker():
             if now - last_engine_run > 120:
                 _log.info(
                     "[%s] Engine tick (market_open=%s)...",
-                    datetime.now().strftime('%H:%M:%S'),
+                    datetime.now().strftime("%H:%M:%S"),
                     market_open,
                 )
                 data = _run_engine()
@@ -1416,36 +2152,75 @@ def _automation_worker():
 
                     # ---- Phase 1: Equity auto-entry from alerts ----
                     alerts = _generate_trade_alerts(data)
-                    entered = pt.auto_enter_from_alerts(alerts, cfg=cfg)
-                    if entered:
-                        _log.info(
-                            "  > Auto-entered %s trades: %s",
-                            len(entered),
-                            ", ".join(e["symbol"] for e in entered),
-                        )
+                    actionable_alerts = [
+                        a for a in alerts if a.get("direction") in ("LONG", "SHORT")
+                    ]
 
-                        # Fire Telegram alert so user is notified of auto-trades.
-                        try:
-                            token = cfg.get("alerts", {}).get("telegram_bot_token")
-                            chat_id = cfg.get("alerts", {}).get("telegram_chat_id")
+                    # Apply cooldown to LLM brain audit to manage API costs.
+                    # If actionable alerts are present, but the cooldown is active, we implicitly approve
+                    # to avoid blocking trades, similar to how LLM errors are handled.
+                    perform_audit = False
+                    if actionable_alerts:
+                        if now - _last_brain_audit_ts > _brain_audit_cooldown_seconds:
+                            perform_audit = True
+                        else:
+                            _log.info(
+                                f"🧠 Brain Audit skipped due to cooldown ({round(_brain_audit_cooldown_seconds - (now - _last_brain_audit_ts))}s remaining). Approving by default."
+                            )
 
-                            entered_syms = {e["symbol"] for e in entered}
-                            entered_alerts = [a for a in alerts if a.get("symbol") in entered_syms]
+                    if actionable_alerts:
+                        approved = True
+                        if perform_audit:
+                            approved = _brain_audit(data, actionable_alerts)
+                            _last_brain_audit_ts = (
+                                now  # Cooldown applies whether approved or rejected
+                            )
 
-                            msg = _format_telegram_alert(data, entered_alerts)
-                            msg = "*[AUTO-EXECUTED]*\n" + msg
-
-                            ok = Alerter(token, chat_id).send(msg)
-                            if ok:
-                                _log.info("  > Telegram alert sent for %s auto-trades", len(entered))
-                            else:
-                                import ops.alerts as alerts_mod
-                                _log.warning(
-                                    "  > Telegram alert failed. Last error: %s",
-                                    alerts_mod._last_send.get("error"),
+                        if approved:
+                            entered = pt.auto_enter_from_alerts(
+                                actionable_alerts, cfg=cfg
+                            )
+                            if entered:
+                                _log.info(
+                                    "  > Auto-entered %s trades: %s",
+                                    len(entered),
+                                    ", ".join(e["symbol"] for e in entered),
                                 )
-                        except Exception as te:
-                            _log.exception("  > Telegram send failed: %s", te)
+
+                                # Fire Telegram alert so user is notified of auto-trades.
+                                try:
+                                    token = cfg.get("alerts", {}).get(
+                                        "telegram_bot_token"
+                                    )
+                                    chat_id = cfg.get("alerts", {}).get(
+                                        "telegram_chat_id"
+                                    )
+
+                                    entered_syms = {e["symbol"] for e in entered}
+                                    entered_alerts = [
+                                        a
+                                        for a in actionable_alerts
+                                        if a.get("symbol") in entered_syms
+                                    ]
+
+                                    msg = _format_telegram_alert(data, entered_alerts)
+                                    msg = "*[AUTO-EXECUTED]*\n" + msg
+
+                                    ok = Alerter(token, chat_id).send(msg)
+                                    if ok:
+                                        _log.info(
+                                            "  > Telegram alert sent for %s auto-trades",
+                                            len(entered),
+                                        )
+                                    else:
+                                        import ops.alerts as alerts_mod
+
+                                        _log.warning(
+                                            "  > Telegram alert failed. Last error: %s",
+                                            alerts_mod._last_send.get("error"),
+                                        )
+                                except Exception as te:
+                                    _log.exception("  > Telegram send failed: %s", te)
 
                     # ---- Phase 2: NIFTY options auto-entry ----
                     try:
@@ -1474,7 +2249,12 @@ def _automation_worker():
 
                             for res in nifty_entered:
                                 msg = _format_options_telegram_alert(
-                                    res, regime_name, bias, "N/A", vix_disp, is_nifty=True
+                                    res,
+                                    regime_name,
+                                    bias,
+                                    "N/A",
+                                    vix_disp,
+                                    is_nifty=True,
                                 )
                                 Alerter(token, chat_id).send(msg)
                     except Exception as ne:
@@ -1483,12 +2263,17 @@ def _automation_worker():
                     # ---- Phase 3: Multi-underlying options auto-execution ----
                     if cfg.get("options", {}).get("enabled"):
                         try:
-                            from signals.options import iv_rank, chain_snapshot, atm_iv
-                            from signals.option_strategy import pick_structure, resolve_legs
+                            from signals.option_strategy import (
+                                pick_structure,
+                                resolve_legs,
+                            )
+                            from signals.options import atm_iv, chain_snapshot, iv_rank
 
                             underlyings = [
                                 u
-                                for u in cfg.get("options", {}).get("underlyings", ["NIFTY", "BANKNIFTY"])
+                                for u in cfg.get("options", {}).get(
+                                    "underlyings", ["NIFTY", "BANKNIFTY"]
+                                )
                                 if u != "NIFTY"
                             ]
 
@@ -1498,7 +2283,9 @@ def _automation_worker():
                             regime_name = data.get("regime", {}).get("name", "")
                             bias = data.get("flows", {}).get("bias", "NEUTRAL")
                             vix = data.get("regime", {}).get("vix", 15)
-                            db_path = cfg.get("options", {}).get("iv_history_db", "./data/iv_history.sqlite")
+                            db_path = cfg.get("options", {}).get(
+                                "iv_history_db", "./data/iv_history.sqlite"
+                            )
 
                             for sym in underlyings:
                                 try:
@@ -1519,25 +2306,57 @@ def _automation_worker():
                                     if not struct:
                                         continue
 
-                                    lot_sz = cfg.get("options", {}).get("lot_size", {}).get(sym, 50)
-                                    step = cfg.get("options", {}).get("strike_step", {}).get(sym, 50)
-                                    num_lots = pt.get_settings().get("options_lots_per_trade", 1)
+                                    lot_sz = (
+                                        cfg.get("options", {})
+                                        .get("lot_size", {})
+                                        .get(sym, 50)
+                                    )
+                                    step = (
+                                        cfg.get("options", {})
+                                        .get("strike_step", {})
+                                        .get(sym, 50)
+                                    )
+                                    num_lots = pt.get_settings().get(
+                                        "options_lots_per_trade", 1
+                                    )
 
-                                    legs = resolve_legs(struct, chain, spot, lot_sz, step, num_lots=num_lots)
+                                    legs = resolve_legs(
+                                        struct,
+                                        chain,
+                                        spot,
+                                        lot_sz,
+                                        step,
+                                        num_lots=num_lots,
+                                    )
                                     if not legs:
                                         continue
 
-                                    res = pt.enter_option_structure(struct.name, legs, sym, cfg)
+                                    res = pt.enter_option_structure(
+                                        struct.name, legs, sym, cfg
+                                    )
                                     if "error" in res:
                                         continue
 
-                                    _log.info("  > Auto-entered Option Structure: %s %s", sym, struct.name)
+                                    _log.info(
+                                        "  > Auto-entered Option Structure: %s %s",
+                                        sym,
+                                        struct.name,
+                                    )
 
-                                    ivr_disp = f"{ivr:.0f}" if ivr is not None else "N/A"
-                                    vix_disp = f"{vix:.1f}" if vix is not None else "N/A"
+                                    ivr_disp = (
+                                        f"{ivr:.0f}" if ivr is not None else "N/A"
+                                    )
+                                    vix_disp = (
+                                        f"{vix:.1f}" if vix is not None else "N/A"
+                                    )
 
                                     msg = _format_options_telegram_alert(
-                                        res, regime_name, bias, ivr_disp, vix_disp, is_nifty=False
+                                        res,
+                                        regime_name,
+                                        bias,
+                                        ivr_disp,
+                                        vix_disp,
+                                        is_nifty=False,
                                     )
                                     Alerter(token, chat_id).send(msg)
                                 except Exception as sym_err:
@@ -1551,25 +2370,34 @@ def _automation_worker():
 
                 last_engine_run = now
 
-            # 2) Exit checks (runs every minute; EOD flatten window handled inside pt methods).
+            # 2) Exit checks (runs every minute; EOD flatten window handled inside pt methods)
+            vix_now = data.get("regime", {}).get("vix", 15.0)
+            regime_now = data.get("regime", {}).get("name")
             pt.check_and_close_trades()
-            pt.check_option_exits()
+            pt.check_option_exits(vix_current=vix_now, current_regime=regime_now)
             try:
-                vix_now = data.get("regime", {}).get("vix", 15.0)
-                pt.check_nifty_option_exits(vix_current=vix_now, cfg=load_config())
+                pt.check_nifty_option_exits(
+                    vix_current=vix_now, cfg=load_config(), current_regime=regime_now
+                )
             except Exception as ex:
                 _log.exception("  > NIFTY exit check failed: %s", ex)
 
         except Exception as e:
-            ts = datetime.now().strftime('%H:%M:%S')
+            ts = datetime.now().strftime("%H:%M:%S")
             _log.exception("[%s] CRITICAL: Automation worker loop error: %s", ts, e)
+            # Ensure _engine_busy is never left True after an unhandled exception.
+            with _cache_lock:
+                _engine_busy = False
 
         time.sleep(60)  # Wake up every minute
+
 
 if __name__ == "__main__":
     # Start automation thread
     worker = threading.Thread(target=_automation_worker, daemon=True)
     worker.start()
-    
-    __import__("logging").getLogger(__name__).info("StockMinded Dashboard -> http://localhost:5050")
+
+    __import__("logging").getLogger(__name__).info(
+        "StockMinded Dashboard -> http://localhost:5050"
+    )
     app.run(host="0.0.0.0", port=5050, debug=False)

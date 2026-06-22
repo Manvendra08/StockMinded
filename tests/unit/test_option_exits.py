@@ -32,6 +32,7 @@ def test_check_option_exits_keeps_valid_credit_trade():
     price_map = {(56000, "27-Jun-2026", "CE"): 10.0}
 
     with patch("dashboard.paper_trader.atomic_db_update", side_effect=lambda: _db_context(db)), \
+         patch("dashboard.paper_trader._load_db", return_value=db), \
          patch("dashboard.paper_trader.is_market_open", return_value=True), \
          patch("dashboard.paper_trader.is_eod_window", return_value=False), \
          patch("dashboard.paper_trader._build_option_price_map", return_value=price_map), \
@@ -61,6 +62,7 @@ def test_check_option_exits_closes_missing_premium_trade():
     db = {"option_trades": [trade], "settings": {"smart_exits_enabled": False}}
 
     with patch("dashboard.paper_trader.atomic_db_update", side_effect=lambda: _db_context(db)), \
+         patch("dashboard.paper_trader._load_db", return_value=db), \
          patch("dashboard.paper_trader.is_market_open", return_value=True), \
          patch("dashboard.paper_trader.is_eod_window", return_value=False), \
          patch("dashboard.paper_trader._build_option_price_map", return_value={}), \

@@ -1,4 +1,5 @@
 """Money flow: FII/DII, sector rotation, option chain PCR + max pain."""
+
 from __future__ import annotations
 
 import warnings
@@ -19,10 +20,10 @@ class FlowSnapshot:
     pcr_oi: float | None
     pcr_vol: float | None
     max_pain: float | None
-    smart_money_bias: str   # LONG | SHORT | NEUTRAL
+    smart_money_bias: str  # LONG | SHORT | NEUTRAL
     pcr_stale: bool = False
     mp_stale: bool = False
-    fii_dii_stale: bool = False   # True when FII/DII data fetch failed
+    fii_dii_stale: bool = False  # True when FII/DII data fetch failed
     pcr_updated_at: float | None = None
     mp_updated_at: float | None = None
     notes: str = ""
@@ -30,6 +31,7 @@ class FlowSnapshot:
     ai_sentiment: str | None = None
     fii_derivatives_5d: dict[str, float] = field(default_factory=dict)
     fii_derivatives_stale: bool = False
+    trendlyne_kpis: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -50,6 +52,7 @@ class FlowSnapshot:
             "ai_sentiment": self.ai_sentiment,
             "fii_derivatives_5d": self.fii_derivatives_5d,
             "fii_derivatives_stale": self.fii_derivatives_stale,
+            "trendlyne_kpis": self.trendlyne_kpis,
         }
 
 
@@ -226,6 +229,7 @@ def _bias(
     derivatives: dict[str, float] | None = None,
     derivatives_stale: bool = False,
     ai_sentiment: str | None = None,
+    trendlyne: dict | None = None,
 ) -> str:
     """Compute smart-money bias with weighted, calibrated signal scoring.
 
@@ -236,6 +240,7 @@ def _bias(
     FII Cash Net 5D           : weight 1.0  — T+1 delayed, directional only
     FII Stock Futures 5D net  : weight 1.0
     FII Index Options 5D net  : weight 0.5  — noisy; low weight
+    FII Index Long-Short Ratio: weight 1.5  — >1.25 bull / <0.75 bear
     AI Sentiment (tiebreaker) : weight 0.5  — only applied when score in (-1, 1)
 
     Conviction threshold: weighted_score >= 2.0 → LONG, <= -2.0 → SHORT.
@@ -249,7 +254,7 @@ def _bias(
 
     # --- FII Cash (weight 1.0) with 2-day recency delta ---
     if not fii_dii_stale:
-        net5d = fii_dii.get("fii", 0.0) + fii_dii.get("dii", 0.0)
+        net5d = fii_dii.get("fii", 0.0)
         # Base score from 5d net
         if net5d > 500:
             score += 1.0
@@ -277,6 +282,17 @@ def _bias(
         elif pcr_oi < 0.85:
             score -= 1.5
 
+    # --- Trendlyne FII Long-Short Ratio (weight 1.5) ---
+    if trendlyne and trendlyne.get("fii_index_long_short_ratio"):
+        try:
+            ratio = float(trendlyne["fii_index_long_short_ratio"])
+            if ratio > 1.25:
+                score += 1.5
+            elif ratio < 0.75:
+                score -= 1.5
+        except (ValueError, TypeError):
+            pass
+
     # --- FII Derivatives (only when fresh) ---
     if not derivatives_stale and derivatives is not None:
         # FII Index Futures 5D Net (weight 2.0 — highest quality signal)
@@ -302,10 +318,17 @@ def _bias(
 
     # --- AI Sentiment tiebreaker (weight 0.5, only when score in (-2, 2)) ---
     if ai_sentiment is not None and -2.0 < score < 2.0:
-        sentiment_upper = str(ai_sentiment).upper()
-        if sentiment_upper in ("BULLISH", "POSITIVE", "LONG"):
+        # ai_sentiment may arrive as a full dict (from get_market_news_sentiment)
+        # or as a plain string. Extract the relevant field when it's a dict.
+        if isinstance(ai_sentiment, dict):
+            _sentiment_str = str(
+                ai_sentiment.get("overall_market_sentiment") or ""
+            ).upper()
+        else:
+            _sentiment_str = str(ai_sentiment).upper()
+        if _sentiment_str in ("BULLISH", "POSITIVE", "LONG"):
             score += 0.5
-        elif sentiment_upper in ("BEARISH", "NEGATIVE", "SHORT"):
+        elif _sentiment_str in ("BEARISH", "NEGATIVE", "SHORT"):
             score -= 0.5
 
     # --- Conviction threshold: ±2.0 on a max possible ~6.5 scale ---
@@ -330,7 +353,7 @@ def snapshot(
 
     rs = sector_relative_strength(sector_data, lookback=5)
     top_in = rs[:3]
-    top_out = rs[-3:][::-1] if len(rs) >= 3 else []
+    top_out = rs[-3:][::-1]
     notes_parts = []
     if fii_dii_stale:
         notes_parts.append("FII/DII data unavailable")
@@ -338,7 +361,9 @@ def snapshot(
         notes_parts.append("FII derivatives data unavailable")
 
     try:
-        pcr_oi, pcr_vol, mp, pcr_stale, mp_stale, pcr_updated_at, mp_updated_at = feed.get_pcr_max_pain_cached(index_symbol)
+        pcr_oi, pcr_vol, mp, pcr_stale, mp_stale, pcr_updated_at, mp_updated_at = (
+            feed.get_pcr_max_pain_cached(index_symbol)
+        )
         if pcr_oi is None and mp is None and (pcr_stale or mp_stale):
             notes_parts.append("Option chain unavailable; PCR/max-pain unavailable")
     except Exception as e:
@@ -351,9 +376,16 @@ def snapshot(
     ai_sentiment = None
     try:
         from data import ai_scraper
+
         ai_sentiment = ai_scraper.get_market_news_sentiment()
     except Exception as e:
         print(f"[flows.snapshot] AI sentiment failed: {e}")
+
+    # Trendlyne KPIs
+    try:
+        trendlyne_kpis = feed.fetch_trendlyne_options_kpis(index_symbol)
+    except Exception:
+        trendlyne_kpis = {}
 
     return FlowSnapshot(
         fii_dii_5d_net_cr=fii_dii,
@@ -363,11 +395,13 @@ def snapshot(
         pcr_vol=pcr_vol,
         max_pain=mp,
         smart_money_bias=_bias(
-            fii_dii, pcr_oi,
+            fii_dii,
+            pcr_oi,
             fii_dii_stale=fii_dii_stale,
             derivatives=fii_derivs,
             derivatives_stale=fii_derivs_stale,
             ai_sentiment=ai_sentiment,
+            trendlyne=trendlyne_kpis,
         ),
         pcr_stale=pcr_stale,
         mp_stale=mp_stale,
@@ -379,4 +413,5 @@ def snapshot(
         ai_sentiment=ai_sentiment,
         fii_derivatives_5d=fii_derivs,
         fii_derivatives_stale=fii_derivs_stale,
+        trendlyne_kpis=trendlyne_kpis,
     )

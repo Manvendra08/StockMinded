@@ -56,3 +56,42 @@ class TestLoadConfig:
         assert "account" in cfg
         assert "risk" in cfg
         assert "universe_fo_sample" in cfg
+
+
+class TestLoadUniverse:
+    def test_load_universe_dhan_primary_success(self, monkeypatch):
+        mock_symbols = ["MOCK1", "MOCK2"]
+        monkeypatch.setattr(
+            "config.loader.fetch_dhan_public_universe",
+            lambda: mock_symbols
+        )
+        cfg = {"universe_source": "fno200"}
+        symbols = load_config() # dummy to get imports, or we can import load_universe
+        from config.loader import load_universe
+        res = load_universe(cfg)
+        assert res == mock_symbols
+
+    def test_load_universe_dhan_fallback_on_failure(self, monkeypatch, tmp_path):
+        # Force fetch_dhan_public_universe to fail/return None
+        monkeypatch.setattr(
+            "config.loader.fetch_dhan_public_universe",
+            lambda: None
+        )
+        
+        # Mock Path in loader to point to a temporary csv file
+        csv_content = "symbol,sector,lot_size\nFALLBACK1,BANK,100\nFALLBACK2,IT,200\n"
+        csv_file = tmp_path / "fno200.csv"
+        with open(csv_file, "w", encoding="utf-8") as f:
+            f.write(csv_content)
+            
+        monkeypatch.setattr(
+            "config.loader.Path",
+            lambda *args, **kwargs: csv_file
+        )
+        
+        cfg = {"universe_source": "fno200"}
+        from config.loader import load_universe
+        res = load_universe(cfg)
+        assert "FALLBACK1" in res
+        assert "FALLBACK2" in res
+

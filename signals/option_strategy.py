@@ -192,11 +192,15 @@ def resolve_nifty_structure(setup: NiftyOptionSetup, chain: pd.DataFrame,
     if chain.empty or not setup.suitable:
         return setup
     
+    chain = chain.copy()
+    chain["ce_ltp"] = pd.to_numeric(chain["ce_ltp"], errors="coerce").fillna(0.0)
+    chain["pe_ltp"] = pd.to_numeric(chain["pe_ltp"], errors="coerce").fillna(0.0)
+
+    setup.spot = spot
     if cfg is None:
         from config.loader import load_config
         cfg = load_config()
-    
-    min_lots = cfg.get("nifty_options", {}).get("min_lots_per_leg", 10)
+    min_lots = max(1, cfg.get("nifty_options", {}).get("min_lots_per_leg", 1))
     
     strikes = sorted(chain["strike"].tolist())
     atm = atm_strike(spot, strikes)
@@ -224,6 +228,9 @@ def resolve_nifty_structure(setup: NiftyOptionSetup, chain: pd.DataFrame,
             return setup
 
     wing = setup.wing_width
+    if wing > 0 and strike_step > 0:
+        wing = int(round(wing / strike_step)) * strike_step
+        setup.wing_width = wing
     resolved_legs = []
     net_credit = 0.0
     max_loss = 0.0
@@ -255,7 +262,7 @@ def resolve_nifty_structure(setup: NiftyOptionSetup, chain: pd.DataFrame,
             ResolvedLeg("SELL", "CE", short_call, expiry, min_lots, lot_size, scr.iloc[0]["ce_ltp"]),
             ResolvedLeg("BUY", "CE", long_call, expiry, min_lots, lot_size, lcr.iloc[0]["ce_ltp"]),
         ]
-        credit_per_lot = net_credit / lot_size
+        credit_per_lot = net_credit / lot_size if lot_size else 0.0
         setup.breakevens = [short_put - credit_per_lot, short_call + credit_per_lot]
         setup.short_strikes = [short_put, short_call]
         
@@ -285,7 +292,7 @@ def resolve_nifty_structure(setup: NiftyOptionSetup, chain: pd.DataFrame,
             ResolvedLeg("SELL", leg_type, short_s, expiry, min_lots, lot_size, short_prem),
             ResolvedLeg("BUY", leg_type, long_s, expiry, min_lots, lot_size, long_prem),
         ]
-        credit_per_lot = net_credit / lot_size
+        credit_per_lot = net_credit / lot_size if lot_size else 0.0
         setup.breakevens = [short_s - credit_per_lot if leg_type == "PE" else short_s + credit_per_lot]
         setup.short_strikes = [short_s]
     
@@ -307,7 +314,8 @@ def resolve_nifty_structure(setup: NiftyOptionSetup, chain: pd.DataFrame,
             ResolvedLeg("SELL", leg_type, short_s, expiry, min_lots, lot_size, prem),
         ]
         net_credit = prem * lot_size
-        max_loss = 250000.0 * lot_size # Proxy for naked
+        spot_for_risk = spot if spot > 0 else 25000.0
+        max_loss = spot_for_risk * 0.20 * lot_size
         setup.breakevens = [short_s - prem if leg_type == "PE" else short_s + prem]
         setup.short_strikes = [short_s]
     
@@ -369,6 +377,9 @@ def resolve_legs(structure: OptionStructure, chain: pd.DataFrame, spot: float,
                   lot_size: int, strike_step: int, num_lots: int = 1) -> list[ResolvedLeg]:
     if chain.empty:
         return []
+    chain = chain.copy()
+    chain["ce_ltp"] = pd.to_numeric(chain["ce_ltp"], errors="coerce").fillna(0.0)
+    chain["pe_ltp"] = pd.to_numeric(chain["pe_ltp"], errors="coerce").fillna(0.0)
     strikes = sorted(chain["strike"].tolist())
     atm = atm_strike(spot, strikes)
     if not atm:

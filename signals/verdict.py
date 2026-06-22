@@ -84,7 +84,7 @@ def build_trade_verdict(data: dict) -> CombinedVerdict:
     max_pain = flows.get("max_pain")
     option_stale = bool(flows.get("pcr_stale")) or bool(flows.get("mp_stale"))
     option_ok = pcr is not None and max_pain is not None and not option_stale
-    data_stale = freshness.get("status") in ("OLD", "MISSING") or freshness.get("status") == "MISSING"
+    data_stale = freshness.get("status") in ("OLD", "MISSING")
 
     common_reasons = [
         f"Regime {regime_name}",

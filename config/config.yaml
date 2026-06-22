@@ -80,8 +80,8 @@ paths:
 
 data_sources:
   dhan:
-    enabled: false
-    primary: false
+    enabled: true
+    primary: true
     instrument_master_url: "https://images.dhan.co/api-data/api-scrip-master.csv"
     underlyings:
       NIFTY: {security_id: 13, segment: IDX_I}
@@ -96,18 +96,19 @@ data_sources:
     model: "google_genai/gemini-2.5-flash-lite"
     model_tokens: 8192
     api_key: "${GOOGLE_API_KEY}"
+    groq_api_key: "${GROQ_API_KEY}"
+    openrouter_api_key: "${OPENROUTER_API_KEY}"
     saas_api_key: "${SCRAPEGRAPHAI_API_KEY}"
 
 options:
   enabled: true
   underlyings: [NIFTY, BANKNIFTY]
-  lot_size: {NIFTY: 75, BANKNIFTY: 30, FINNIFTY: 65}
+  lot_size: {NIFTY: 65, BANKNIFTY: 30, FINNIFTY: 60}
   strike_step: {NIFTY: 50, BANKNIFTY: 100}
   expiry_preference: weekly          # weekly | monthly
   max_risk_per_structure_pct: 0.0075
   max_concurrent_structures: 4
-  iv_history_db: ./data/iv_history.sqlite
-  # Per user choice - initial structures
+  iv_history_db: ./data/iv_history.sqlite # Per user choice - initial structures
   enabled_structures:
     - BULL_CALL_SPREAD
     - BEAR_PUT_SPREAD

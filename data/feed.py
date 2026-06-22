@@ -1,5 +1,5 @@
-
 """Data feed: OHLC, option chain, FII/DII, VIX. yfinance + nsepython."""
+
 from __future__ import annotations
 
 import datetime as dt
@@ -17,7 +17,6 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-
 CACHE_DIR = Path(__file__).parent.parent / "data/cache"
 
 
@@ -29,7 +28,10 @@ _DHAN_OC_CACHE: dict[str, tuple[float, dict]] = {}
 _DHAN_MASTER_CACHE: pd.DataFrame | None = None
 _OPTION_CHAIN_SOURCE: dict[str, str] = {}
 
-def _create_retry_session(retries=5, backoff_factor=1, status_forcelist=(500, 502, 503, 504)):
+
+def _create_retry_session(
+    retries=5, backoff_factor=1, status_forcelist=(500, 502, 503, 504)
+):
     session = requests.Session()
     retry = Retry(
         total=retries,
@@ -38,7 +40,7 @@ def _create_retry_session(retries=5, backoff_factor=1, status_forcelist=(500, 50
         backoff_factor=backoff_factor,
         status_forcelist=status_forcelist,
         allowed_methods=["HEAD", "GET", "OPTIONS", "POST"],
-        raise_on_status=False
+        raise_on_status=False,
     )
     adapter = HTTPAdapter(max_retries=retry)
     session.mount("http://", adapter)
@@ -57,10 +59,11 @@ def _get_nse_session():
                     # Leverage curl_cffi for robust browser TLS/JA3 impersonation
                     try:
                         from curl_cffi import requests as curl_requests
+
                         session = curl_requests.Session(impersonate="chrome120")
                     except ImportError:
                         session = _create_retry_session(retries=5, backoff_factor=1)
-                    
+
                     headers = {
                         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                         "Accept": "*/*",
@@ -70,24 +73,31 @@ def _get_nse_session():
                         "Referer": "https://www.nseindia.com/",
                     }
                     session.headers.update(headers)
-                    
+
                     # Some versions of NSE block if you don't have the cookies from the main page.
                     # We hit the main page first.
                     r = session.get("https://www.nseindia.com", timeout=15)
                     # If home page fails, try a slightly different approach
                     if r.status_code != 200:
-                        headers["User-Agent"] = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+                        headers["User-Agent"] = (
+                            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+                        )
                         session.headers.update(headers)
                         r = session.get("https://www.nseindia.com", timeout=15)
-                    
+
                     r.raise_for_status()
                     # Optional: hit a market data page to solidify the session
-                    session.get("https://www.nseindia.com/market-data/live-equity-market", timeout=10)
-                    
+                    session.get(
+                        "https://www.nseindia.com/market-data/live-equity-market",
+                        timeout=10,
+                    )
+
                     _NSE_SESSION = session
                     _NSE_SESSION_TS = now
                     success = True
-                    logging.getLogger(__name__).debug("[_get_nse_session] session warmed up")
+                    logging.getLogger(__name__).debug(
+                        "[_get_nse_session] session warmed up"
+                    )
                     break
                 except Exception as e:
                     logging.getLogger(__name__).warning(
@@ -97,7 +107,7 @@ def _get_nse_session():
                         e,
                     )
                     time.sleep(2 * (attempt + 1))
-            
+
             if not success:
                 _NSE_SESSION = None
     return _NSE_SESSION
@@ -127,6 +137,7 @@ YF_SYMBOL = {
 def _data_sources_cfg() -> dict:
     try:
         from config.loader import load_config
+
         return load_config().get("data_sources", {})
     except Exception:
         return {}
@@ -137,6 +148,7 @@ def _env_or_value(value: str | None) -> str | None:
         return None
     if value.startswith("${") and value.endswith("}"):
         import os
+
         return os.getenv(value[2:-1])
     return value
 
@@ -144,6 +156,7 @@ def _env_or_value(value: str | None) -> str | None:
 def _broker_cfg() -> dict:
     try:
         from config.loader import load_config
+
         return load_config().get("broker", {})
     except Exception:
         return {}
@@ -178,7 +191,9 @@ def _dhan_enabled() -> bool:
 
 def _dhan_underlying(symbol: str) -> tuple[int, str] | None:
     cfg = _data_sources_cfg().get("dhan", {})
-    underlyings = cfg.get("underlyings", {}) if isinstance(cfg.get("underlyings"), dict) else {}
+    underlyings = (
+        cfg.get("underlyings", {}) if isinstance(cfg.get("underlyings"), dict) else {}
+    )
     raw = underlyings.get(symbol.upper())
     if isinstance(raw, dict):
         return int(raw.get("security_id")), str(raw.get("segment", "IDX_I"))
@@ -235,13 +250,22 @@ def _dhan_master() -> pd.DataFrame:
     if cache_file.exists() and time.time() - cache_file.stat().st_mtime < 86400:
         _DHAN_MASTER_CACHE = pd.read_csv(cache_file, low_memory=False)
         return _DHAN_MASTER_CACHE
-    url = _data_sources_cfg().get("dhan", {}).get("instrument_master_url", "https://images.dhan.co/api-data/api-scrip-master.csv")
+    url = (
+        _data_sources_cfg()
+        .get("dhan", {})
+        .get(
+            "instrument_master_url",
+            "https://images.dhan.co/api-data/api-scrip-master.csv",
+        )
+    )
     df = pd.read_csv(url, low_memory=False)
     try:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         df.to_csv(cache_file, index=False)
     except Exception as e:
-        logging.getLogger(__name__).exception("Failed to write Dhan master cache: %s", e)
+        logging.getLogger(__name__).exception(
+            "Failed to write Dhan master cache: %s", e
+        )
     _DHAN_MASTER_CACHE = df
     return df
 
@@ -250,7 +274,11 @@ def _dhan_find_instrument(symbol: str) -> dict | None:
     symbol = symbol.upper().replace(".NS", "")
     under = _dhan_underlying(symbol)
     if under:
-        return {"security_id": str(under[0]), "segment": under[1], "instrument": "INDEX"}
+        return {
+            "security_id": str(under[0]),
+            "segment": under[1],
+            "instrument": "INDEX",
+        }
     try:
         df = _dhan_master()
     except Exception as e:
@@ -269,7 +297,12 @@ def _dhan_find_instrument(symbol: str) -> dict | None:
     if exch_col:
         work = work[work[exch_col].astype(str).str.upper().eq("NSE")]
     if seg_col:
-        work = work[work[seg_col].astype(str).str.upper().isin(["E", "D", "IDX_I", "NSE_EQ", "NSE_FNO"])]
+        work = work[
+            work[seg_col]
+            .astype(str)
+            .str.upper()
+            .isin(["E", "D", "IDX_I", "NSE_EQ", "NSE_FNO"])
+        ]
     candidates = []
     for col in [sym_col, disp_col, trad_col]:
         if col:
@@ -281,16 +314,28 @@ def _dhan_find_instrument(symbol: str) -> dict | None:
     row = candidates[0].iloc[0]
     seg_raw = str(row[seg_col]).upper() if seg_col else "E"
     inst_raw = str(row[inst_col]).upper() if inst_col else "EQUITY"
-    segment = "NSE_EQ" if seg_raw in ("E", "NSE_EQ") else ("NSE_FNO" if seg_raw in ("D", "NSE_FNO") else seg_raw)
-    instrument = "EQUITY" if "EQUITY" in inst_raw or seg_raw in ("E", "NSE_EQ") else inst_raw
-    return {"security_id": str(row[sec_col]), "segment": segment, "instrument": instrument}
+    segment = (
+        "NSE_EQ"
+        if seg_raw in ("E", "NSE_EQ")
+        else ("NSE_FNO" if seg_raw in ("D", "NSE_FNO") else seg_raw)
+    )
+    instrument = (
+        "EQUITY" if "EQUITY" in inst_raw or seg_raw in ("E", "NSE_EQ") else inst_raw
+    )
+    return {
+        "security_id": str(row[sec_col]),
+        "segment": segment,
+        "instrument": instrument,
+    }
 
 
 def _dhan_post(path: str, payload: dict) -> dict:
     headers = _dhan_headers()
     if not headers:
         return {}
-    response = requests.post(f"https://api.dhan.co/v2/{path}", headers=headers, json=payload, timeout=15)
+    response = requests.post(
+        f"https://api.dhan.co/v2/{path}", headers=headers, json=payload, timeout=15
+    )
     response.raise_for_status()
     data = response.json()
     if data.get("status") not in (None, "success"):
@@ -301,13 +346,15 @@ def _dhan_post(path: str, payload: dict) -> dict:
 def _dhan_frame(raw: dict) -> pd.DataFrame:
     if not raw or not raw.get("timestamp"):
         return pd.DataFrame()
-    df = pd.DataFrame({
-        "open": raw.get("open", []),
-        "high": raw.get("high", []),
-        "low": raw.get("low", []),
-        "close": raw.get("close", []),
-        "volume": raw.get("volume", []),
-    })
+    df = pd.DataFrame(
+        {
+            "open": raw.get("open", []),
+            "high": raw.get("high", []),
+            "low": raw.get("low", []),
+            "close": raw.get("close", []),
+            "volume": raw.get("volume", []),
+        }
+    )
     ts = pd.to_datetime(raw.get("timestamp", []), unit="s", errors="coerce")
     df.index = ts
     df.index.name = "date"
@@ -372,7 +419,9 @@ def quote_batch(symbols: list[str]) -> dict[str, dict]:
                 raw = _dhan_post("marketfeed/quote", {seg: ids})
                 data.update(raw.get("data") or {})
             except Exception as e:
-                logging.getLogger(__name__).warning("[dhan quote_batch] segment %s failed: %s", seg, e)
+                logging.getLogger(__name__).warning(
+                    "[dhan quote_batch] segment %s failed: %s", seg, e
+                )
         for seg, rows in (data or {}).items():
             for sid, item in (rows or {}).items():
                 sym = reverse.get((seg, str(sid)))
@@ -389,7 +438,9 @@ def quote_batch(symbols: list[str]) -> dict[str, dict]:
                     "prev_close": prev,
                     "volume": item.get("volume"),
                     "oi": item.get("oi"),
-                    "change_pct": round(100 * (ltp - prev) / prev, 2) if ltp and prev else None,
+                    "change_pct": round(100 * (ltp - prev) / prev, 2)
+                    if ltp and prev
+                    else None,
                     "source": "dhan_quote",
                 }
     except Exception as e:
@@ -402,7 +453,11 @@ def ltp(symbol: str) -> float | None:
     if q.get("ltp"):
         return round(float(q["ltp"]), 2)
     try:
-        yf_sym = YF_SYMBOL.get(symbol) or (f"{symbol}.NS" if not symbol.startswith("^") and "." not in symbol else symbol)
+        yf_sym = YF_SYMBOL.get(symbol) or (
+            f"{symbol}.NS"
+            if not symbol.startswith("^") and "." not in symbol
+            else symbol
+        )
         info = _yf().Ticker(yf_sym).fast_info
         return round(float(info.last_price), 2) if info.last_price else None
     except Exception:
@@ -425,9 +480,13 @@ def _dhan_expiry(symbol: str, underlying_scrip: int, underlying_seg: str) -> str
     if expiries:
         try:
             CACHE_DIR.mkdir(parents=True, exist_ok=True)
-            cache_file.write_text(json.dumps({"ts": time.time(), "data": expiries}), encoding="utf-8")
+            cache_file.write_text(
+                json.dumps({"ts": time.time(), "data": expiries}), encoding="utf-8"
+            )
         except Exception as e:
-            logging.getLogger(__name__).exception("Failed to write Dhan expiry cache: %s", e)
+            logging.getLogger(__name__).exception(
+                "Failed to write Dhan expiry cache: %s", e
+            )
         return sorted(expiries)[0]
     return None
 
@@ -443,30 +502,34 @@ def _dhan_to_nse_chain(symbol: str, raw: dict, expiry: str) -> dict:
             continue
         ce = row.get("ce") if isinstance(row.get("ce"), dict) else {}
         pe = row.get("pe") if isinstance(row.get("pe"), dict) else {}
-        records.append({
-            "strikePrice": strike,
-            "expiryDate": expiry,
-            "CE": {
-                "openInterest": ce.get("oi", 0) or 0,
-                "changeinOpenInterest": (ce.get("oi", 0) or 0) - (ce.get("previous_oi", 0) or 0),
-                "totalTradedVolume": ce.get("volume", 0) or 0,
-                "lastPrice": ce.get("last_price", 0) or 0,
-                "impliedVolatility": ce.get("implied_volatility", 0) or 0,
-                "bidprice": ce.get("top_bid_price", 0) or 0,
-                "askPrice": ce.get("top_ask_price", 0) or 0,
-                "identifier": ce.get("security_id"),
-            },
-            "PE": {
-                "openInterest": pe.get("oi", 0) or 0,
-                "changeinOpenInterest": (pe.get("oi", 0) or 0) - (pe.get("previous_oi", 0) or 0),
-                "totalTradedVolume": pe.get("volume", 0) or 0,
-                "lastPrice": pe.get("last_price", 0) or 0,
-                "impliedVolatility": pe.get("implied_volatility", 0) or 0,
-                "bidprice": pe.get("top_bid_price", 0) or 0,
-                "askPrice": pe.get("top_ask_price", 0) or 0,
-                "identifier": pe.get("security_id"),
-            },
-        })
+        records.append(
+            {
+                "strikePrice": strike,
+                "expiryDate": expiry,
+                "CE": {
+                    "openInterest": ce.get("oi", 0) or 0,
+                    "changeinOpenInterest": (ce.get("oi", 0) or 0)
+                    - (ce.get("previous_oi", 0) or 0),
+                    "totalTradedVolume": ce.get("volume", 0) or 0,
+                    "lastPrice": ce.get("last_price", 0) or 0,
+                    "impliedVolatility": ce.get("implied_volatility", 0) or 0,
+                    "bidprice": ce.get("top_bid_price", 0) or 0,
+                    "askPrice": ce.get("top_ask_price", 0) or 0,
+                    "identifier": ce.get("security_id"),
+                },
+                "PE": {
+                    "openInterest": pe.get("oi", 0) or 0,
+                    "changeinOpenInterest": (pe.get("oi", 0) or 0)
+                    - (pe.get("previous_oi", 0) or 0),
+                    "totalTradedVolume": pe.get("volume", 0) or 0,
+                    "lastPrice": pe.get("last_price", 0) or 0,
+                    "impliedVolatility": pe.get("implied_volatility", 0) or 0,
+                    "bidprice": pe.get("top_bid_price", 0) or 0,
+                    "askPrice": pe.get("top_ask_price", 0) or 0,
+                    "identifier": pe.get("security_id"),
+                },
+            }
+        )
     return {
         "records": {
             "data": records,
@@ -485,13 +548,17 @@ def _option_chain_from_dhan(symbol: str) -> dict:
     if not underlying:
         return {"records": {"data": []}}
     cached = _DHAN_OC_CACHE.get(symbol)
-    if cached and time.time() - cached[0] < 3:
+    if cached and time.time() - cached[0] < 30:
         return cached[1]
     underlying_scrip, underlying_seg = underlying
     expiry = _dhan_expiry(symbol, underlying_scrip, underlying_seg)
     if not expiry:
         return {"records": {"data": []}}
-    payload = {"UnderlyingScrip": underlying_scrip, "UnderlyingSeg": underlying_seg, "Expiry": expiry}
+    payload = {
+        "UnderlyingScrip": underlying_scrip,
+        "UnderlyingSeg": underlying_seg,
+        "Expiry": expiry,
+    }
     raw = _dhan_post("optionchain", payload)
     data = _dhan_to_nse_chain(symbol, raw, expiry)
     if data.get("records", {}).get("data"):
@@ -510,30 +577,32 @@ def _public_dhan_to_nse_chain(symbol: str, raw: dict, expiry: str) -> dict:
             continue
         ce = row.get("ce") if isinstance(row.get("ce"), dict) else {}
         pe = row.get("pe") if isinstance(row.get("pe"), dict) else {}
-        records.append({
-            "strikePrice": strike,
-            "expiryDate": expiry,
-            "CE": {
-                "openInterest": ce.get("OI", 0) or 0,
-                "changeinOpenInterest": ce.get("oichng", 0) or 0,
-                "totalTradedVolume": ce.get("vol", 0) or 0,
-                "lastPrice": ce.get("ltp", 0) or 0,
-                "impliedVolatility": ce.get("iv", 0) or 0,
-                "bidprice": ce.get("bid", 0) or 0,
-                "askPrice": ce.get("ask", 0) or 0,
-                "identifier": ce.get("sid"),
-            },
-            "PE": {
-                "openInterest": pe.get("OI", 0) or 0,
-                "changeinOpenInterest": pe.get("oichng", 0) or 0,
-                "totalTradedVolume": pe.get("vol", 0) or 0,
-                "lastPrice": pe.get("ltp", 0) or 0,
-                "impliedVolatility": pe.get("iv", 0) or 0,
-                "bidprice": pe.get("bid", 0) or 0,
-                "askPrice": pe.get("ask", 0) or 0,
-                "identifier": pe.get("sid"),
-            },
-        })
+        records.append(
+            {
+                "strikePrice": strike,
+                "expiryDate": expiry,
+                "CE": {
+                    "openInterest": ce.get("OI", 0) or 0,
+                    "changeinOpenInterest": ce.get("oichng", 0) or 0,
+                    "totalTradedVolume": ce.get("vol", 0) or 0,
+                    "lastPrice": ce.get("ltp", 0) or 0,
+                    "impliedVolatility": ce.get("iv", 0) or 0,
+                    "bidprice": ce.get("bid", 0) or 0,
+                    "askPrice": ce.get("ask", 0) or 0,
+                    "identifier": ce.get("sid"),
+                },
+                "PE": {
+                    "openInterest": pe.get("OI", 0) or 0,
+                    "changeinOpenInterest": pe.get("oichng", 0) or 0,
+                    "totalTradedVolume": pe.get("vol", 0) or 0,
+                    "lastPrice": pe.get("ltp", 0) or 0,
+                    "impliedVolatility": pe.get("iv", 0) or 0,
+                    "bidprice": pe.get("bid", 0) or 0,
+                    "askPrice": pe.get("ask", 0) or 0,
+                    "identifier": pe.get("sid"),
+                },
+            }
+        )
     return {
         "records": {
             "data": records,
@@ -574,6 +643,7 @@ def _option_chain_from_public_dhan(symbol: str) -> dict:
         return {"records": {"data": []}}
     try:
         from curl_cffi import requests as curl_requests
+
         session = curl_requests.Session(impersonate="chrome120")
     except ImportError:
         session = _create_retry_session(retries=3, backoff_factor=0.5)
@@ -581,11 +651,12 @@ def _option_chain_from_public_dhan(symbol: str) -> dict:
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.5",
-        "Connection": "keep-alive"
+        "Connection": "keep-alive",
     }
     r = session.get(url, headers=headers, timeout=15)
     r.raise_for_status()
     from bs4 import BeautifulSoup
+
     soup = BeautifulSoup(r.text, "html.parser")
     script = soup.find("script", id="__NEXT_DATA__")
     if not script:
@@ -610,15 +681,9 @@ def _option_chain_from_public_dhan(symbol: str) -> dict:
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Content-Type": "application/json; charset=UTF-8",
         "Referer": "https://dhan.co/",
-        "Origin": "https://dhan.co"
+        "Origin": "https://dhan.co",
     }
-    payload = {
-        "Data": {
-            "Seg": int(seg),
-            "Sid": int(sid),
-            "Exp": int(target_exp)
-        }
-    }
+    payload = {"Data": {"Seg": int(seg), "Sid": int(sid), "Exp": int(target_exp)}}
     api_resp = session.post(api_url, headers=api_headers, json=payload, timeout=15)
     api_resp.raise_for_status()
     raw_response = api_resp.json()
@@ -667,31 +732,41 @@ def _option_chain_from_csv_text(text: str, source: str) -> dict:
         expiry = _first(row, "expiryDate", "expiry", default="")
         if expiry:
             expiry_dates.add(str(expiry))
-        underlying = underlying or _first(row, "underlyingValue", "spot", "nifty", default=None)
+        underlying = underlying or _first(
+            row, "underlyingValue", "spot", "nifty", default=None
+        )
         ce_oi = _first(row, "CE_openInterest", "call_oi", "ceoi", default=0) or 0
         pe_oi = _first(row, "PE_openInterest", "put_oi", "peoi", default=0) or 0
-        ce_vol = _first(row, "CE_totalTradedVolume", "call_volume", "cevolume", default=0) or 0
-        pe_vol = _first(row, "PE_totalTradedVolume", "put_volume", "pevolume", default=0) or 0
+        ce_vol = (
+            _first(row, "CE_totalTradedVolume", "call_volume", "cevolume", default=0)
+            or 0
+        )
+        pe_vol = (
+            _first(row, "PE_totalTradedVolume", "put_volume", "pevolume", default=0)
+            or 0
+        )
         ce_ltp = _first(row, "CE_lastPrice", "call_ltp", "celtp", default=0) or 0
         pe_ltp = _first(row, "PE_lastPrice", "put_ltp", "peltp", default=0) or 0
         ce_iv = _first(row, "CE_impliedVolatility", "call_iv", "ceiv", default=0) or 0
         pe_iv = _first(row, "PE_impliedVolatility", "put_iv", "peiv", default=0) or 0
-        rows.append({
-            "strikePrice": _to_float(strike),
-            "expiryDate": str(expiry),
-            "CE": {
-                "openInterest": _to_float(ce_oi),
-                "totalTradedVolume": _to_float(ce_vol),
-                "lastPrice": _to_float(ce_ltp),
-                "impliedVolatility": _to_float(ce_iv),
-            },
-            "PE": {
-                "openInterest": _to_float(pe_oi),
-                "totalTradedVolume": _to_float(pe_vol),
-                "lastPrice": _to_float(pe_ltp),
-                "impliedVolatility": _to_float(pe_iv),
-            },
-        })
+        rows.append(
+            {
+                "strikePrice": _to_float(strike),
+                "expiryDate": str(expiry),
+                "CE": {
+                    "openInterest": _to_float(ce_oi),
+                    "totalTradedVolume": _to_float(ce_vol),
+                    "lastPrice": _to_float(ce_ltp),
+                    "impliedVolatility": _to_float(ce_iv),
+                },
+                "PE": {
+                    "openInterest": _to_float(pe_oi),
+                    "totalTradedVolume": _to_float(pe_vol),
+                    "lastPrice": _to_float(pe_ltp),
+                    "impliedVolatility": _to_float(pe_iv),
+                },
+            }
+        )
     return {
         "records": {
             "data": rows,
@@ -700,7 +775,6 @@ def _option_chain_from_csv_text(text: str, source: str) -> dict:
         },
         "_source": source,
     }
-
 
 
 # ---------------------------------------------------------------------------
@@ -739,6 +813,7 @@ def _r360_headers(base_url: str) -> dict:
         "X-Requested-With": "XMLHttpRequest",
     }
 
+
 # Research360 uses specific internal names for indices
 _R360_SYMBOL_MAP = {
     "NIFTY": "NIFTY50",
@@ -751,6 +826,7 @@ _R360_SYMBOL_MAP = {
 def _create_r360_session() -> requests.Session:
     try:
         from curl_cffi import requests as curl_requests
+
         return curl_requests.Session(impersonate="chrome120")
     except ImportError:
         return _create_retry_session(retries=5, backoff_factor=0.5)
@@ -778,7 +854,7 @@ def _get_r360_session() -> tuple[requests.Session | None, str | None]:
                         break
                     except Exception as e:
                         print(
-                            f"[r360 session] attempt {attempt+1} {base_url} failed: "
+                            f"[r360 session] attempt {attempt + 1} {base_url} failed: "
                             f"{type(e).__name__}: {e}"
                         )
                         time.sleep(2 * (attempt + 1))
@@ -792,6 +868,7 @@ def _get_r360_session() -> tuple[requests.Session | None, str | None]:
 
 def _r360_expiries(session: requests.Session, base_url: str, symbol: str) -> list[str]:
     import re as _re
+
     # Research360 expiries endpoint uses 'symbol' parameter for indices
     last_error: Exception | None = None
     for path in _R360_EXPIRY_PATHS:
@@ -851,7 +928,7 @@ def _r360_to_nse_chain(symbol: str, raw: dict, expiry: str) -> dict:
             key = float(s)
         except (TypeError, ValueError):
             continue
-            
+
         if i < len(graphc_arr) and graphc_arr[i] is not None:
             try:
                 ltp_ce[key] = float(graphc_arr[i])
@@ -872,24 +949,29 @@ def _r360_to_nse_chain(symbol: str, raw: dict, expiry: str) -> dict:
         pe_oi = int(row[2]) if row[2] else 0
         ce_oi_chg = int(row[4]) if len(row) > 4 and row[4] else 0
         pe_oi_chg = int(row[5]) if len(row) > 5 and row[5] else 0
-        records.append({
-            "strikePrice": strike,
-            "expiryDate": expiry,
-            "CE": {
-                "openInterest": ce_oi,
-                "changeinOpenInterest": ce_oi_chg,
-                "totalTradedVolume": 0,
-                "lastPrice": 0.0,
-                "impliedVolatility": 0.0,
-            },
-            "PE": {
-                "openInterest": pe_oi,
-                "changeinOpenInterest": pe_oi_chg,
-                "totalTradedVolume": 0,
-                "lastPrice": 0.0,
-                "impliedVolatility": 0.0,
-            },
-        })
+        # Patch LTP from graphprice/graphc/graphp arrays (~10 near-ATM strikes)
+        ce_ltp = ltp_ce.get(strike, 0.0)
+        pe_ltp = ltp_pe.get(strike, 0.0)
+        records.append(
+            {
+                "strikePrice": strike,
+                "expiryDate": expiry,
+                "CE": {
+                    "openInterest": ce_oi,
+                    "changeinOpenInterest": ce_oi_chg,
+                    "totalTradedVolume": 0,
+                    "lastPrice": ce_ltp,
+                    "impliedVolatility": 0.0,
+                },
+                "PE": {
+                    "openInterest": pe_oi,
+                    "changeinOpenInterest": pe_oi_chg,
+                    "totalTradedVolume": 0,
+                    "lastPrice": pe_ltp,
+                    "impliedVolatility": 0.0,
+                },
+            }
+        )
 
     underlying = raw.get("spot_price")
 
@@ -918,7 +1000,6 @@ def _r360_to_nse_chain(symbol: str, raw: dict, expiry: str) -> dict:
     }
 
 
-
 def _option_chain_from_research360(symbol: str) -> dict:
     """Scrape option chain from Research360 PHP AJAX endpoint."""
     global _R360_SESSION, _R360_BASE_URL
@@ -929,10 +1010,12 @@ def _option_chain_from_research360(symbol: str) -> dict:
         session, base_url = _get_r360_session()
         if session is None or base_url is None:
             return {"records": {"data": []}}
-        
+
         try:
             last_error: Exception | None = None
-            base_candidates = [base_url] + [url for url in _R360_BASE_URLS if url != base_url]
+            base_candidates = [base_url] + [
+                url for url in _R360_BASE_URLS if url != base_url
+            ]
             for candidate_base in base_candidates:
                 expiries = _r360_expiries(session, candidate_base, r360_sym)
                 if not expiries:
@@ -944,7 +1027,12 @@ def _option_chain_from_research360(symbol: str) -> dict:
                         r = session.post(
                             f"{candidate_base}{path}",
                             headers=_r360_headers(candidate_base),
-                            data={"stock": r360_sym, "expiry": expiry, "showall": "on", "showallnew": "on"},
+                            data={
+                                "stock": r360_sym,
+                                "expiry": expiry,
+                                "showall": "on",
+                                "showallnew": "on",
+                            },
                             timeout=30,
                         )
                         if r.status_code == 404:
@@ -962,12 +1050,14 @@ def _option_chain_from_research360(symbol: str) -> dict:
             if last_error is not None:
                 raise last_error
         except Exception as e:
-            print(f"[option_chain research360] attempt {attempt+1} failed: {type(e).__name__}: {e}")
+            print(
+                f"[option_chain research360] attempt {attempt + 1} failed: {type(e).__name__}: {e}"
+            )
             with _R360_SESSION_LOCK:
-                _R360_SESSION = None # Force new session on next attempt
+                _R360_SESSION = None  # Force new session on next attempt
                 _R360_BASE_URL = None
             time.sleep(1 * (attempt + 1))
-            
+
     return {"records": {"data": []}}
 
 
@@ -992,13 +1082,16 @@ def _option_chain_from_local_file(symbol: str) -> dict:
 
 def _yf():
     import yfinance as yf
+
     return yf
 
 
 def _flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Flatten MultiIndex columns from newer yfinance (e.g. ('Close', '^NSEI') -> 'close')."""
     if isinstance(df.columns, pd.MultiIndex):
-        df.columns = [c[0].lower() if isinstance(c, tuple) else str(c).lower() for c in df.columns]
+        df.columns = [
+            c[0].lower() if isinstance(c, tuple) else str(c).lower() for c in df.columns
+        ]
     else:
         df.columns = [str(c).lower() for c in df.columns]
     return df
@@ -1009,7 +1102,7 @@ _OHLC_CACHE_BUCKET = 0
 
 
 def ohlc(symbol: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
-    """Daily/intraday OHLC. yfinance primary, Dhan optional."""
+    """Daily/intraday OHLC. Dhan primary, yfinance fallback."""
     try:
         df = _dhan_ohlc(symbol, period=period, interval=interval)
         if not df.empty:
@@ -1018,8 +1111,12 @@ def ohlc(symbol: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
     except Exception as e:
         print(f"[dhan ohlc] failed for {symbol}: {e}")
     yf = _yf()
-    tkr = YF_SYMBOL.get(symbol) or (symbol if "." in symbol or "=" in symbol or "^" in symbol else f"{symbol}.NS")
-    df = yf.download(tkr, period=period, interval=interval, progress=False, auto_adjust=False)
+    tkr = YF_SYMBOL.get(symbol) or (
+        symbol if "." in symbol or "=" in symbol or "^" in symbol else f"{symbol}.NS"
+    )
+    df = yf.download(
+        tkr, period=period, interval=interval, progress=False, auto_adjust=False
+    )
     df = _flatten_columns(df)
     if df.empty:
         return df
@@ -1043,9 +1140,13 @@ def india_vix(period: str = "3mo") -> pd.DataFrame:
         # Coerce to numeric and clamp to sane range
         df[col] = pd.to_numeric(df[col], errors="coerce")
         # Replace outliers or negative with NaN, then forward-fill a conservative value
-        df[col] = df[col].apply(lambda x: float(x) if pd.notna(x) and x > 0 and x < 1000 else float('nan'))
+        df[col] = df[col].apply(
+            lambda x: float(x) if pd.notna(x) and x > 0 and x < 1000 else float("nan")
+        )
         if df[col].isna().all():
-            logging.getLogger(__name__).warning("India VIX feed returned no valid 'close' values")
+            logging.getLogger(__name__).warning(
+                "India VIX feed returned no valid 'close' values"
+            )
         return df
     except Exception as e:
         logging.getLogger(__name__).exception(f"Error sanitizing India VIX data: {e}")
@@ -1088,7 +1189,9 @@ def _filter_atm_strikes(data: dict) -> dict:
         return data
 
     # Extract unique strikes
-    strikes = sorted(list({r["strikePrice"] for r in rows if r.get("strikePrice") is not None}))
+    strikes = sorted(
+        list({r["strikePrice"] for r in rows if r.get("strikePrice") is not None})
+    )
     if not strikes:
         return data
 
@@ -1110,26 +1213,41 @@ def _filter_atm_strikes(data: dict) -> dict:
     # Filter filtered['data']
     if "filtered" in data and isinstance(data["filtered"], dict):
         filt_rows = data["filtered"].get("data") or []
-        data["filtered"]["data"] = [r for r in filt_rows if r.get("strikePrice") in allowed_strikes]
+        data["filtered"]["data"] = [
+            r for r in filt_rows if r.get("strikePrice") in allowed_strikes
+        ]
         if "strikePrices" in data["filtered"]:
             data["filtered"]["strikePrices"] = sorted(list(allowed_strikes))
 
     return data
 
 
-def option_chain(symbol: str = "NIFTY") -> dict:
-    """Live option chain via nsepython or direct robust fetch. Returns {'records': ..., 'filtered': ...}."""
+def option_chain(symbol: str = "NIFTY", _skip_atm_filter: bool = False) -> dict:
+    """Live option chain via nsepython or direct robust fetch. Returns {'records': ..., 'filtered': ...}.
+
+    Args:
+        symbol: Underlying symbol (e.g., NIFTY, BANKNIFTY).
+        _skip_atm_filter: If True, skip ATM +/-15 strike filtering.
+                          Used internally by chain_snapshot when specific
+                          target strikes are needed for exit checks.
+    """
     global _NSE_SESSION, _NSE_SESSION_TS
     symbol = symbol.upper()
     cache_file = CACHE_DIR / f"option_chain_{symbol}.json"
 
     def _save_chain(data: dict) -> dict:
-        data = _filter_atm_strikes(data)
+        if not _skip_atm_filter:
+            data = _filter_atm_strikes(data)
         try:
             CACHE_DIR.mkdir(parents=True, exist_ok=True)
-            cache_file.write_text(json.dumps({"ts": time.time(), "data": data}, default=str), encoding="utf-8")
+            cache_file.write_text(
+                json.dumps({"ts": time.time(), "data": data}, default=str),
+                encoding="utf-8",
+            )
         except Exception as e:
-            logging.getLogger(__name__).exception("Failed to save option chain cache for %s: %s", symbol, e)
+            logging.getLogger(__name__).exception(
+                "Failed to save option chain cache for %s: %s", symbol, e
+            )
         _OPTION_CHAIN_SOURCE[symbol] = data.get("_source") or "unknown"
         return data
 
@@ -1139,13 +1257,18 @@ def option_chain(symbol: str = "NIFTY") -> dict:
                 cached = json.loads(cache_file.read_text(encoding="utf-8"))
                 data = cached.get("data") or {}
                 if data.get("records", {}).get("data"):
-                    data = _filter_atm_strikes(data)
+                    if not _skip_atm_filter:
+                        data = _filter_atm_strikes(data)
                     data.setdefault("_cache", {})
                     data["_cache"].update({"stale": True, "ts": cached.get("ts")})
-                    _OPTION_CHAIN_SOURCE[symbol] = f"cache:{data.get('_source') or 'unknown'}"
+                    _OPTION_CHAIN_SOURCE[symbol] = (
+                        f"cache:{data.get('_source') or 'unknown'}"
+                    )
                     return data
         except Exception as e:
-            logging.getLogger(__name__).exception("Failed to load option chain cache for %s: %s", symbol, e)
+            logging.getLogger(__name__).exception(
+                "Failed to load option chain cache for %s: %s", symbol, e
+            )
         return {"records": {"data": []}}
 
     def _try_external_fallbacks() -> dict:
@@ -1162,14 +1285,16 @@ def option_chain(symbol: str = "NIFTY") -> dict:
                     e,
                 )
         return {"records": {"data": []}}
-    
+
     # 1. Dhan (preferred: has full data including LTPs when user has API access).
     try:
         data = _option_chain_from_dhan(symbol)
         if data and data.get("records", {}).get("data"):
             return _save_chain(data)
     except Exception as e:
-        logging.getLogger(__name__).warning("[option_chain dhan] failed for %s: %s", symbol, e)
+        logging.getLogger(__name__).warning(
+            "[option_chain dhan] failed for %s: %s", symbol, e
+        )
 
     # 1.5. Public Dhan Scraper (bypass-safe, unauthenticated, full data).
     try:
@@ -1177,7 +1302,9 @@ def option_chain(symbol: str = "NIFTY") -> dict:
         if data and data.get("records", {}).get("data"):
             return _save_chain(data)
     except Exception as e:
-        logging.getLogger(__name__).warning("[option_chain public dhan] failed for %s: %s", symbol, e)
+        logging.getLogger(__name__).warning(
+            "[option_chain public dhan] failed for %s: %s", symbol, e
+        )
 
     # 2. Research360 — no auth required, provides OI for all strikes + LTP
     #    for ~10 near-ATM strikes via graphprice/graphc/graphp arrays.
@@ -1186,17 +1313,19 @@ def option_chain(symbol: str = "NIFTY") -> dict:
         if data and data.get("records", {}).get("data"):
             return _save_chain(data)
     except Exception as e:
-        logging.getLogger(__name__).warning("[option_chain research360] failed for %s: %s", symbol, e)
+        logging.getLogger(__name__).warning(
+            "[option_chain research360] failed for %s: %s", symbol, e
+        )
 
     # 3. Try robust direct fetch (NSE) as third option
     session = _get_nse_session()
     if session:
         for attempt in range(2):
             try:
-                indices = ['NIFTY', 'FINNIFTY', 'BANKNIFTY', 'MIDCPNIFTY']
+                indices = ["NIFTY", "FINNIFTY", "BANKNIFTY", "MIDCPNIFTY"]
                 api_type = "indices" if symbol in indices else "equities"
                 url = f"https://www.nseindia.com/api/option-chain-{api_type}?symbol={symbol}"
-                
+
                 call_headers = {
                     "Referer": f"https://www.nseindia.com/get-quotes/option-chain?symbol={symbol}",
                     "X-Requested-With": "XMLHttpRequest",
@@ -1204,7 +1333,7 @@ def option_chain(symbol: str = "NIFTY") -> dict:
                     "Cache-Control": "no-cache",
                     "Pragma": "no-cache",
                 }
-                
+
                 response = session.get(url, headers=call_headers, timeout=10)
                 if response.status_code in (401, 403) and attempt == 0:
                     _NSE_SESSION = None
@@ -1218,44 +1347,56 @@ def option_chain(symbol: str = "NIFTY") -> dict:
                     if data and data.get("records", {}).get("data"):
                         return _save_chain(data)
             except Exception as e:
-                logging.getLogger(__name__).warning("[option_chain robust fetch] failed for %s: %s", symbol, e)
+                logging.getLogger(__name__).warning(
+                    "[option_chain robust fetch] failed for %s: %s", symbol, e
+                )
                 break
         try:
-            indices = ['NIFTY', 'FINNIFTY', 'BANKNIFTY', 'MIDCPNIFTY']
+            indices = ["NIFTY", "FINNIFTY", "BANKNIFTY", "MIDCPNIFTY"]
             api_type = "indices" if symbol in indices else "equities"
-            url = f"https://www.nseindia.com/api/option-chain-{api_type}?symbol={symbol}"
-            
+            url = (
+                f"https://www.nseindia.com/api/option-chain-{api_type}?symbol={symbol}"
+            )
+
             # Temporary headers for this specific call
             call_headers = {
                 "Referer": f"https://www.nseindia.com/get-quotes/option-chain?symbol={symbol}",
                 "X-Requested-With": "XMLHttpRequest",
-                "Accept": "application/json, text/javascript, */*; q=0.01"
+                "Accept": "application/json, text/javascript, */*; q=0.01",
             }
-            
+
             response = session.get(url, headers=call_headers, timeout=10)
             if response.status_code == 200:
                 data = response.json()
                 if data and data.get("records", {}).get("data"):
                     return _save_chain(data)
         except Exception as e:
-            logging.getLogger(__name__).warning("[option_chain robust fetch] failed for %s: %s", symbol, e)
+            logging.getLogger(__name__).warning(
+                "[option_chain robust fetch] failed for %s: %s", symbol, e
+            )
 
     # 3. Fallback to nsepython (might work if our session logic failed but theirs somehow succeeds)
     try:
         from nsepython import nse_optionchain_scrapper
+
         result = nse_optionchain_scrapper(symbol)
         if result and result.get("records", {}).get("data"):
             return _save_chain(result)
     except Exception as e:
-        logging.getLogger(__name__).exception("nse_optionchain_scrapper failed for %s: %s", symbol, e)
+        logging.getLogger(__name__).exception(
+            "nse_optionchain_scrapper failed for %s: %s", symbol, e
+        )
 
     try:
         from nsepython import option_chain as nse_oc
+
         result = nse_oc(symbol)
         if result and result.get("records", {}).get("data"):
             return _save_chain(result)
     except Exception as e:
-        logging.getLogger(__name__).exception("nsepython.option_chain failed for %s: %s", symbol, e)
+        logging.getLogger(__name__).exception(
+            "nsepython.option_chain failed for %s: %s", symbol, e
+        )
 
     fallback = _try_external_fallbacks()
     if fallback.get("records", {}).get("data"):
@@ -1264,15 +1405,18 @@ def option_chain(symbol: str = "NIFTY") -> dict:
     # AI Fallback (Resilient but slower)
     try:
         from data import ai_scraper
+
         ai_data = ai_scraper.get_option_chain_fallback(symbol)
         if ai_data and ai_data.get("records", {}).get("data"):
             ai_data["_source"] = "ai_scraper"
             return _save_chain(ai_data)
     except Exception as e:
-        logging.getLogger(__name__).exception("AI option_chain fallback failed for %s: %s", symbol, e)
+        logging.getLogger(__name__).exception(
+            "AI option_chain fallback failed for %s: %s", symbol, e
+        )
 
     data = _load_cached_chain()
-    
+
     # Enrichment step for Research360: If LTP is 0, try to patch with Dhan LTPs
     if data.get("_source") == "research360":
         try:
@@ -1290,7 +1434,7 @@ def option_chain(symbol: str = "NIFTY") -> dict:
                         s = row["strikePrice"]
                         ltp_map[f"{s}_CE"] = row["CE"].get("lastPrice", 0)
                         ltp_map[f"{s}_PE"] = row["PE"].get("lastPrice", 0)
-                    
+
                     # Apply to Research360 data
                     for row in data["records"]["data"]:
                         s = row["strikePrice"]
@@ -1298,19 +1442,25 @@ def option_chain(symbol: str = "NIFTY") -> dict:
                         row["PE"]["lastPrice"] = ltp_map.get(f"{s}_PE", 0)
                     data["_source"] = "research360+dhan_ltp"
         except Exception as e:
-            logging.getLogger(__name__).exception("Option chain enrichment failed for %s: %s", symbol, e)
+            logging.getLogger(__name__).exception(
+                "Option chain enrichment failed for %s: %s", symbol, e
+            )
 
     return data
 
 
-def get_pcr_max_pain_cached(symbol: str = "NIFTY") -> tuple[float | None, float | None, float | None, bool, bool, float | None, float | None]:
+def get_pcr_max_pain_cached(
+    symbol: str = "NIFTY",
+) -> tuple[
+    float | None, float | None, float | None, bool, bool, float | None, float | None
+]:
     """Fetch PCR and Max Pain with caching fallback.
     Returns: (pcr_oi, pcr_vol, max_pain, pcr_stale, mp_stale, pcr_updated_at, mp_updated_at)
     """
     cache_dir = CACHE_DIR
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache_file = cache_dir / "pcr_mp_cache.json"
-    
+
     # Try live fetch
     try:
         raw = option_chain(symbol)
@@ -1366,24 +1516,36 @@ def get_pcr_max_pain_cached(symbol: str = "NIFTY") -> tuple[float | None, float 
                 "pcr_vol": pcr_vol,
                 "max_pain": max_pain,
                 "ts": time.time(),
-                "source": raw.get("_source") or option_chain_source(symbol) or "unknown",
+                "source": raw.get("_source")
+                or option_chain_source(symbol)
+                or "unknown",
             }
-            with open(cache_file, 'w', encoding="utf-8") as f:
+            with open(cache_file, "w", encoding="utf-8") as f:
                 json.dump(cache_data, f)
 
-            return pcr_oi, pcr_vol, max_pain, False, False, cache_data["ts"], cache_data["ts"]
+            return (
+                pcr_oi,
+                pcr_vol,
+                max_pain,
+                False,
+                False,
+                cache_data["ts"],
+                cache_data["ts"],
+            )
     except Exception as e:
         print(f"[get_pcr_max_pain_cached] live fetch failed: {e}")
-        
+
     # Fallback to cache
     if cache_file.exists():
         try:
-            with open(cache_file, 'r', encoding="utf-8") as f:
+            with open(cache_file, "r", encoding="utf-8") as f:
                 cache_data = json.load(f)
             if cache_data.get("source"):
-                _OPTION_CHAIN_SOURCE[symbol.upper()] = f"cache:{cache_data.get('source')}"
+                _OPTION_CHAIN_SOURCE[symbol.upper()] = (
+                    f"cache:{cache_data.get('source')}"
+                )
             age = time.time() - cache_data.get("ts", 0)
-            is_stale = age > 900 # 15 mins
+            is_stale = age > 900  # 15 mins
             return (
                 cache_data.get("pcr_oi"),
                 cache_data.get("pcr_vol"),
@@ -1394,34 +1556,53 @@ def get_pcr_max_pain_cached(symbol: str = "NIFTY") -> tuple[float | None, float 
                 cache_data.get("ts"),
             )
         except Exception as e:
-            logging.getLogger(__name__).exception("Failed to read PCR/MaxPain cache: %s", e)
-            
+            logging.getLogger(__name__).exception(
+                "Failed to read PCR/MaxPain cache: %s", e
+            )
+
     # If we got here, both live and cache failed. Do not take down dashboard flows.
     return None, None, None, True, True, None, None
 
 
-def _get_persistent_fii_dii_cache() -> tuple[Optional[list[dict]], Optional[list[dict]], float]:
+def _get_persistent_fii_dii_cache() -> tuple[
+    Optional[list[dict]], Optional[list[dict]], float
+]:
     """Retrieve cached FII/DII data, stockedge data, and its timestamp from a persistent local file."""
     import json
+
     cache_file = CACHE_DIR / "fii_dii_cache.json"
     if cache_file.exists():
         try:
             with open(cache_file, "r") as f:
                 data = json.load(f)
-                return data.get("data"), data.get("stockedge_data"), data.get("timestamp", 0.0)
+                return (
+                    data.get("data"),
+                    data.get("stockedge_data"),
+                    data.get("timestamp", 0.0),
+                )
         except Exception as e:
             logging.getLogger(__name__).exception("Failed to read FII/DII cache: %s", e)
     return None, None, 0.0
 
 
-def _set_persistent_fii_dii_cache(data: list[dict], stockedge_data: list[dict] | None, timestamp: float) -> None:
+def _set_persistent_fii_dii_cache(
+    data: list[dict], stockedge_data: list[dict] | None, timestamp: float
+) -> None:
     """Save FII/DII data, stockedge data, and its timestamp to a persistent local file."""
     import json
+
     cache_file = CACHE_DIR / "fii_dii_cache.json"
     try:
         cache_file.parent.mkdir(parents=True, exist_ok=True)
         with open(cache_file, "w") as f:
-            json.dump({"data": data, "stockedge_data": stockedge_data, "timestamp": timestamp}, f)
+            json.dump(
+                {
+                    "data": data,
+                    "stockedge_data": stockedge_data,
+                    "timestamp": timestamp,
+                },
+                f,
+            )
     except Exception as e:
         logging.getLogger(__name__).exception("Failed to write FII/DII cache: %s", e)
 
@@ -1429,8 +1610,9 @@ def _set_persistent_fii_dii_cache(data: list[dict], stockedge_data: list[dict] |
 def fii_dii_cash(days: int = 10) -> pd.DataFrame:
     """FII/DII cash market net buy/sell, last N sessions."""
     import time
+
     now = time.time()
-    
+
     # Try to load existing cached data
     cached_data, cached_stockedge, cached_ts = _get_persistent_fii_dii_cache()
     if cached_data is None:
@@ -1447,19 +1629,28 @@ def fii_dii_cash(days: int = 10) -> pd.DataFrame:
         for attempt in range(3):
             try:
                 url = "https://api.stockedge.com/Api/FIIDashboardApi/GetLatestFIIActivities?lang=en"
-                headers = {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                    "Accept": "application/json, text/plain, */*",
-                    "Origin": "https://web.stockedge.com",
-                    "Referer": "https://web.stockedge.com/"
-                }
-                response = requests.get(url, headers=headers, timeout=15)
+                try:
+                    from curl_cffi import requests as curl_requests
+
+                    session = curl_requests.Session(impersonate="chrome120")
+                    response = session.get(url, timeout=15)
+                except ImportError:
+                    headers = {
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                        "Accept": "application/json, text/plain, */*",
+                        "Origin": "https://web.stockedge.com",
+                        "Referer": "https://web.stockedge.com/",
+                    }
+                    response = requests.get(url, headers=headers, timeout=15)
+
                 if response.status_code == 200:
                     raw_stockedge = response.json()
                     if raw_stockedge:
                         break
             except Exception as e:
-                print(f"[feed.fii_dii_cash] StockEdge API attempt {attempt+1} failed: {e}")
+                print(
+                    f"[feed.fii_dii_cash] StockEdge API attempt {attempt + 1} failed: {e}"
+                )
                 time.sleep(1)
 
         if raw_stockedge:
@@ -1472,57 +1663,70 @@ def fii_dii_cash(days: int = 10) -> pd.DataFrame:
                     formatted_date = dt_obj.strftime("%d-%b-%Y")
                 except Exception:
                     formatted_date = date_str
-                
+
                 for item in day.get("FIIDIIData", []):
                     short_name = item.get("ShortName")
                     val = item.get("Value")
                     if short_name == "FII CM*":
-                        new_cash_records.append({
-                            "category": "FII/FPI",
-                            "date": formatted_date,
-                            "netValue": val,
-                            "buyValue": 0.0,
-                            "sellValue": 0.0
-                        })
+                        new_cash_records.append(
+                            {
+                                "category": "FII/FPI",
+                                "date": formatted_date,
+                                "netValue": val,
+                                "buyValue": 0.0,
+                                "sellValue": 0.0,
+                            }
+                        )
                     elif short_name == "DII CM*":
-                        new_cash_records.append({
-                            "category": "DII",
-                            "date": formatted_date,
-                            "netValue": val,
-                            "buyValue": 0.0,
-                            "sellValue": 0.0
-                        })
+                        new_cash_records.append(
+                            {
+                                "category": "DII",
+                                "date": formatted_date,
+                                "netValue": val,
+                                "buyValue": 0.0,
+                                "sellValue": 0.0,
+                            }
+                        )
             cached_data = new_cash_records
             try:
                 _set_persistent_fii_dii_cache(cached_data, cached_stockedge, now)
             except Exception as e:
                 print(f"[feed.fii_dii_cash] Failed to cache StockEdge data: {e}")
         else:
-            print("[feed.fii_dii_cash] StockEdge API failed. Falling back to legacy/AI...")
+            print(
+                "[feed.fii_dii_cash] StockEdge API failed. Falling back to legacy/AI..."
+            )
             # Fallback to legacy
             raw = None
+            nse_fiidii_fn = None
             try:
-                from nsepython import nse_fiidii
                 import nsepython.rahu as nse_rahu
-                if not hasattr(nse_rahu, 'logger'):
-                    nse_rahu.logger = logging.getLogger('nsepython')
-            except ImportError as e:
-                raw = None
+                from nsepython import nse_fiidii as nse_fiidii_fn
 
-            if raw is None:
+                if not hasattr(nse_rahu, "logger"):
+                    nse_rahu.logger = logging.getLogger("nsepython")
+            except ImportError as e:
+                pass
+
+            if nse_fiidii_fn is not None:
                 for attempt in range(5):
                     try:
-                        raw = nse_fiidii()
-                        if raw is not None and not (isinstance(raw, pd.DataFrame) and raw.empty):
+                        raw = nse_fiidii_fn()
+                        if raw is not None and not (
+                            isinstance(raw, pd.DataFrame) and raw.empty
+                        ):
                             break
                     except Exception as e:
-                        print(f"[feed.fii_dii_cash] legacy attempt {attempt+1} failed: {e}")
+                        print(
+                            f"[feed.fii_dii_cash] legacy attempt {attempt + 1} failed: {e}"
+                        )
                         time.sleep(2)
-            
+
             # AI Fallback
             if raw is None or (isinstance(raw, pd.DataFrame) and raw.empty):
                 try:
                     from data import ai_scraper
+
                     ai_raw = ai_scraper.get_fii_dii_fallback()
                     if ai_raw:
                         raw = pd.DataFrame(ai_raw)
@@ -1536,7 +1740,7 @@ def fii_dii_cash(days: int = 10) -> pd.DataFrame:
                     new_df = pd.DataFrame(raw)
                 else:
                     new_df = pd.DataFrame()
-                
+
                 if not new_df.empty:
                     new_records = new_df.to_dict(orient="records")
                     merged_map = {}
@@ -1544,7 +1748,7 @@ def fii_dii_cash(days: int = 10) -> pd.DataFrame:
                         d_str = str(r.get("date", ""))
                         cat = str(r.get("category", "")).strip()
                         merged_map[(d_str, cat)] = r
-                    
+
                     for r in new_records:
                         d_val = r.get("date")
                         if hasattr(d_val, "strftime"):
@@ -1554,10 +1758,12 @@ def fii_dii_cash(days: int = 10) -> pd.DataFrame:
                         r["date"] = d_str
                         cat = str(r.get("category", "")).strip()
                         merged_map[(d_str, cat)] = r
-                    
+
                     cached_data = list(merged_map.values())
                     try:
-                        _set_persistent_fii_dii_cache(cached_data, cached_stockedge, now)
+                        _set_persistent_fii_dii_cache(
+                            cached_data, cached_stockedge, now
+                        )
                     except Exception as e:
                         print(f"[feed.fii_dii_cash] Failed to cache FII/DII data: {e}")
 
@@ -1568,28 +1774,28 @@ def fii_dii_cash(days: int = 10) -> pd.DataFrame:
 
     if "date" in df.columns:
         parsed_dates = pd.to_datetime(df["date"], format="%d-%b-%Y", errors="coerce")
-        if parsed_dates.isna().all() and not df["date"].isna().all():
-            parsed_dates = pd.to_datetime(df["date"], errors="coerce")
-        elif parsed_dates.isna().any():
-            parsed_dates = parsed_dates.fillna(pd.to_datetime(df["date"], errors="coerce"))
+        mask_failed = parsed_dates.isna() & df["date"].notna()
+        if mask_failed.any():
+            iso_dates = pd.to_datetime(df.loc[mask_failed, "date"], errors="coerce")
+            parsed_dates[mask_failed] = iso_dates
         df["date"] = parsed_dates
         # Fix #11: Filter by Segment if available to avoid double counting
         cols = [c.lower() for c in df.columns]
         if "segment" in cols:
             seg_col = df.columns[cols.index("segment")]
             df = df[df[seg_col].astype(str).str.lower().str.contains("cash", na=False)]
-        
+
         # Sort chronologically
         df = df.sort_values("date").reset_index(drop=True)
     else:
         df = df.reset_index(drop=True)
-        
+
     return df
 
 
 def fii_dii_derivatives(days: int = 5) -> tuple[dict[str, float], bool]:
     """Return the cumulative sum of FII derivatives activity over the last N sessions.
-    
+
     Returns (derivatives_dict, stale).
     """
     _, cached_stockedge, _ = _get_persistent_fii_dii_cache()
@@ -1640,25 +1846,28 @@ def fii_dii_derivatives(days: int = 5) -> tuple[dict[str, float], bool]:
     return {k: round(v, 2) for k, v in out.items()}, False
 
 
-def _cached_ohlc(symbol: str, period: str, interval: str, cache_key: str) -> pd.DataFrame:
+def _cached_ohlc(
+    symbol: str, period: str, interval: str, cache_key: str
+) -> pd.DataFrame:
     key = f"{symbol}_{period}_{interval}_{cache_key}"
     if key in _OHLC_CACHE and not _OHLC_CACHE[key].empty:
         return _OHLC_CACHE[key].copy()
-        
+
     df = ohlc(symbol, period=period, interval=interval)
     if not df.empty:
         _OHLC_CACHE[key] = df.copy()
     return df
 
+
 def ohlc_cached(symbol: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
     """Time-bucketed cache to ensure fresh data every 2 minutes without spamming yfinance."""
     global _OHLC_CACHE, _OHLC_CACHE_BUCKET
     current_bucket = int(time.time() / 120)
-    
+
     if current_bucket != _OHLC_CACHE_BUCKET:
         _OHLC_CACHE.clear()
         _OHLC_CACHE_BUCKET = current_bucket
-        
+
     return _cached_ohlc(symbol, period, interval, str(current_bucket))
 
 
@@ -1669,9 +1878,10 @@ def sector_ohlc(sectors: list[str], period: str = "6mo") -> dict[str, pd.DataFra
 def universe_ohlc(tickers: list[str], period: str = "6mo") -> dict[str, pd.DataFrame]:
     import os
     import time
-    import yfinance as yf
+    from datetime import timedelta, timezone
     from pathlib import Path
-    from datetime import timezone, timedelta
+
+    import yfinance as yf
 
     cache_dir = Path("data/cache/ohlc")
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -1684,7 +1894,11 @@ def universe_ohlc(tickers: list[str], period: str = "6mo") -> dict[str, pd.DataF
     ist_now = dt.datetime.now(timezone(timedelta(hours=5, minutes=30)))
     is_weekday = ist_now.weekday() < 5
     tt = ist_now.time()
-    market_open = is_weekday and (tt.hour, tt.minute) >= (9, 15) and (tt.hour, tt.minute) <= (15, 30)
+    market_open = (
+        is_weekday
+        and (tt.hour, tt.minute) >= (9, 15)
+        and (tt.hour, tt.minute) <= (15, 30)
+    )
 
     # 1. Load from cache if today's file exists
     for t in tickers:
@@ -1724,7 +1938,7 @@ def universe_ohlc(tickers: list[str], period: str = "6mo") -> dict[str, pd.DataF
 
     # 3. Batch fetch remaining from yfinance fallback.
     yf_tickers = [f"{s}.NS" if "." not in s else s for s in missing_tickers]
-    chunks = [yf_tickers[i:i + 100] for i in range(0, len(yf_tickers), 100)]
+    chunks = [yf_tickers[i : i + 100] for i in range(0, len(yf_tickers), 100)]
     fetched, failed, skipped = 0, 0, 0
 
     # If yfinance batch returns a structure but we extract zero symbols,
@@ -1871,3 +2085,53 @@ def universe_ohlc(tickers: list[str], period: str = "6mo") -> dict[str, pd.DataF
 
     print(f"universe_ohlc: fetched={fetched} failed={failed} skipped={skipped}")
     return results
+
+
+def fetch_trendlyne_options_kpis(symbol: str = "NIFTY") -> dict:
+    """
+    Fetch high-level KPIs from Trendlyne Smart Options dashboard.
+    Uses curl_cffi for Cloudflare bypass and extracts data from the SPA state.
+    """
+    t_symbol = symbol.upper()
+    # Mapping for indices as Trendlyne uses specific slugs
+    slug_map = {"NIFTY": "NIFTY", "BANKNIFTY": "BANKNIFTY", "FINNIFTY": "FINNIFTY"}
+    slug = slug_map.get(t_symbol, t_symbol)
+    url = f"https://smartoptions.trendlyne.com/dashboard/options/latest/{slug}/"
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": "https://smartoptions.trendlyne.com/",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    }
+
+    try:
+        from curl_cffi import requests as curl_requests
+
+        session = curl_requests.Session(impersonate="chrome120")
+        resp = session.get(url, headers=headers, timeout=15)
+        resp.raise_for_status()
+
+        import json
+        import re
+
+        # Extract the state JSON from the script tag (standard Trendlyne SPA pattern)
+        match = re.search(
+            r"window\.__INITIAL_STATE__\s*=\s*({.*?});", resp.text, re.DOTALL
+        )
+        if not match:
+            return {}
+
+        state = json.loads(match.group(1))
+        dashboard = state.get("optionsDashboard", {}).get("latest", {})
+
+        return {
+            "fii_index_long_short_ratio": dashboard.get("fiiLongShortRatio"),
+            "modified_max_pain": dashboard.get("modifiedMaxPain"),
+            "iv_percentile": dashboard.get("ivPercentile"),
+            "sentiment": dashboard.get("sentiment"),
+            "pcr_oi": dashboard.get("pcr"),
+            "source": "trendlyne",
+        }
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"Trendlyne fetch failed for {symbol}: {e}")
+        return {}

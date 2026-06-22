@@ -3,6 +3,10 @@ import re
 from pathlib import Path
 from typing import Optional
 import yaml
+from dotenv import load_dotenv
+
+# Load environment variables from .env file in the project root
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 # Env vars enforcement.
 # Intentionally left empty: this project is designed to run in "alerts-only /
@@ -60,9 +64,75 @@ def load_config(path: str | None = None) -> dict:
     return cfg
 
 
+def fetch_dhan_public_universe() -> list[str]:
+    import requests
+    import json
+    import re
+
+    symbols = set()
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+
+    # Fetch page 1 from raw HTML
+    try:
+        r = requests.get("https://dhan.co/futures-stocks-list/", headers=headers, timeout=5)
+        if r.status_code == 200:
+            match = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', r.text, re.DOTALL)
+            if match:
+                js = json.loads(match.group(1))
+                data = js.get("props", {}).get("pageProps", {}).get("listData", {}).get("data", [])
+                for item in data:
+                    sym = item.get("Sym")
+                    if sym:
+                        symbols.add(sym.strip())
+    except Exception:
+        pass
+
+    # Query remaining pages of Nifty 200 from public customscan API
+    post_url = "https://ow-scanx-analytics.dhan.co/customscan/fetchdt"
+    post_headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Content-Type": "application/json; charset=UTF-8",
+        "Referer": "https://dhan.co/"
+    }
+    for page in range(1, 5):
+        payload = {
+            "data": {
+                "sort": "Mcap", "sorder": "desc", "count": 50,
+                "params": [
+                    {"field": "idxlist.Indexid", "op": "", "val": "18"},
+                    {"field": "Exch", "op": "", "val": "NSE"},
+                    {"field": "OgInst", "op": "", "val": "ES"}
+                ],
+                "fields": ["Sym"], "pgno": page
+            }
+        }
+        try:
+            r = requests.post(post_url, headers=post_headers, json=payload, timeout=5)
+            if r.status_code == 200:
+                for item in r.json().get("data", []):
+                    sym = item.get("Sym")
+                    if sym:
+                        symbols.add(sym.strip())
+        except Exception:
+            pass
+
+    return sorted(list(symbols))
+
+
 def load_universe(cfg: dict) -> list[str]:
     src = cfg.get("universe_source", "fo_sample")
     if src == "fno200":
+        # Make Dhan public URL/API primary
+        try:
+            symbols = fetch_dhan_public_universe()
+            if symbols:
+                return symbols
+        except Exception as e:
+            print(f"[config] Failed to fetch Dhan public F&O universe: {e}")
+
+        # Fallback to local csv
         csv_path = Path(__file__).parent / "fno200.csv"
         try:
             import csv
