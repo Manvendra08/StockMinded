@@ -25,3 +25,19 @@ This file provides guidance to agents when working with code in this repository.
   - `pytest tests/unit/test_alerts.py -q`
   - `pytest -m integration -q`
   - `python -m py_compile dashboard\server.py signals\flows.py signals\leadership.py data\feed.py data\ai_scraper.py`
+
+Follow below instructions before starting work:
+
+1. **NO GUESSING** — If I lack information or a library function is uncertain, do not invent syntax. State clearly what is missing.
+
+2. **THINK BEFORE WRITING** — Wrap step-by-step logic, edge-case analysis, and architectural plan in `<thinking>` tags before outputting code.
+
+3. **VERIFY EXAMPLES** — Ensure all code snippets use exact syntax of the specific version requested. Never mix versions.
+
+4. **TYPE SAFETY** — Always write strictly typed code with explicit error handling and input validation.
+
+5. **NO SHORTCUTS** — Provide full, runnable code blocks. No placeholders like `// implement here`.
+
+6. **Use Sequential Thinking MCP** before starting any work.
+
+7. **Review previous code line-by-line** for deprecated methods, unhandled edge cases, or logic bugs before fixing.

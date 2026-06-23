@@ -142,6 +142,7 @@ def _build_setup_for_symbol(
             pcr=pcr,
             wing_width=wing * 1.5,
             entry_reason=f"RANGE_HIGH_VOL wider IC, wing={wing * 1.5}",
+            vol_expansion_blocked=vol_exp_blocked,
             suitable=True,
             exit_rules={
                 "profit_take_pct": sym_cfg.get("profit_take_pct", 0.50),
@@ -403,7 +404,13 @@ def _build_iron_condor(
 
 
 def _build_wider_iron_condor(
-    regime: str, bias: str, vix: float, pcr: Optional[float], cfg: dict, mode: str
+    regime: str,
+    bias: str,
+    vix: float,
+    pcr: Optional[float],
+    cfg: dict,
+    mode: str,
+    vol_exp_blocked: bool = False,
 ) -> NiftyOptionSetup:
     nifty_cfg = cfg.get("nifty_options", {})
     wing = nifty_cfg.get("iron_condor_wing_width", 300) * 1.5
@@ -417,6 +424,7 @@ def _build_wider_iron_condor(
         pcr=pcr,
         wing_width=wing,
         entry_reason=f"RANGE_HIGH_VOL wider IC, wing={wing}",
+        vol_expansion_blocked=vol_exp_blocked,
         suitable=True,
         exit_rules={
             "profit_take_pct": nifty_cfg.get("profit_take_pct", 0.50),
@@ -843,7 +851,7 @@ def _resolve_structure(
                             )
                         break
 
-        # Recalculate net_credit and max_loss after premium adjustments
+        # Recalculate net_credit, max_loss, and breakevens after premium adjustments
         if resolved_legs:
             net_credit = 0.0
             for leg in resolved_legs:
@@ -851,15 +859,60 @@ def _resolve_structure(
                 net_credit += sign * leg.premium * leg.lots * leg.lot_size
             net_credit = max(0, net_credit)
             setup.net_credit = net_credit
-            # Recalc breakevens if we have short strikes
+
+            # Recalculate max_loss from adjusted strikes
             short_legs = [l for l in resolved_legs if l.side == "SELL"]
+            long_legs = [l for l in resolved_legs if l.side == "BUY"]
+            if (
+                setup.strategy in ("IRON_CONDOR", "IRON_CONDOR_WIDE")
+                and len(short_legs) >= 2
+            ):
+                # IC: wing distance × lot_size − net_credit (per side, take max)
+                put_short = [l for l in short_legs if l.type == "PE"]
+                put_long = [l for l in long_legs if l.type == "PE"]
+                call_short = [l for l in short_legs if l.type == "CE"]
+                call_long = [l for l in long_legs if l.type == "CE"]
+                max_loss = 0.0
+                if put_short and put_long:
+                    put_wing = abs(put_short[0].strike - put_long[0].strike)
+                    put_risk = (
+                        put_wing * lot_size * min_lots
+                        - (put_short[0].premium - put_long[0].premium)
+                        * lot_size
+                        * min_lots
+                    )
+                    max_loss = max(max_loss, put_risk)
+                if call_short and call_long:
+                    call_wing = abs(call_short[0].strike - call_long[0].strike)
+                    call_risk = (
+                        call_wing * lot_size * min_lots
+                        - (call_short[0].premium - call_long[0].premium)
+                        * lot_size
+                        * min_lots
+                    )
+                    max_loss = max(max_loss, call_risk)
+            elif (
+                setup.strategy in ("BULL_PUT_SPREAD", "BEAR_CALL_SPREAD")
+                and short_legs
+                and long_legs
+            ):
+                spread_wing = abs(short_legs[0].strike - long_legs[0].strike)
+                max_loss = spread_wing * lot_size * min_lots - net_credit
+            elif setup.strategy in ("NAKED_PUT_SELL", "NAKED_CALL_SELL"):
+                spot_for_risk = spot if spot > 0 else 25000.0
+                max_loss = spot_for_risk * 0.20 * lot_size * min_lots
+
+            # Recalc breakevens if we have short strikes
             if short_legs:
                 credit_per_lot = (
                     net_credit / (short_legs[0].lot_size * short_legs[0].lots)
                     if short_legs[0].lot_size
                     else 0.0
                 )
-                if setup.strategy in ("IRON_CONDOR", "IRON_CONDOR_WIDE"):
+                if (
+                    setup.strategy in ("IRON_CONDOR", "IRON_CONDOR_WIDE")
+                    and len(short_legs) >= 2
+                ):
                     setup.breakevens = [
                         short_legs[0].strike - credit_per_lot,
                         short_legs[1].strike + credit_per_lot,

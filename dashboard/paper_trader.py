@@ -652,21 +652,25 @@ def enter_option_structure(
         return trade
 
 
-def enter_nifty_option_structure(setup, resolved_legs: list, cfg: dict) -> dict:
-    """Enter a NIFTY specific option structure with metadata."""
+def _enter_option_structure(
+    setup, resolved_legs: list, cfg: dict, symbol: str = "NIFTY"
+) -> dict:
+    """Enter an option structure with metadata. Shared by NIFTY and BANKNIFTY."""
     from signals.options import (
         calc_structure_max_loss,
         check_naked_legs,
         is_within_entry_window,
     )
 
+    cfg_key = "banknifty_options" if symbol == "BANKNIFTY" else "nifty_options"
+
     now_ist = _now_ist()
-    in_window, window_reason = is_within_entry_window(cfg, now_ist)
+    in_window, window_reason = is_within_entry_window(cfg, now_ist, symbol=symbol)
     journal = Journal(cfg["paths"]["journal_db"])
 
     if not in_window:
         journal.log_skipped_trade(
-            "NIFTY",
+            symbol,
             "NEUTRAL",
             "MED",
             "WINDOW_CLOSED",
@@ -675,7 +679,7 @@ def enter_nifty_option_structure(setup, resolved_legs: list, cfg: dict) -> dict:
             "options_gate",
             window_reason,
         )
-        return {"error": f"NIFTY entry blocked: {window_reason}"}
+        return {"error": f"{symbol} entry blocked: {window_reason}"}
 
     leg_dicts = [
         {
@@ -690,7 +694,7 @@ def enter_nifty_option_structure(setup, resolved_legs: list, cfg: dict) -> dict:
     no_naked, naked_reason = check_naked_legs(leg_dicts)
     if not no_naked:
         journal.log_skipped_trade(
-            "NIFTY",
+            symbol,
             "NEUTRAL",
             "MED",
             "NAKED_RISK",
@@ -699,32 +703,31 @@ def enter_nifty_option_structure(setup, resolved_legs: list, cfg: dict) -> dict:
             "options_gate",
             naked_reason,
         )
-        return {"error": f"NIFTY entry blocked: {naked_reason}"}
+        return {"error": f"{symbol} entry blocked: {naked_reason}"}
 
     with atomic_db_update() as db:
         if "option_trades" not in db:
             db["option_trades"] = []
-        nifty_cfg = cfg.get("nifty_options", {})
-        max_nifty = nifty_cfg.get("max_nifty_structures", 2)
-        open_nifty = [
+        sym_cfg = cfg.get(cfg_key, {})
+        open_sym = [
             t
             for t in db["option_trades"]
-            if t.get("status") == "OPEN" and t.get("symbol") == "NIFTY"
+            if t.get("status") == "OPEN" and t.get("symbol") == symbol
         ]
-        if len(open_nifty) > 0:
-            return {"error": "NIFTY option structure already open"}
+        if len(open_sym) > 0:
+            return {"error": f"{symbol} option structure already open"}
 
         # Prevent SL infinite loops: max 1 entry per structure today
         today_str = now_ist.date().isoformat()
         todays_trades = [
             t
             for t in db["option_trades"]
-            if t.get("symbol") == "NIFTY"
+            if t.get("symbol") == symbol
             and t.get("structure") == setup.strategy
             and t.get("entry_date") == today_str
         ]
         if todays_trades:
-            return {"error": f"Already traded {setup.strategy} for NIFTY today"}
+            return {"error": f"Already traded {setup.strategy} for {symbol} today"}
 
         net_credit = sum(
             (l.premium * l.lots * l.lot_size) * (1 if l.side == "SELL" else -1)
@@ -732,7 +735,7 @@ def enter_nifty_option_structure(setup, resolved_legs: list, cfg: dict) -> dict:
         )
         if net_credit <= 0:
             journal.log_skipped_trade(
-                "NIFTY",
+                symbol,
                 "NEUTRAL",
                 "MED",
                 "NO_CREDIT",
@@ -741,7 +744,7 @@ def enter_nifty_option_structure(setup, resolved_legs: list, cfg: dict) -> dict:
                 "options_gate",
                 "Non-credit structure",
             )
-            return {"error": f"NIFTY blocked: non-credit"}
+            return {"error": f"{symbol} blocked: non-credit"}
 
         lot_size = resolved_legs[0].lot_size if resolved_legs else 1
         struct_type = (
@@ -753,13 +756,14 @@ def enter_nifty_option_structure(setup, resolved_legs: list, cfg: dict) -> dict:
                 else "bear_call_spread"
             )
         )
-        # Pass current spot price for dynamic max-loss calculation (fixes hardcoded ₹250k naked short)
         underlying_spot = setup.spot if hasattr(setup, "spot") and setup.spot else None
+        num_lots = max(l.lots for l in resolved_legs) if resolved_legs else 1
         max_loss = calc_structure_max_loss(
             struct_type,
             net_credit,
             setup.wing_width,
             lot_size,
+            lots=num_lots,
             underlying_spot=underlying_spot,
         )
         # Smart exit metadata
@@ -778,7 +782,7 @@ def enter_nifty_option_structure(setup, resolved_legs: list, cfg: dict) -> dict:
 
         trade = {
             "id": _next_id(db),
-            "symbol": "NIFTY",
+            "symbol": symbol,
             "structure": setup.strategy,
             "mode": setup.mode,
             "legs": [
@@ -814,6 +818,16 @@ def enter_nifty_option_structure(setup, resolved_legs: list, cfg: dict) -> dict:
         }
         db["option_trades"].append(trade)
         return trade
+
+
+def enter_nifty_option_structure(setup, resolved_legs: list, cfg: dict) -> dict:
+    """Enter a NIFTY specific option structure with metadata."""
+    return _enter_option_structure(setup, resolved_legs, cfg, symbol="NIFTY")
+
+
+def enter_banknifty_option_structure(setup, resolved_legs: list, cfg: dict) -> dict:
+    """Enter a BANKNIFTY specific option structure with metadata."""
+    return _enter_option_structure(setup, resolved_legs, cfg, symbol="BANKNIFTY")
 
 
 def _option_net_premium(legs: list[dict], price_map: dict) -> float | None:
@@ -1132,37 +1146,41 @@ def check_option_exits(
     return closed
 
 
-def check_nifty_option_exits(
-    vix_current: float = None, cfg: dict = None, current_regime: str | None = None
+def _check_option_exits(
+    vix_current: float = None,
+    cfg: dict = None,
+    current_regime: str | None = None,
+    symbol: str = "NIFTY",
 ) -> list[dict]:
+    """Check option exits for a given symbol. Shared by NIFTY and BANKNIFTY."""
     from signals.options import is_expiry_day, is_within_exit_window
 
     now_ist = _now_ist()
     if not is_market_open(now_ist) and not is_eod_window(now_ist):
         return []
     db = _load_db()
-    open_nifty = [
+    open_trades = [
         t
         for t in db.get("option_trades", [])
-        if t.get("status") == "OPEN" and t.get("symbol") == "NIFTY"
+        if t.get("status") == "OPEN" and t.get("symbol") == symbol
     ]
-    if not open_nifty:
+    if not open_trades:
         return []
 
     closed = []
     vix_now = vix_current or _get_current_vix()
     with atomic_db_update() as db:
-        open_nifty = [
+        open_trades = [
             t
             for t in db.get("option_trades", [])
-            if t.get("status") == "OPEN" and t.get("symbol") == "NIFTY"
+            if t.get("status") == "OPEN" and t.get("symbol") == symbol
         ]
-        if not open_nifty:
+        if not open_trades:
             logging.getLogger(__name__).debug(
-                "check_nifty_option_exits: no open NIFTY option trades found (re-read inside lock)"
+                f"check_option_exits({symbol}): no open trades found (re-read inside lock)"
             )
             return []
-        price_map = _build_option_price_map(open_nifty)
+        price_map = _build_option_price_map(open_trades)
         settings = db.get("settings", {})
         auto_close = settings.get("auto_close_eod", True)
         is_eod = is_eod_window(now_ist)
@@ -1175,26 +1193,21 @@ def check_nifty_option_exits(
 
             try:
                 needed_strikes = list(
-                    {
-                        leg["strike"]
-                        for t in open_nifty
-                        if t["symbol"] == "NIFTY"
-                        for leg in t["legs"]
-                    }
+                    {leg["strike"] for t in open_trades for leg in t["legs"]}
                 )
-                chain = chain_snapshot("NIFTY", target_strikes=needed_strikes)
+                chain = chain_snapshot(symbol, target_strikes=needed_strikes)
             except Exception as e:
                 logging.getLogger(__name__).exception(
-                    "Failed to fetch NIFTY chain_snapshot: %s", e
+                    "Failed to fetch %s chain_snapshot: %s", symbol, e
                 )
 
-        for t in open_nifty:
+        for t in open_trades:
             current_net = _option_net_premium(t["legs"], price_map)
 
             # If no current net (missing LTPs), skip exit checks for safety
             if current_net is None:
                 logging.getLogger(__name__).warning(
-                    f"Skipping exit checks for trade id={t.get('id')} symbol=NIFTY due to missing LTP data"
+                    f"Skipping exit checks for trade id={t.get('id')} symbol={symbol} due to missing LTP data"
                 )
                 continue
 
@@ -1245,6 +1258,20 @@ def check_nifty_option_exits(
                 t["pnl"] = round(t.get("net_credit", 0.0) - current_net, 2)
                 closed.append(t)
     return closed
+
+
+def check_nifty_option_exits(
+    vix_current: float = None, cfg: dict = None, current_regime: str | None = None
+) -> list[dict]:
+    """Check NIFTY option exits."""
+    return _check_option_exits(vix_current, cfg, current_regime, symbol="NIFTY")
+
+
+def check_banknifty_option_exits(
+    vix_current: float = None, cfg: dict = None, current_regime: str | None = None
+) -> list[dict]:
+    """Check BANKNIFTY option exits."""
+    return _check_option_exits(vix_current, cfg, current_regime, symbol="BANKNIFTY")
 
 
 def scan_reentry_candidates(data: dict, cfg: dict = None) -> list[dict]:
@@ -1316,11 +1343,19 @@ def scan_reentry_candidates(data: dict, cfg: dict = None) -> list[dict]:
     return reentered
 
 
-def get_nifty_option_setups(data: dict, cfg: dict = None) -> list[dict]:
+def _get_option_setups(
+    data: dict, cfg: dict = None, symbol: str = "NIFTY"
+) -> list[dict]:
     """
-    Generate actionable NIFTY option-selling setups from signal data.
+    Generate actionable option-selling setups for a given symbol.
+    Internal shared implementation for NIFTY and BANKNIFTY.
     """
-    from signals.option_strategy import pick_nifty_strategy, resolve_nifty_structure
+    from signals.option_strategy import (
+        pick_banknifty_strategy,
+        pick_nifty_strategy,
+        resolve_banknifty_structure,
+        resolve_nifty_structure,
+    )
     from signals.options import chain_snapshot, is_within_entry_window
 
     if cfg is None:
@@ -1328,19 +1363,19 @@ def get_nifty_option_setups(data: dict, cfg: dict = None) -> list[dict]:
 
         cfg = load_config()
 
+    cfg_key = "banknifty_options" if symbol == "BANKNIFTY" else "nifty_options"
+
     # Inject options lot size from UI settings
     db = _load_db()
     settings = db.get("settings", {})
-    if "nifty_options" not in cfg:
-        cfg["nifty_options"] = {}
-    cfg["nifty_options"]["min_lots_per_leg"] = max(
-        1, settings.get("options_lots_per_trade", 1)
-    )
+    if cfg_key not in cfg:
+        cfg[cfg_key] = {}
+    cfg[cfg_key]["min_lots_per_leg"] = max(1, settings.get("options_lots_per_trade", 1))
 
     journal = Journal(cfg["paths"]["journal_db"])
     setups = []
-    nifty_cfg = cfg.get("nifty_options", {})
-    if not nifty_cfg.get("enabled", False):
+    sym_cfg = cfg.get(cfg_key, {})
+    if not sym_cfg.get("enabled", False):
         return setups
 
     regime = data.get("regime", {})
@@ -1350,20 +1385,29 @@ def get_nifty_option_setups(data: dict, cfg: dict = None) -> list[dict]:
     vix = regime.get("vix", 15)
     vix_change = regime.get("vix_5d_change_pct", 0)
     pcr = flows.get("pcr_oi")
-    spot = data.get("nifty", {}).get("close", 0)
+
+    if symbol == "BANKNIFTY":
+        spot = data.get("banknifty", {}).get("close", 0)
+    else:
+        spot = data.get("nifty", {}).get("close", 0)
 
     if spot <= 0:
         return setups
 
-    # Check entry window
-    in_window, window_reason = is_within_entry_window(cfg)
+    # Check entry window with symbol
+    in_window, window_reason = is_within_entry_window(cfg, symbol=symbol)
 
-    # Pick strategy — pass full data dict as first arg (required for verdict lookup)
-    setup = pick_nifty_strategy(data, regime_name, bias, vix, vix_change, pcr, cfg)
+    # Pick strategy
+    if symbol == "BANKNIFTY":
+        setup = pick_banknifty_strategy(
+            data, regime_name, bias, vix, vix_change, pcr, cfg
+        )
+    else:
+        setup = pick_nifty_strategy(data, regime_name, bias, vix, vix_change, pcr, cfg)
 
     if setup is None:
         journal.log_skipped_trade(
-            "NIFTY",
+            symbol,
             "NEUTRAL",
             "LOW",
             "NO_STRATEGY",
@@ -1374,7 +1418,7 @@ def get_nifty_option_setups(data: dict, cfg: dict = None) -> list[dict]:
         )
         setups.append(
             {
-                "symbol": "NIFTY",
+                "symbol": symbol,
                 "suitable": False,
                 "skip_reason": "No strategy for current regime/bias",
                 "regime": regime_name,
@@ -1386,10 +1430,10 @@ def get_nifty_option_setups(data: dict, cfg: dict = None) -> list[dict]:
 
     # Get option chain
     try:
-        chain = chain_snapshot("NIFTY")
+        chain = chain_snapshot(symbol)
     except Exception as e:
         journal.log_skipped_trade(
-            "NIFTY",
+            symbol,
             "NEUTRAL",
             "MED",
             "CHAIN_ERROR",
@@ -1400,7 +1444,7 @@ def get_nifty_option_setups(data: dict, cfg: dict = None) -> list[dict]:
         )
         setups.append(
             {
-                "symbol": "NIFTY",
+                "symbol": symbol,
                 "suitable": False,
                 "skip_reason": f"Chain error: {e}",
                 "regime": regime_name,
@@ -1412,7 +1456,7 @@ def get_nifty_option_setups(data: dict, cfg: dict = None) -> list[dict]:
 
     if chain.empty:
         journal.log_skipped_trade(
-            "NIFTY",
+            symbol,
             "NEUTRAL",
             "MED",
             "EMPTY_CHAIN",
@@ -1423,25 +1467,31 @@ def get_nifty_option_setups(data: dict, cfg: dict = None) -> list[dict]:
         )
         return setups
 
-    # Read lot_size/strike_step from the correct 'options' config section
+    # Read lot_size/strike_step from the correct config section
     options_cfg = cfg.get("options", {})
     lot_size = (
-        nifty_cfg.get("lot_size", {}).get("NIFTY")
-        or options_cfg.get("lot_size", {}).get("NIFTY")
-        or 75
+        sym_cfg.get("lot_size", {}).get(symbol)
+        or options_cfg.get("lot_size", {}).get(symbol)
+        or (30 if symbol == "BANKNIFTY" else 75)
     )
     strike_step = (
-        nifty_cfg.get("strike_step", {}).get("NIFTY")
-        or options_cfg.get("strike_step", {}).get("NIFTY")
-        or 50
+        sym_cfg.get("strike_step", {}).get(symbol)
+        or options_cfg.get("strike_step", {}).get(symbol)
+        or (100 if symbol == "BANKNIFTY" else 50)
     )
-    setup = resolve_nifty_structure(setup, chain, spot, lot_size, strike_step, cfg)
+
+    if symbol == "BANKNIFTY":
+        setup = resolve_banknifty_structure(
+            setup, chain, spot, lot_size, strike_step, cfg
+        )
+    else:
+        setup = resolve_nifty_structure(setup, chain, spot, lot_size, strike_step, cfg)
 
     setup.entry_window_ok = in_window
     if not in_window or not setup.suitable:
         reason = setup.skip_reason if not setup.suitable else window_reason
         journal.log_skipped_trade(
-            "NIFTY",
+            symbol,
             "NEUTRAL",
             "MED",
             "NOT_SUITABLE",
@@ -1492,6 +1542,16 @@ def get_nifty_option_setups(data: dict, cfg: dict = None) -> list[dict]:
     }
     setups.append(setup_dict)
     return setups
+
+
+def get_nifty_option_setups(data: dict, cfg: dict = None) -> list[dict]:
+    """Generate actionable NIFTY option-selling setups from signal data."""
+    return _get_option_setups(data, cfg, symbol="NIFTY")
+
+
+def get_banknifty_option_setups(data: dict, cfg: dict = None) -> list[dict]:
+    """Generate actionable BANKNIFTY option-selling setups from signal data."""
+    return _get_option_setups(data, cfg, symbol="BANKNIFTY")
 
 
 def check_and_close_trades() -> list[dict]:

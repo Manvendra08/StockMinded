@@ -284,13 +284,23 @@ def chain_snapshot(symbol, target_expiries=None, target_strikes=None) -> pd.Data
 # =============================================================================
 
 
-def is_within_entry_window(cfg: dict = None, now: datetime = None) -> Tuple[bool, str]:
+def is_within_entry_window(
+    cfg: dict | None = None,
+    now: datetime | None = None,
+    symbol: str = "NIFTY",
+) -> tuple[bool, str]:
     """
-    Check if current time is within valid NIFTY option entry window.
+    Check if current time is within valid option entry window.
+
+    Args:
+        cfg: Config dict (loaded if None)
+        now: Current IST datetime (auto if None)
+        symbol: "NIFTY" or "BANKNIFTY"
 
     Returns: (is_valid, reason)
     - Intraday mode: 09:45-14:30
-    - Positional mode: entries only during first 3 days of contract (Wed-Fri for Tuesday expiry)
+    - Positional mode: entries only during allowed weekdays
+    - Expiry day: no entries after 12:00 IST
     """
     from datetime import timedelta, timezone
 
@@ -299,11 +309,13 @@ def is_within_entry_window(cfg: dict = None, now: datetime = None) -> Tuple[bool
 
         cfg = load_config()
 
-    nifty_cfg = cfg.get("nifty_options", {})
-    if not nifty_cfg.get("enabled", False):
-        return False, "NIFTY options disabled"
+    # Pick the right config section based on symbol
+    cfg_key = "banknifty_options" if symbol == "BANKNIFTY" else "nifty_options"
+    sym_cfg = cfg.get(cfg_key, {})
+    if not sym_cfg.get("enabled", False):
+        return False, f"{symbol} options disabled"
 
-    mode = nifty_cfg.get("mode", "positional")
+    mode = sym_cfg.get("mode", "positional")
     now = now or datetime.now(timezone(timedelta(hours=5, minutes=30)))
 
     if now.weekday() >= 5:
@@ -316,8 +328,8 @@ def is_within_entry_window(cfg: dict = None, now: datetime = None) -> Tuple[bool
     current_time = now.time()
 
     # Get entry window times
-    entry_start_str = nifty_cfg.get("intraday_entry_start", "09:45")
-    entry_end_str = nifty_cfg.get("intraday_entry_end", "14:30")
+    entry_start_str = sym_cfg.get("intraday_entry_start", "09:45")
+    entry_end_str = sym_cfg.get("intraday_entry_end", "14:30")
 
     h1, m1 = map(int, entry_start_str.split(":"))
     h2, m2 = map(int, entry_end_str.split(":"))
@@ -327,17 +339,26 @@ def is_within_entry_window(cfg: dict = None, now: datetime = None) -> Tuple[bool
     if not (entry_start <= current_time <= entry_end):
         return False, f"Outside entry window ({entry_start_str}-{entry_end_str})"
 
-    # Positional mode: check allowed days from config (all weekdays enabled for paper trading)
+    # Positional mode: check allowed days from config
     if mode == "positional":
-        allowed_days = nifty_cfg.get("positional_entry_days", [0, 1, 2, 3, 4])
+        allowed_days = sym_cfg.get("positional_entry_days", [0, 1, 2, 3, 4])
         if now.weekday() not in allowed_days:
             day_names = ["Mon", "Tue", "Wed", "Thu", "Fri"]
             return (
                 False,
-                f"Positional mode: entry not allowed today ({day_names[now.weekday()]})",
+                f"Positional {symbol}: entry not allowed today ({day_names[now.weekday()]})",
             )
 
-    return True, "Valid entry window"
+    # Expiry day cut-off: no entries after 12:00 IST on expiry day
+    if is_symbol_expiry_today(symbol):
+        expiry_cutoff = time(12, 0)
+        if current_time >= expiry_cutoff:
+            return (
+                False,
+                f"{symbol} expiry today — no entries after 12:00 IST",
+            )
+
+    return True, f"Valid {symbol} entry window"
 
 
 def is_expiry_day(expiry_str: str) -> bool:
@@ -348,6 +369,54 @@ def is_expiry_day(expiry_str: str) -> bool:
         return exp_date == today_ist
     except:
         return False
+
+
+def _expiry_date_for_symbol(symbol: str) -> str | None:
+    """Return the current expiry date string for a symbol based on NSE schedule.
+
+    NIFTY: weekly expiry every Tuesday.
+    BANKNIFTY: monthly expiry — last Tuesday of the month.
+
+    Returns None on calculation failure.
+    """
+    try:
+        from datetime import date as dt_date
+
+        today = datetime.now(timezone(timedelta(hours=5, minutes=30))).date()
+        cal = calendar
+
+        if symbol == "BANKNIFTY":
+            # Last Tuesday of the month
+            month_cal = cal.monthcalendar(today.year, today.month)
+            # Find the last Tuesday (weekday=1)
+            last_tuesday = max(
+                week[cal.TUESDAY] for week in month_cal if week[cal.TUESDAY] != 0
+            )
+            exp_date = dt_date(today.year, today.month, last_tuesday)
+        else:
+            # NIFTY: next Tuesday
+            days_ahead = cal.TUESDAY - today.weekday()
+            if days_ahead <= 0:
+                days_ahead += 7
+            exp_date = today + timedelta(days=days_ahead)
+
+        while _is_holiday(exp_date) or exp_date.weekday() >= 5:
+            exp_date -= timedelta(days=1)
+            if exp_date < today:
+                # Holiday pushed us before today — use the prior calculation directly
+                break
+
+        return exp_date.strftime("%d-%b-%Y")
+    except Exception:
+        return None
+
+
+def is_symbol_expiry_today(symbol: str) -> bool:
+    """Check if today is the expiry day for the given symbol."""
+    exp_str = _expiry_date_for_symbol(symbol)
+    if exp_str is None:
+        return False
+    return is_expiry_day(exp_str)
 
 
 def is_within_exit_window(
@@ -403,37 +472,34 @@ def calc_structure_max_loss(
     net_credit: float,
     wing_width: float,
     lot_size: int = 1,
+    lots: int = 1,
     **kwargs,
 ) -> float:
     """
     Calculate max loss for an option structure.
 
-    Iron Condor / Credit spread: max_loss = (wing_width * lot_size) - net_credit
-    Credit Spread: max_loss = (spread_width * lot_size) - net_credit
+    Iron Condor / Credit spread: max_loss = (wing_width * lot_size * lots) - net_credit
+    Credit Spread: max_loss = (spread_width * lot_size * lots) - net_credit
     naked_short kwargs: underlying_spot, naked_loss_pct (default 0.20), naked_loss_cap (default 250_000)
     """
     if net_credit <= 0:
-        return max(0, wing_width * lot_size)
+        return max(0, wing_width * lot_size * lots)
 
     if structure_type == "iron_condor":
-        return max(0, (wing_width * lot_size) - net_credit)
+        return max(0, (wing_width * lot_size * lots) - net_credit)
     elif structure_type in ("bull_put_spread", "bear_call_spread"):
-        return max(0, (wing_width * lot_size) - net_credit)
+        return max(0, (wing_width * lot_size * lots) - net_credit)
     elif structure_type == "credit_spread":
-        return max(0, (wing_width * lot_size) - net_credit)
+        return max(0, (wing_width * lot_size * lots) - net_credit)
     elif structure_type == "naked_short":
-        # Issue #5: derive max-loss proxy dynamically from a configurable % of underlying.
-        # Caller should pass underlying_spot via kwargs; fallback keeps behaviour safe.
-        # Default: 20 % of spot × lot_size  (e.g. 24500 × 0.20 × 75 ≈ ₹3.68 L/lot)
         spot = kwargs.get("underlying_spot", 0.0)
         pct = kwargs.get("naked_loss_pct", 0.20)
         if spot > 0:
-            return round(spot * pct * lot_size, 2)
-        # Fallback: use configured absolute cap or ₹250k
+            return round(spot * pct * lot_size * lots, 2)
         cap = kwargs.get("naked_loss_cap", 250_000.0)
-        return cap * lot_size
+        return cap * lot_size * lots
 
-    return wing_width * lot_size
+    return wing_width * lot_size * lots
 
 
 def calc_exit_levels(

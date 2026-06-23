@@ -551,6 +551,40 @@ def _set_persistent_sentiment_cache(
         logger.exception("Failed to write persistent sentiment cache: %s", e)
 
 
+def _get_sentiment_history() -> list[dict]:
+    """Load sentiment analysis history for self-improvement loop."""
+    import json
+    from pathlib import Path
+
+    hist_file = Path("data/cache/ai_sentiment_history.json")
+    if hist_file.exists():
+        try:
+            with open(hist_file, "r") as f:
+                data = json.load(f)
+                return data if isinstance(data, list) else []
+        except Exception as e:
+            logger.exception("Failed to read sentiment history: %s", e)
+    return []
+
+
+def _save_sentiment_run(run: dict) -> None:
+    """Save a sentiment analysis run to history for self-improvement."""
+    import json
+    from pathlib import Path
+
+    hist_file = Path("data/cache/ai_sentiment_history.json")
+    try:
+        hist_file.parent.mkdir(parents=True, exist_ok=True)
+        history = _get_sentiment_history()
+        history.append(run)
+        # Keep last 20 runs to bound file size
+        history = history[-20:]
+        with open(hist_file, "w") as f:
+            json.dump(history, f, indent=2)
+    except Exception as e:
+        logger.exception("Failed to save sentiment history: %s", e)
+
+
 def _parse_rss_date(date_str: str) -> float:
     """Parse RFC 2822 date string to Unix timestamp. Returns 0.0 on failure."""
     from email.utils import parsedate_to_datetime
@@ -1462,6 +1496,26 @@ def get_market_news_sentiment() -> Optional[dict]:
     # 2. Unified LLM analysis (Gemini -> Groq -> OpenRouter)
     logger.info("Performing news sentiment analysis via Brain Chain...")
     news_text = "\n".join(f"- {pub}: {title}" for title, pub in headlines)
+
+    # Self-improvement: load past sentiment history so LLM can learn from prior misses
+    _sentiment_history = _get_sentiment_history()
+    _history_context = ""
+    if _sentiment_history:
+        _recent = _sentiment_history[-3:]
+        _history_context = (
+            "\n\n--- PREVIOUS SENTIMENT ANALYSIS HISTORY (Self-Improvement Memory) ---\n"
+            "Review how your previous analyses performed. Learn from prior misreads:\n"
+        )
+        for _h in _recent:
+            _ts = _h.get("timestamp", "N/A")
+            _s = _h.get("overall_market_sentiment", "N/A")
+            _m = _h.get("model_used", "unknown")
+            _history_context += f"- [{_ts}] Sentiment: {_s} (Model: {_m})\n"
+        _history_context += (
+            "Use this memory to avoid repeating past errors. "
+            "If a previous sentiment call was inaccurate, adjust your weighting.\n"
+        )
+
     prompt = (
         "Analyze these LATEST Indian stock market news headlines from the last 12 hours. "
         "Your analysis MUST be based SOLELY on the provided headlines. "
@@ -1473,20 +1527,48 @@ def get_market_news_sentiment() -> Optional[dict]:
         "4. 'justification': 1-2 sentence summary based EXCLUSIVELY on the provided headlines.\n"
         "5. 'key_catalysts': list of {type: POS/NEG/NEUT, description: str}\n"
         "6. 'actionable_trade_ideas': list of {direction: LONG/SHORT, ticker: str, reason: str}\n"
-        "7. 'confidence': LOW/MEDIUM/HIGH\n\n"
+        "7. 'confidence': LOW/MEDIUM/HIGH\n"
+        "8. 'model_used': (will be filled by system)\n\n"
+        f"{_history_context}"
         f"Headlines:\n{news_text}"
     )
 
-    sentiment = call_llm(prompt)
+    sentiment, model_used = call_llm(prompt, return_provider=True)
 
     # 3. Last fallback: Local lexicon
     if not sentiment:
         logger.info("Brain Chain failed. Using Local Lexicon fallback.")
         try:
             sentiment = analyze_sentiment_locally(headlines)
+            model_used = "Local Lexicon (fallback)"
         except Exception as lex_err:
             logger.error("Local lexicon fallback failed: %s", lex_err)
             sentiment = None
+            model_used = "None"
+
+    # Tag sentiment with model info if it's a dict
+    if isinstance(sentiment, dict):
+        sentiment["model_used"] = model_used
+
+    # Self-improvement: save this run to sentiment history for next run's intake
+    try:
+        _save_sentiment_run(
+            {
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "model_used": model_used,
+                "overall_market_sentiment": sentiment.get("overall_market_sentiment")
+                if isinstance(sentiment, dict)
+                else "N/A",
+                "sentiment_score": sentiment.get("sentiment_score")
+                if isinstance(sentiment, dict)
+                else None,
+                "confidence": sentiment.get("confidence")
+                if isinstance(sentiment, dict)
+                else "LOW",
+            }
+        )
+    except Exception as hist_err:
+        logger.error("Failed to save sentiment history: %s", hist_err)
 
     _set_persistent_sentiment_cache(sentiment, now, ttl=3600.0)
     return sentiment

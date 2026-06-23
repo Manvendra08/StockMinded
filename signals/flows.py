@@ -228,7 +228,7 @@ def _bias(
     fii_dii_stale: bool = False,
     derivatives: dict[str, float] | None = None,
     derivatives_stale: bool = False,
-    ai_sentiment: str | None = None,
+    ai_sentiment: dict | str | None = None,
     trendlyne: dict | None = None,
 ) -> str:
     """Compute smart-money bias with weighted, calibrated signal scoring.
@@ -241,7 +241,8 @@ def _bias(
     FII Stock Futures 5D net  : weight 1.0
     FII Index Options 5D net  : weight 0.5  — noisy; low weight
     FII Index Long-Short Ratio: weight 1.5  — >1.25 bull / <0.75 bear
-    AI Sentiment (tiebreaker) : weight 0.5  — only applied when score in (-1, 1)
+    AI Sentiment              : weight up to 1.0, confidence-scaled, applied when
+                                score in (-3, 3)
 
     Conviction threshold: weighted_score >= 2.0 → LONG, <= -2.0 → SHORT.
     Raising from ±1 prevents single weak signals from declaring bias.
