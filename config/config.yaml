@@ -31,7 +31,7 @@ sectors:
   - NIFTY PSE
   - NIFTY PVT BANK
 
-universe_source: fno200          # fno200 | fo_sample
+universe_source: fno200 # fno200 | fo_sample
 intraday_top_n: 30
 
 universe_fo_sample:
@@ -62,7 +62,7 @@ schedule_ist:
   eod_review: "15:20"
 
 broker:
-  provider: dhan          # kite | dhan | fyers
+  provider: dhan # kite | dhan | fyers
   api_key: "${BROKER_API_KEY}"
   api_secret: "${BROKER_API_SECRET}"
   access_token: "${BROKER_ACCESS_TOKEN}"
@@ -84,9 +84,9 @@ data_sources:
     primary: true
     instrument_master_url: "https://images.dhan.co/api-data/api-scrip-master.csv"
     underlyings:
-      NIFTY: {security_id: 13, segment: IDX_I}
-      BANKNIFTY: {security_id: 25, segment: IDX_I}
-      FINNIFTY: {security_id: 27, segment: IDX_I}
+      NIFTY: { security_id: 13, segment: IDX_I }
+      BANKNIFTY: { security_id: 25, segment: IDX_I }
+      FINNIFTY: { security_id: 27, segment: IDX_I }
 
   local_files:
     option_chain: "./data/manual/option_chain_NIFTY.csv"
@@ -103,9 +103,9 @@ data_sources:
 options:
   enabled: true
   underlyings: [NIFTY, BANKNIFTY]
-  lot_size: {NIFTY: 65, BANKNIFTY: 30, FINNIFTY: 60}
-  strike_step: {NIFTY: 50, BANKNIFTY: 100}
-  expiry_preference: weekly          # weekly | monthly
+  lot_size: { NIFTY: 65, BANKNIFTY: 30, FINNIFTY: 60 }
+  strike_step: { NIFTY: 50, BANKNIFTY: 100 }
+  expiry_preference: weekly # weekly | monthly
   max_risk_per_structure_pct: 0.0075
   max_concurrent_structures: 4
   iv_history_db: ./data/iv_history.sqlite # Per user choice - initial structures
@@ -113,7 +113,7 @@ options:
     - BULL_CALL_SPREAD
     - BEAR_PUT_SPREAD
     - LONG_STRADDLE
-    - SHORT_STRANGLE_WINGED     # short strangle + protective wings (defined risk)
+    - SHORT_STRANGLE_WINGED # short strangle + protective wings (defined risk)
 
 # NIFTY Option Selling - Defined Risk Only
 nifty_options:
@@ -132,14 +132,42 @@ nifty_options:
   # Max concurrent NIFTY structures
   max_nifty_structures: 2
   # Strategy wings
-  iron_condor_wing_width: 300       # Rs distance for Iron Condor wings
-  spread_width: 200                 # Rs distance for credit spreads
+  iron_condor_wing_width: 300 # Rs distance for Iron Condor wings
+  spread_width: 200 # Rs distance for credit spreads
   # Risk per structure (% of account capital)
-  max_risk_per_pct: 0.01            # 1% max risk per NIFTY structure
+  max_risk_per_pct: 0.01 # 1% max risk per NIFTY structure
   # Avoid conditions
-  avoid_vol_expansion: true         # Don't sell when VIX expanding
-  vol_expansion_threshold: 5.0       # % VIX change to block entry
+  avoid_vol_expansion: true # Don't sell when VIX expanding
+  vol_expansion_threshold: 5.0 # % VIX change to block entry
   # Exit rules
-  profit_take_pct: 0.50             # Book profit at 50% of max credit
-  stop_loss_mult: 1.25              # Stop loss at 1.25x credit received
-  vix_spike_exit_pct: 10.0          # Close if VIX jumps >10% intraday
+  profit_take_pct: 0.50 # Book profit at 50% of max credit
+  stop_loss_mult: 1.25 # Stop loss at 1.25x credit received
+  vix_spike_exit_pct: 10.0 # Close if VIX jumps >10% intraday
+  # Minimum short-leg premium (per share): skip strikes where premium < this
+  #   (walk TOWARDS ATM to get adequate credit; reject if ATM also below floor)
+  min_short_premium: 5.0
+  # Maximum short-leg premium (per share): skip strikes where premium >= this
+  #   (walk further OTM to reduce risk; reject if can't get below cap)
+  max_short_premium: 15.0
+
+# BANKNIFTY Option Selling - Defined Risk Only
+banknifty_options:
+  enabled: true
+  min_lots_per_leg: 5
+  mode: positional
+  intraday_entry_start: "09:45"
+  intraday_entry_end: "14:30"
+  intraday_exit_by: "15:25"
+  positional_entry_days: [0, 1, 2, 3, 4]
+  positional_exit_expiry_cutoff: "15:15"
+  max_banknifty_structures: 2
+  iron_condor_wing_width: 600
+  spread_width: 400
+  max_risk_per_pct: 0.01
+  avoid_vol_expansion: true
+  vol_expansion_threshold: 5.0
+  profit_take_pct: 0.50
+  stop_loss_mult: 1.25
+  vix_spike_exit_pct: 10.0
+  min_short_premium: 5.0
+  max_short_premium: 15.0
