@@ -171,3 +171,79 @@ banknifty_options:
   vix_spike_exit_pct: 10.0
   min_short_premium: 5.0
   max_short_premium: 15.0
+
+# Timing Engine - Overextension & Market Exhaustion Filters
+timing_engine:
+  enabled: true
+  sentiment_refresh_minutes: 20
+
+  late_entry_filter:
+    enabled: true
+    # Price must be within X% of VWAP (e.g., 1.0%)
+    max_vwap_dist_pct: 1.0
+    # RSI levels: LONG fails if RSI > threshold, SHORT fails if RSI < threshold
+    rsi_threshold_long: 70
+    rsi_threshold_short: 30
+    # Price distance from day open (avoid chasing after big gaps)
+    max_move_from_open_pct: 1.2
+    # Max extension in ATRs from open (1.0 = 1 ATR away from open)
+    max_intraday_atr_extension: 1.0
+
+  market_exhaustion:
+    enabled: true
+    # Breadth ratio threshold (advances drop >X% of prior 20-session avg)
+    breadth_drop_threshold_pct: 8
+    # VIX intraday spike (>X% from yesterday close) signals risk-off
+    vix_intraday_spike_pct: 5
+
+  event_risk_mode:
+    enabled: true
+    # Reduce position size by this factor when event risk is elevated
+    size_multiplier: 0.5
+    # Soft cutoff: no new EQUITY entries after this time (option spreads allowed)
+    no_fresh_equity_after: "11:30"
+    # Trigger event-risk mode if sentiment flip (detected via AI review)
+    sentiment_flip_cooldown_minutes: 30
+
+  # [PHASE 2] AI Timing Review
+  ai_review:
+    enabled: false # Set to true after Phase 1 validation
+    provider: groq # groq | gemini | openrouter
+    model: "mixtral-8x7b-32768" # Groq model
+    temperature: 0.3 # Deterministic responses
+    timeout_sec: 3
+    fallback_on_error: true
+
+  # [PHASE 2] Dynamic Threshold Adjustment
+  dynamic_thresholds:
+    enabled: false # Set to true after Phase 1 analysis
+    adjustment_rules:
+      TREND_UP:
+        # In uptrends, be more lenient on VWAP deviation
+        max_vwap_dist_pct: 1.5
+        rsi_threshold_long: 75
+      TREND_DOWN:
+        # In downtrends, stricter on shorts
+        max_vwap_dist_pct: 0.8
+        rsi_threshold_short: 25
+      RANGE_LOW_VOL:
+        # In ranges, tight around VWAP
+        max_vwap_dist_pct: 0.7
+        max_intraday_atr_extension: 0.7
+      VOL_CONTRACTION:
+        max_vwap_dist_pct: 0.9
+        breadth_drop_threshold_pct: 5
+
+  # [PHASE 2] Sentiment Tracking
+  sentiment_tracking:
+    enabled: true
+    flip_detection: true
+    flip_cooldown_minutes: 30
+    tracking_window_trades: 20
+
+  # [PHASE 2] Backtest Configuration
+  backtest:
+    enabled: true
+    min_trades_for_analysis: 20
+    correlation_threshold: 0.6
+    output_dir: "./data/backtest"

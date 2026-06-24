@@ -38,6 +38,7 @@ from signals import flows as flows_mod
 from signals import leadership as lead_mod
 from signals import regime as regime_mod
 from signals import structure_map as sm
+from signals import timing as timing_mod
 from signals import verdict as verdict_mod
 
 app = Flask(__name__, static_folder=str(Path(__file__).parent))
@@ -978,6 +979,10 @@ def _generate_trade_alerts(data: dict) -> list[dict]:
         allow_longs = False
         allow_shorts = False
 
+    # --- TIMING ENGINE CONFIG ---
+    cfg = load_config()
+    timing_engine_cfg = cfg.get("timing_engine", {})
+
     if allow_longs:
         for stock in leaders[:8]:
             sym = stock["symbol"]
@@ -987,6 +992,130 @@ def _generate_trade_alerts(data: dict) -> list[dict]:
             # Logic Flaw Fix: Avoid "Late Entry" by skipping stocks overextended from 50DMA (>12%)
             if stock.get("pct_vs_50dma", 0) > 12.0:
                 continue
+
+            # --- NEW: Timing Gate (SRV-301) ---
+            timing_ok = True
+            timing_reason = ""
+            timing_result = {}
+            if timing_engine_cfg.get("enabled", True):
+                try:
+                    price = stock.get("ltp", 0)
+                    df_5m = feed.ohlc_cached(sym, interval="5m", period="1d")
+                    df_1d = feed.ohlc_cached(sym, interval="1d", period="6mo")
+                    vwap_5m = None
+                    if (
+                        df_5m is not None
+                        and not df_5m.empty
+                        and "vwap" in df_5m.columns
+                    ):
+                        vwap_5m = df_5m["vwap"].iloc[-1]
+
+                    market_breadth = {
+                        "advances": len(leaders),
+                        "declines": len(laggards),
+                    }
+
+                    timing_result = timing_mod.evaluate_timing_for_entry(
+                        symbol=sym,
+                        direction="LONG",
+                        price=price,
+                        config=timing_engine_cfg,
+                        df_5m=df_5m,
+                        df_1d=df_1d,
+                        vwap_5m=vwap_5m,
+                        ai_sentiment_current=ai_sentiment,
+                        market_breadth=market_breadth,
+                        vix_df=None,
+                    )
+                    timing_ok = timing_result.get("timing_ok", True)
+                    timing_reason = timing_result.get("reason", "")
+
+                    if not timing_ok:
+                        logging.debug(f"[TIMING] {sym} LONG skipped: {timing_reason}")
+                        continue
+                except Exception as e:
+                    logging.debug(f"[TIMING] {sym} check failed: {e}; failing open")
+                    # Fail-open: continue with timing_ok=True
+            # --- END TIMING GATE ---
+
+            # --- PHASE 2: AI Review (SRV-302) ---
+            ai_timing_ok = True
+            ai_confidence = 0.0
+            ai_reason = ""
+            applied_thresholds = {}
+            sentiment_flip_detected = False
+
+            if timing_engine_cfg.get("enabled", True):
+                # AI Review
+                if cfg.get("timing_engine", {}).get("ai_review", {}).get("enabled"):
+                    try:
+                        ai_result = timing_mod.review_timing_with_llm(
+                            symbol=sym,
+                            direction="LONG",
+                            price=price,
+                            timing_snapshot=timing_result.get("checks", {}),
+                            market_regime=regime.get("name", "UNKNOWN"),
+                            ai_sentiment=ai_sentiment,
+                            use_groq=cfg["timing_engine"]["ai_review"].get("provider")
+                            == "groq",
+                            groq_config=cfg["timing_engine"]["ai_review"],
+                        )
+                        ai_timing_ok = ai_result.get("ai_timing_ok", True)
+                        ai_confidence = ai_result.get("confidence", 0.0)
+                        ai_reason = ai_result.get("reason", "")
+
+                        if not ai_timing_ok:
+                            logging.info(
+                                f"[AI_REVIEW] {sym} LONG: AI rejected. {ai_reason}"
+                            )
+                            continue
+                    except Exception as e:
+                        logging.debug(f"[AI_REVIEW] {sym}: error ({e}); failing open")
+                        # Fail-open: continue with ai_timing_ok=True
+
+                # Dynamic Thresholds
+                if (
+                    cfg.get("timing_engine", {})
+                    .get("dynamic_thresholds", {})
+                    .get("enabled")
+                ):
+                    try:
+                        applied_thresholds = timing_mod.get_regime_adjusted_thresholds(
+                            market_regime=regime.get("name", "UNKNOWN"),
+                            base_config=cfg["timing_engine"].get(
+                                "late_entry_filter", {}
+                            ),
+                            dynamic_rules=cfg["timing_engine"][
+                                "dynamic_thresholds"
+                            ].get("adjustment_rules", {}),
+                        )
+                    except Exception as e:
+                        logging.debug(f"[DYNAMIC_THRESHOLDS] {sym}: error ({e})")
+
+                # Sentiment Flip Detection
+                if (
+                    cfg.get("timing_engine", {})
+                    .get("sentiment_tracking", {})
+                    .get("enabled")
+                ):
+                    try:
+                        flip_result = timing_mod.detect_sentiment_flip(
+                            current_sentiment=ai_sentiment,
+                            previous_sentiment=None,  # TODO: fetch from cache/journal
+                            window_trades=[],  # TODO: fetch last 20 trades from journal
+                        )
+                        if flip_result.get("flip_detected") and cfg["timing_engine"][
+                            "sentiment_tracking"
+                        ].get("flip_detection"):
+                            logging.warning(
+                                f"[SENTIMENT_FLIP] {flip_result.get('flip_type')}: blocked until {flip_result.get('trading_blocked_until')}"
+                            )
+                            sentiment_flip_detected = True
+                            if flip_result.get("block_type") == "equity":
+                                # Block equity entries
+                                continue
+                    except Exception as e:
+                        logging.debug(f"[SENTIMENT_FLIP] {sym}: error ({e})")
 
             conf = "HIGH" if q >= 5 else ("MEDIUM" if q >= 4 else "LOW")
             evidence = [
@@ -1012,6 +1141,15 @@ def _generate_trade_alerts(data: dict) -> list[dict]:
                     "no_trade_reason": None,
                     "atr": stock.get("atr"),
                     "evidence": evidence,
+                    "timing_ok": timing_ok,
+                    "timing_reason": timing_reason,
+                    "event_risk_mode": timing_result.get("event_risk_mode", False),
+                    "size_multiplier": timing_result.get("size_multiplier", 1.0),
+                    "ai_timing_ok": ai_timing_ok,
+                    "ai_confidence": ai_confidence,
+                    "ai_reason": ai_reason,
+                    "applied_thresholds": applied_thresholds,
+                    "sentiment_flip_detected": sentiment_flip_detected,
                 }
             )
 
@@ -1024,6 +1162,128 @@ def _generate_trade_alerts(data: dict) -> list[dict]:
             # Logic Flaw Fix: Avoid "Late Entry" on shorts (already collapsed stocks)
             if stock.get("pct_vs_50dma", 0) < -10.0:
                 continue
+
+            # --- NEW: Timing Gate (SRV-301) ---
+            timing_ok = True
+            timing_reason = ""
+            timing_result = {}
+            if timing_engine_cfg.get("enabled", True):
+                try:
+                    price = stock.get("ltp", 0)
+                    df_5m = feed.ohlc_cached(sym, interval="5m", period="1d")
+                    df_1d = feed.ohlc_cached(sym, interval="1d", period="6mo")
+                    vwap_5m = None
+                    if (
+                        df_5m is not None
+                        and not df_5m.empty
+                        and "vwap" in df_5m.columns
+                    ):
+                        vwap_5m = df_5m["vwap"].iloc[-1]
+
+                    market_breadth = {
+                        "advances": len(leaders),
+                        "declines": len(laggards),
+                    }
+
+                    timing_result = timing_mod.evaluate_timing_for_entry(
+                        symbol=sym,
+                        direction="SHORT",
+                        price=price,
+                        config=timing_engine_cfg,
+                        df_5m=df_5m,
+                        df_1d=df_1d,
+                        vwap_5m=vwap_5m,
+                        ai_sentiment_current=ai_sentiment,
+                        market_breadth=market_breadth,
+                        vix_df=None,
+                    )
+                    timing_ok = timing_result.get("timing_ok", True)
+                    timing_reason = timing_result.get("reason", "")
+
+                    if not timing_ok:
+                        logging.debug(f"[TIMING] {sym} SHORT skipped: {timing_reason}")
+                        continue
+                except Exception as e:
+                    logging.debug(f"[TIMING] {sym} check failed: {e}; failing open")
+                    # Fail-open: continue with timing_ok=True
+            # --- END TIMING GATE ---
+
+            # --- PHASE 2: AI Review (SRV-302) for SHORT ---
+            ai_timing_ok = True
+            ai_confidence = 0.0
+            ai_reason = ""
+            applied_thresholds = {}
+            sentiment_flip_detected = False
+
+            if timing_engine_cfg.get("enabled", True):
+                # AI Review
+                if cfg.get("timing_engine", {}).get("ai_review", {}).get("enabled"):
+                    try:
+                        ai_result = timing_mod.review_timing_with_llm(
+                            symbol=sym,
+                            direction="SHORT",
+                            price=price,
+                            timing_snapshot=timing_result.get("checks", {}),
+                            market_regime=regime.get("name", "UNKNOWN"),
+                            ai_sentiment=ai_sentiment,
+                            use_groq=cfg["timing_engine"]["ai_review"].get("provider")
+                            == "groq",
+                            groq_config=cfg["timing_engine"]["ai_review"],
+                        )
+                        ai_timing_ok = ai_result.get("ai_timing_ok", True)
+                        ai_confidence = ai_result.get("confidence", 0.0)
+                        ai_reason = ai_result.get("reason", "")
+
+                        if not ai_timing_ok:
+                            logging.info(
+                                f"[AI_REVIEW] {sym} SHORT: AI rejected. {ai_reason}"
+                            )
+                            continue
+                    except Exception as e:
+                        logging.debug(f"[AI_REVIEW] {sym}: error ({e}); failing open")
+
+                # Dynamic Thresholds
+                if (
+                    cfg.get("timing_engine", {})
+                    .get("dynamic_thresholds", {})
+                    .get("enabled")
+                ):
+                    try:
+                        applied_thresholds = timing_mod.get_regime_adjusted_thresholds(
+                            market_regime=regime.get("name", "UNKNOWN"),
+                            base_config=cfg["timing_engine"].get(
+                                "late_entry_filter", {}
+                            ),
+                            dynamic_rules=cfg["timing_engine"][
+                                "dynamic_thresholds"
+                            ].get("adjustment_rules", {}),
+                        )
+                    except Exception as e:
+                        logging.debug(f"[DYNAMIC_THRESHOLDS] {sym}: error ({e})")
+
+                # Sentiment Flip Detection
+                if (
+                    cfg.get("timing_engine", {})
+                    .get("sentiment_tracking", {})
+                    .get("enabled")
+                ):
+                    try:
+                        flip_result = timing_mod.detect_sentiment_flip(
+                            current_sentiment=ai_sentiment,
+                            previous_sentiment=None,
+                            window_trades=[],
+                        )
+                        if flip_result.get("flip_detected") and cfg["timing_engine"][
+                            "sentiment_tracking"
+                        ].get("flip_detection"):
+                            logging.warning(
+                                f"[SENTIMENT_FLIP] {flip_result.get('flip_type')}: blocked until {flip_result.get('trading_blocked_until')}"
+                            )
+                            sentiment_flip_detected = True
+                            if flip_result.get("block_type") == "equity":
+                                continue
+                    except Exception as e:
+                        logging.debug(f"[SENTIMENT_FLIP] {sym}: error ({e})")
 
             conf = "HIGH" if q >= 5 else ("MEDIUM" if q >= 4 else "LOW")
             evidence = [
@@ -1048,6 +1308,15 @@ def _generate_trade_alerts(data: dict) -> list[dict]:
                     "confidence": conf,
                     "no_trade_reason": None,
                     "evidence": evidence,
+                    "timing_ok": timing_ok,
+                    "timing_reason": timing_reason,
+                    "event_risk_mode": timing_result.get("event_risk_mode", False),
+                    "size_multiplier": timing_result.get("size_multiplier", 1.0),
+                    "ai_timing_ok": ai_timing_ok,
+                    "ai_confidence": ai_confidence,
+                    "ai_reason": ai_reason,
+                    "applied_thresholds": applied_thresholds,
+                    "sentiment_flip_detected": sentiment_flip_detected,
                 }
             )
 

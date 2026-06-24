@@ -1995,6 +1995,61 @@ def auto_enter_from_alerts(alerts: list[dict], cfg: dict | None = None) -> list[
                 )
                 continue
 
+            # --- NEW: Timing Gate Check (PT-401) ---
+            if not alert.get("timing_ok", True):
+                logging.info(
+                    f"[SKIP] {sym} {direction}: timing gate failed. Reason: {alert.get('timing_reason', 'unknown')}"
+                )
+                journal.log_skipped_trade(
+                    sym,
+                    direction,
+                    conf,
+                    "TIMING_OVEREXTENDED",
+                    regime,
+                    flow_bias,
+                    "timing_gate",
+                    alert.get("timing_reason", "unknown"),
+                )
+                continue
+            # --- END TIMING GATE CHECK ---
+
+            # --- PHASE 2: AI Review Gate (PT-402) ---
+            if not alert.get("ai_timing_ok", True):
+                logging.info(
+                    f"[SKIP] {sym} {direction}: AI review rejected. Reason: {alert.get('ai_reason', 'unknown')}"
+                )
+                journal.log_skipped_trade(
+                    sym,
+                    direction,
+                    conf,
+                    "AI_REVIEW_REJECTED",
+                    regime,
+                    flow_bias,
+                    "ai_review_gate",
+                    alert.get("ai_reason", "unknown"),
+                )
+                continue
+            # --- END AI REVIEW GATE ---
+
+            # --- PHASE 2: Sentiment Flip Gate (PT-403) ---
+            if alert.get("sentiment_flip_detected", False):
+                logging.info(
+                    f"[SKIP] {sym} {direction}: sentiment flip detected; trading blocked"
+                )
+                journal.log_skipped_trade(
+                    sym,
+                    direction,
+                    conf,
+                    "SENTIMENT_FLIP",
+                    regime,
+                    flow_bias,
+                    "sentiment_flip_gate",
+                    "Sentiment flip detected; trading blocked for equity",
+                )
+
+            # Respect event-risk size multiplier
+            size_multiplier = alert.get("size_multiplier", 1.0)
+
             entry_price = alert.get("entry_price")
             stop = alert.get("stop")
 
@@ -2065,7 +2120,9 @@ def auto_enter_from_alerts(alerts: list[dict], cfg: dict | None = None) -> list[
                 if lot_size > 1:
                     max_qty_by_cap = (max_qty_by_cap // lot_size) * lot_size
 
-                final_qty = min(size_result.qty, max_qty_by_cap)
+                # Apply size multiplier from timing gate (event risk mode)
+                adjusted_qty = int(size_result.qty * size_multiplier)
+                final_qty = min(adjusted_qty, max_qty_by_cap)
 
                 if final_qty > 0:
                     alert["qty"] = final_qty
@@ -2147,6 +2204,8 @@ def auto_enter_from_alerts(alerts: list[dict], cfg: dict | None = None) -> list[
                 "source_regime": regime,
                 "flow_bias": flow_bias,
                 "hold_minutes": None,
+                "event_risk_mode": alert.get("event_risk_mode", False),
+                "size_multiplier": size_multiplier,
             }
             if expiry_date:
                 new_trade["expiry_date"] = expiry_date
