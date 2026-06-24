@@ -561,12 +561,17 @@ def get_regime_adjusted_thresholds(
     regime_rules = dynamic_rules[market_regime]
     adjusted = {}
     multiplier = {}
+    multiplier_reasons = []
 
     # VWAP adjustment
     base_vwap = base_config.get("max_vwap_dist_pct", 1.0)
     adjusted_vwap = regime_rules.get("max_vwap_dist_pct", base_vwap)
     adjusted["max_vwap_dist_pct"] = adjusted_vwap
     multiplier["vwap"] = adjusted_vwap / base_vwap if base_vwap > 0 else 1.0
+    if adjusted_vwap != base_vwap:
+        multiplier_reasons.append(
+            f"VWAP {'relaxed' if adjusted_vwap > base_vwap else 'tightened'} ({adjusted_vwap}x)"
+        )
 
     # RSI thresholds
     base_rsi_long = base_config.get("rsi_threshold_long", 70)
@@ -575,6 +580,10 @@ def get_regime_adjusted_thresholds(
     multiplier["rsi_long"] = (
         adjusted_rsi_long / base_rsi_long if base_rsi_long > 0 else 1.0
     )
+    if adjusted_rsi_long != base_rsi_long:
+        multiplier_reasons.append(
+            f"RSI long threshold {'raised' if adjusted_rsi_long > base_rsi_long else 'lowered'} to {adjusted_rsi_long}"
+        )
 
     base_rsi_short = base_config.get("rsi_threshold_short", 30)
     adjusted_rsi_short = regime_rules.get("rsi_threshold_short", base_rsi_short)
@@ -582,21 +591,36 @@ def get_regime_adjusted_thresholds(
     multiplier["rsi_short"] = (
         adjusted_rsi_short / base_rsi_short if base_rsi_short > 0 else 1.0
     )
+    if adjusted_rsi_short != base_rsi_short:
+        multiplier_reasons.append(
+            f"RSI short threshold {'raised' if adjusted_rsi_short > base_rsi_short else 'lowered'} to {adjusted_rsi_short}"
+        )
 
     # ATR extension
     base_atr = base_config.get("max_intraday_atr_extension", 1.0)
     adjusted_atr = regime_rules.get("max_intraday_atr_extension", base_atr)
     adjusted["max_intraday_atr_extension"] = adjusted_atr
     multiplier["atr"] = adjusted_atr / base_atr if base_atr > 0 else 1.0
+    if adjusted_atr != base_atr:
+        multiplier_reasons.append(
+            f"ATR {'relaxed' if adjusted_atr > base_atr else 'tightened'} ({adjusted_atr}x)"
+        )
 
     # Breadth threshold
     base_breadth = base_config.get("breadth_drop_threshold_pct", 8)
     adjusted_breadth = regime_rules.get("breadth_drop_threshold_pct", base_breadth)
     adjusted["breadth_drop_threshold_pct"] = adjusted_breadth
     multiplier["breadth"] = adjusted_breadth / base_breadth if base_breadth > 0 else 1.0
+    if adjusted_breadth != base_breadth:
+        multiplier_reasons.append(f"Breadth threshold adjusted to {adjusted_breadth}%")
 
     adjusted["applied_regime"] = market_regime
     adjusted["multiplier"] = multiplier
+    adjusted["multiplier_reason"] = (
+        f"{market_regime}: {', '.join(multiplier_reasons)}"
+        if multiplier_reasons
+        else f"{market_regime}: default thresholds"
+    )
 
     return adjusted
 
@@ -621,6 +645,7 @@ def detect_sentiment_flip(
             "flip_timestamp": datetime,
             "flip_confidence": float (0.0-1.0),
             "trading_blocked_until": datetime,  # 30 min freeze
+            "block_type": "equity" | None,  # "equity" blocks equity entries
             "reason": str
         }
     """
@@ -689,5 +714,6 @@ def detect_sentiment_flip(
         "flip_timestamp": now if flip_detected else None,
         "flip_confidence": flip_confidence,
         "trading_blocked_until": trading_blocked_until,
+        "block_type": "equity" if flip_detected else None,
         "reason": reason,
     }

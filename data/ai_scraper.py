@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 # Ensure project root is on sys.path so config imports work
@@ -118,10 +119,19 @@ def _get_ai_config() -> Optional[dict]:
         return None
 
 
+# In-memory cache: skip dead providers for 300s after failure
+_dead_providers: dict[str, float] = {}
+_DEAD_PROVIDER_TTL = 300.0  # Re-try dead provider after 5 minutes
+
+
 def _create_llm_retry_session(
-    retries=5, backoff_factor=1, status_forcelist=(429, 500, 502, 503, 504)
+    retries=1, backoff_factor=0.5, status_forcelist=(429, 500, 502, 503, 504)
 ):
-    """Creates a requests session with retry logic for LLM API calls."""
+    """Creates a requests session with retry logic for LLM API calls.
+
+    Reduced retries to save time/tokens on failing providers.
+    SSL errors are not retried (immediate failover).
+    """
     session = requests.Session()
     retry = Retry(
         total=retries,
@@ -149,8 +159,11 @@ def call_llm(
     if not config:
         return (None, "None") if return_provider else None
 
-    # 1. Groq (Primary)
-    if config.get("groq_api_key"):
+    # 1. Groq (Primary) — skip if recently dead
+    groq_dead_until = _dead_providers.get("groq")
+    if groq_dead_until and time.time() < groq_dead_until:
+        logger.debug("Groq marked dead until %.0f; skipping", groq_dead_until)
+    elif config.get("groq_api_key"):
         try:
             session = _create_llm_retry_session()
             url = "https://api.groq.com/openai/v1/chat/completions"
@@ -176,18 +189,20 @@ def call_llm(
                 if return_provider
                 else res_val
             )
+        except requests.exceptions.SSLError as ssl_err:
+            # SSL errors: mark provider dead, skip retries
+            _dead_providers["groq"] = time.time() + _DEAD_PROVIDER_TTL
+            logger.warning(
+                f"Groq SSL error: {ssl_err}. Marking dead for {_DEAD_PROVIDER_TTL}s. Trying Gemini."
+            )
         except requests.exceptions.HTTPError as e:
             logger.warning(
-                f"Groq LLM HTTP error ({e.response.status_code}): {e.response.text}. Headers: {e.response.headers}. Trying Gemini."
+                f"Groq LLM HTTP error ({e.response.status_code}): {e.response.text}. Trying Gemini."
             )
         except json.JSONDecodeError as e:
-            logger.warning(
-                f"Groq LLM returned invalid JSON: {e}. Raw text: {text if 'text' in locals() else 'N/A'}. Trying Gemini."
-            )
+            logger.warning(f"Groq LLM returned invalid JSON: {e}. Trying Gemini.")
         except Exception as e:
-            logger.warning(
-                f"Groq LLM call failed unexpectedly: {e}. Trying Gemini.", exc_info=True
-            )
+            logger.warning(f"Groq LLM call failed: {e}. Trying Gemini.")
 
     # 2. Gemini (First Fallback)
     if config["local"] and config["local"]["llm"].get("api_key"):
@@ -388,8 +403,32 @@ def test_llm_providers():
     print("---------------------------\n")
 
 
-def scrape_url(url: str, prompt: str) -> Any:
-    """Extract structured data from a single URL using SaaS (preferred) or Local graph."""
+def _ensure_dict(data: Any) -> Optional[dict]:
+    """Convert ScrapeGraphAI pydantic response to dict if needed."""
+    if data is None:
+        return None
+    if isinstance(data, dict):
+        return data
+    # Pydantic v2: model_dump()
+    if hasattr(data, "model_dump"):
+        return data.model_dump()
+    # Pydantic v1: .dict()
+    if hasattr(data, "dict"):
+        return data.dict()
+    # Last resort: serialize/deserialize
+    try:
+        return json.loads(json.dumps(data, default=str))
+    except Exception:
+        logger.debug(f"Could not convert response to dict: {type(data).__name__}")
+        return None
+
+
+def scrape_url(url: str, prompt: str) -> Optional[dict]:
+    """Extract structured data from a single URL using SaaS (preferred) or Local graph.
+
+    Returns:
+        dict with extracted data, or None if extraction failed.
+    """
     config = _get_ai_config()
     if not config:
         return None
@@ -402,7 +441,7 @@ def scrape_url(url: str, prompt: str) -> Any:
             # In SaaS, extract() is used for structured data from URL
             result = sgai.extract(prompt=prompt, url=url)
             if result.status == "success":
-                return result.data
+                return _ensure_dict(result.data)
             else:
                 logger.warning(f"SaaS Extract failed for {url}: {result.error}")
         except Exception as e:
@@ -413,7 +452,7 @@ def scrape_url(url: str, prompt: str) -> Any:
         try:
             logger.info(f"AI Local Scrape fallback started for URL: {url}")
             graph = SmartScraperGraph(prompt=prompt, source=url, config=config["local"])
-            return graph.run()
+            return _ensure_dict(graph.run())
         except Exception as e:
             logger.error(f"Local SmartScraperGraph failed for {url}: {e}")
 

@@ -997,9 +997,9 @@ def _generate_trade_alerts(data: dict) -> list[dict]:
             timing_ok = True
             timing_reason = ""
             timing_result = {}
+            price = stock.get("ltp", 0)
             if timing_engine_cfg.get("enabled", True):
                 try:
-                    price = stock.get("ltp", 0)
                     df_5m = feed.ohlc_cached(sym, interval="5m", period="1d")
                     df_1d = feed.ohlc_cached(sym, interval="1d", period="6mo")
                     vwap_5m = None
@@ -1167,9 +1167,9 @@ def _generate_trade_alerts(data: dict) -> list[dict]:
             timing_ok = True
             timing_reason = ""
             timing_result = {}
+            price = stock.get("ltp", 0)
             if timing_engine_cfg.get("enabled", True):
                 try:
-                    price = stock.get("ltp", 0)
                     df_5m = feed.ohlc_cached(sym, interval="5m", period="1d")
                     df_1d = feed.ohlc_cached(sym, interval="1d", period="6mo")
                     vwap_5m = None
@@ -2659,7 +2659,7 @@ def _automation_worker():
     # Cooldown for LLM brain audit to manage API costs.
     # This means the LLM is consulted at most once every `_brain_audit_cooldown_seconds`.
     _last_brain_audit_ts = 0.0
-    _brain_audit_cooldown_seconds = 300  # Audit LLM at most once every 5 minutes
+    _brain_audit_cooldown_seconds = 900  # Audit LLM at most once every 15 minutes
     _log.info("[%s] Background worker started...", start_time)
 
     last_engine_run = 0

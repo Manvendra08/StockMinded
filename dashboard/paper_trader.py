@@ -2046,6 +2046,7 @@ def auto_enter_from_alerts(alerts: list[dict], cfg: dict | None = None) -> list[
                     "sentiment_flip_gate",
                     "Sentiment flip detected; trading blocked for equity",
                 )
+                continue
 
             # Respect event-risk size multiplier
             size_multiplier = alert.get("size_multiplier", 1.0)
