@@ -2,6 +2,8 @@
 
 Usage:
   python main.py dashboard          # run the 4-signal dashboard now
+  python main.py agot               # run the AGoT-enhanced dashboard
+  python main.py agot-test          # quick AGoT system validation (no data fetch)
   python main.py schedule           # run APScheduler loop (IST times from config)
   python main.py health             # quick data connectivity check
 """
@@ -28,6 +30,8 @@ from signals import leadership as lead_mod
 from signals import structure_map as sm
 from ops.alerts import Alerter, format_dashboard
 from ops.journal import Journal
+
+# AGoT imports (lazy-loaded in functions to avoid startup overhead)
 
 
 def run_dashboard(cfg: dict) -> None:
@@ -62,6 +66,201 @@ def run_dashboard(cfg: dict) -> None:
 
     msg = format_dashboard(regime_snap, flow_snap, structure, longs, shorts)
     alerter.send(msg)
+
+
+def run_agot_dashboard(cfg: dict) -> None:
+    """Run the AGoT-enhanced dashboard with multi-hypothesis regime classification,
+    signal ensemble voting, and feedback loop corrections."""
+    from intelligence.agot_integration import AGoTPipeline
+
+    alerter = Alerter(cfg["alerts"].get("telegram_bot_token"), cfg["alerts"].get("telegram_chat_id"))
+    journal = Journal(cfg["paths"]["journal_db"])
+
+    print("🧠 Running AGoT-enhanced dashboard...")
+
+    pipeline = AGoTPipeline(
+        config=cfg,
+        use_adaptive_regime=True,
+        use_signal_ensemble=True,
+        use_feedback_loop=True,
+    )
+
+    try:
+        result = pipeline.run_dashboard()
+    except Exception as e:
+        alerter.send(f"⚠️ AGoT dashboard failed: {e}")
+        raise
+
+    # Log to journal
+    journal.log_regime(result.regime_snapshot.to_dict())
+    journal.log_flow(result.flow_snapshot.to_dict())
+
+    # Format AGoT message for Telegram
+    msg = _format_agot_message(result)
+    alerter.send(msg)
+
+    # Also print to console
+    print(f"\n{'='*60}")
+    print(f"  AGoT Dashboard Complete ({result.compute_time_ms:.0f}ms)")
+    print(f"{'='*60}")
+    print(f"  Regime: {result.regime_snapshot.regime.value}")
+    if result.regime_agot:
+        print(f"  AGoT Confidence: {result.regime_agot.primary_confidence:.1%}")
+        print(f"  Ambiguity: {result.regime_agot.ambiguity_score:.1%}")
+        if result.regime_agot.alternatives:
+            print(f"  Alternatives: {result.regime_agot.alternatives}")
+    print(f"  Flow Bias: {result.flow_snapshot.smart_money_bias}")
+    print(f"  Final Bias: {result.final_bias} ({result.final_confidence:.1%})")
+    print(f"  Risk: {result.risk_adjustment}")
+    if result.corrections:
+        print(f"  Corrections: {len(result.corrections)} active")
+    print(f"  Longs: {[l.symbol for l in result.long_leaders[:5]]}")
+    print(f"  Shorts: {[s.symbol for s in result.short_laggards[:5]]}")
+    print(f"\n  Recommendation:\n  {result.recommendation}")
+
+
+def _format_agot_message(result) -> str:
+    """Format AGoT result for Telegram."""
+    lines = []
+    lines.append("*🧠 AGoT Morning Dashboard*")
+    lines.append("")
+
+    # Header with AGoT confidence
+    regime_val = result.regime_snapshot.regime.value if hasattr(result.regime_snapshot.regime, 'value') else str(result.regime_snapshot.regime)
+    lines.append(f"*Regime:* `{regime_val}`")
+    if result.regime_agot:
+        lines.append(f"  AGoT confidence: `{result.regime_agot.primary_confidence:.1%}`")
+        lines.append(f"  Ambiguity: `{result.regime_agot.ambiguity_score:.1%}`")
+
+    # Regime details
+    snap = result.regime_snapshot
+    lines.append(f"  trend={snap.trend_score:+d}  VIX={snap.vix} ({snap.vix_5d_change_pct:+.1f}% 5d)  ADX={snap.adx}")
+    if snap.breadth_pct_above_50dma is not None:
+        lines.append(f"  breadth>50DMA: {snap.breadth_pct_above_50dma}%")
+
+    # Alternatives
+    if result.regime_agot and result.regime_agot.alternatives:
+        alt_strs = [f"{a['regime']}({a['confidence']:.0%})" for a in result.regime_agot.alternatives[:2]]
+        lines.append(f"  alternatives: {', '.join(alt_strs)}")
+
+    lines.append("")
+
+    # Flow
+    flow = result.flow_snapshot
+    lines.append(f"*Flows* — bias: `{flow.smart_money_bias}`")
+    lines.append(f"  FII/DII 5d (₹Cr): {flow.fii_dii_5d_net_cr}")
+    lines.append(f"  PCR OI={flow.pcr_oi}  Vol={flow.pcr_vol}  MaxPain={flow.max_pain}")
+
+    lines.append("")
+
+    # AGoT Ensemble
+    lines.append(f"*AGoT Ensemble* — `{result.final_bias}` ({result.final_confidence:.0%})")
+    lines.append(f"  Risk: `{result.risk_adjustment}`")
+    if result.ensemble_result:
+        lines.append(f"  Agreement: `{result.ensemble_result.agreement_score:.0%}`")
+
+    # Corrections
+    if result.corrections:
+        lines.append("")
+        lines.append(f"*Corrections* ({len(result.corrections)} active):")
+        for c in result.corrections[:3]:
+            lines.append(f"  🚫 {c.get('type')}: {c.get('target')} — {c.get('reason', '')[:60]}")
+
+    lines.append("")
+
+    # Structure
+    if result.structure_plan:
+        lines.append(f"*Structure:* {result.structure_plan.primary}")
+        if result.structure_plan.secondary:
+            lines.append(f"  {result.structure_plan.secondary}")
+
+    lines.append("")
+
+    # Stock picks
+    if result.long_leaders:
+        top_longs = [l.symbol for l in result.long_leaders[:5]]
+        lines.append(f"*Longs:* {', '.join(top_longs)}")
+    if result.short_laggards:
+        top_shorts = [s.symbol for s in result.short_laggards[:5]]
+        lines.append(f"*Shorts:* {', '.join(top_shorts)}")
+
+    return "\n".join(lines)
+
+
+def run_agot_test(cfg: dict) -> None:
+    """Quick validation of the AGoT system without fetching market data."""
+    print("\n" + "=" * 60)
+    print("  AGoT System Validation Test")
+    print("=" * 60)
+
+    from signals.regime import Regime, RegimeSnapshot
+
+    # 1. Test ThoughtGraph
+    print("\n[1/5] ThoughtGraph Engine...")
+    from intelligence.thought_graph import ThoughtGraph, Evidence
+    graph = ThoughtGraph("validation_test")
+    obs = graph.add_thought("observation", "Market data", 0.9)
+    h1 = graph.branch_from(obs, "TREND_UP", branch_id="up")
+    h2 = graph.branch_from(obs, "TREND_DOWN", branch_id="down")
+    h1.add_evidence(Evidence("test", 1, True, 3.0))
+    h1.add_evidence(Evidence("test2", 1, True, 2.0))
+    best = graph.select_best()
+    assert best is not None and "TREND_UP" in best.label, "ThoughtGraph failed"
+    print(f"  ✅ ThoughtGraph works (best={best.label}, conf={best.confidence:.2f})")
+
+    # 2. Test AdaptiveRegime (unit-level, no data fetch)
+    print("\n[2/5] AdaptiveRegimeClassifier (unit tests)...")
+    from intelligence.adaptive_regime import AdaptiveRegimeClassifier
+    classifier = AdaptiveRegimeClassifier()
+    score = classifier._score_trend_for_regime(Regime.TREND_UP, 5)
+    assert score > 0, "TREND_UP scoring failed"
+    fallback = classifier._fallback_result("test")
+    assert fallback.primary == Regime.RANGE_LOW_VOL, "Fallback failed"
+    print(f"  ✅ AdaptiveRegime works (trend_score→TREND_UP={score:+.1f})")
+
+    # 3. Test SignalEnsemble
+    print("\n[3/5] SignalEnsemble...")
+    from intelligence.signal_ensemble import SignalEnsemble
+    ensemble = SignalEnsemble()
+    snapshot = RegimeSnapshot(
+        regime=Regime.TREND_UP, trend_score=4, vix=14.5,
+        vix_5d_change_pct=-2.0, vix_rank=25.0, adx=28.0,
+        breadth_pct_above_50dma=65.0, notes="test",
+    )
+    result = ensemble.evaluate(regime_result=snapshot, vix=14.5, breadth=65.0)
+    assert result.overall_bias in ("LONG", "SHORT", "NEUTRAL"), "Ensemble failed"
+    print(f"  ✅ SignalEnsemble works (bias={result.overall_bias}, conf={result.confidence:.2f})")
+
+    # 4. Test FeedbackLoop
+    print("\n[4/5] FeedbackLoop...")
+    from intelligence.feedback_loop import FeedbackLoop
+    loop = FeedbackLoop(cfg.get("paths", {}).get("journal_db", "./data/journal.sqlite"))
+    empty = loop._empty_analysis()
+    assert empty.total_trades == 0, "FeedbackLoop failed"
+    verdict = loop._verdict_from_win_rate(0.65)
+    assert verdict == "STRONG", f"Verdict wrong: {verdict}"
+    corrections = loop.get_corrections(lookback_days=30)
+    print(f"  ✅ FeedbackLoop works ({len(corrections)} active corrections)")
+
+    # 5. Test AGoTPipeline
+    print("\n[5/5] AGoTPipeline (creation)...")
+    from intelligence.agot_integration import AGoTPipeline, AGoTDashboardResult
+    pipeline = AGoTPipeline(
+        config={"paths": {}, "sectors": [], "alerts": {}},
+        use_adaptive_regime=True,
+        use_signal_ensemble=True,
+        use_feedback_loop=False,
+    )
+    assert pipeline.use_adaptive_regime is True, "Pipeline failed"
+    print(f"  ✅ AGoTPipeline works")
+
+    print("\n" + "=" * 60)
+    print("  🎉 All AGoT components validated successfully!")
+    print("=" * 60)
+    print("\n  Next steps:")
+    print("    python main.py agot          # Run AGoT dashboard with live data")
+    print("    python main.py dashboard     # Run original dashboard")
+    print("")
 
 
 def run_health(cfg: dict) -> None:
@@ -138,6 +337,10 @@ def main() -> int:
     cmd = sys.argv[1].lower()
     if cmd == "dashboard":
         run_dashboard(cfg)
+    elif cmd == "agot":
+        run_agot_dashboard(cfg)
+    elif cmd == "agot-test":
+        run_agot_test(cfg)
     elif cmd == "health":
         run_health(cfg)
     elif cmd == "schedule":

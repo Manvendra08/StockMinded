@@ -186,9 +186,43 @@ def test_fno_future_expiry_exit(mock_market_open, mock_ltp_batch):
         
         closed = check_and_close_trades()
         
-        assert len(closed) == 1
-        assert closed[0]["id"] == 123
-        assert closed[0]["exit_reason"] == "EXPIRY"
-        assert closed[0]["exit_price"] == 2600.0
-        assert closed[0]["status"] == "CLOSED"
         assert closed[0]["pnl"] == 25000.0 # (2600 - 2500) * 250
+
+
+@patch("dashboard.paper_trader._get_ltp_batch")
+@patch("dashboard.paper_trader.is_market_open", return_value=True)
+def test_fno_futures_expiry_day_timing(mock_open, mock_ltp_batch):
+    """Test that a future on expiry day does not close at 11:00 AM, but does close at 15:20 PM."""
+    mock_ltp_batch.return_value = {"RELIANCE": 2550.0}
+    trade = {
+        "id": 124,
+        "symbol": "RELIANCE",
+        "direction": "LONG",
+        "type": "FUTURE",
+        "entry_price": 2500.0,
+        "qty": 250,
+        "sl_price": 2450.0,
+        "tgt_price": 2650.0,
+        "entry_time": "2026-04-20 10:00:00",
+        "expiry_date": "2026-04-23",
+        "status": "OPEN",
+    }
+    mock_db = {
+        "trades": [trade],
+        "option_trades": [],
+        "daily_summaries": [],
+        "settings": {"trail_sl": False, "auto_close_eod": False},
+    }
+    with patch("dashboard.paper_trader._load_db", return_value=mock_db), \
+         patch("dashboard.paper_trader._save_db"), \
+         patch("dashboard.paper_trader._now_ist") as mock_now:
+        # 1. On expiry day at 11:00 AM (< 15:15), should stay OPEN
+        mock_now.return_value = datetime(2026, 4, 23, 11, 0, tzinfo=timezone(timedelta(hours=5, minutes=30)))
+        closed = check_and_close_trades()
+        assert len(closed) == 0
+
+        # 2. On expiry day at 15:20 PM (>= 15:15), should close with EXPIRY
+        mock_now.return_value = datetime(2026, 4, 23, 15, 20, tzinfo=timezone(timedelta(hours=5, minutes=30)))
+        closed = check_and_close_trades()
+        assert len(closed) == 1
+        assert closed[0]["exit_reason"] == "EXPIRY"

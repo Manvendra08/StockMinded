@@ -41,3 +41,34 @@ Follow below instructions before starting work:
 6. **Use Sequential Thinking MCP** before starting any work.
 
 7. **Review previous code line-by-line** for deprecated methods, unhandled edge cases, or logic bugs before fixing.
+
+## Input Token Optimization (Prompts & Context)
+
+### 1. Compress System Prompts
+- Remove filler: "Please", "I want you to", "Make sure to", "Your job is to"
+- Replace prose instructions with imperative bullets
+- Merge redundant rules into one authoritative statement
+
+**Before:** "Please make sure that when you respond to the user, you always try to be as concise as possible and avoid unnecessary verbosity."
+**After:** "Be concise. No filler."
+
+### 2. Trim Conversation History
+- Summarize resolved turns instead of keeping full transcripts
+- Drop intermediate reasoning steps once conclusions are confirmed
+- Keep only: current task context + unresolved decisions + key constraints
+- Prune user messages that are now irrelevant (e.g., "thanks", "ok got it")
+
+### 3. Reference, Don't Repeat
+- If a document is already in context, cite it — don't re-paste it
+- Use a short label: "See Schema A above" instead of re-including the schema
+- For structured data, send only relevant fields, not full objects
+
+### 4. Compress Few-Shot Examples
+- Use 1–2 tight examples, not 5 verbose ones
+- Strip all commentary from examples — just input → output pairs
+- If the pattern is simple, skip examples entirely; describe the rule instead
+
+### 5. Chunk Long Documents
+- Don't inject an entire document if only a section is relevant
+- Pre-filter before sending: extract the relevant rows, paragraphs, or fields
+- For RAG pipelines: retrieve narrowly, summarize before injecting

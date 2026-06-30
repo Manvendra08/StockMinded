@@ -28,6 +28,11 @@ _DHAN_OC_CACHE: dict[str, tuple[float, dict]] = {}
 _DHAN_MASTER_CACHE: pd.DataFrame | None = None
 _OPTION_CHAIN_SOURCE: dict[str, str] = {}
 
+# Track which data source served each symbol for dashboard visibility.
+# Populated by quote_batch(), ohlc(), universe_ohlc().
+_QUOTE_SOURCE: dict[str, str] = {}
+_OHLC_SOURCE: dict[str, str] = {}
+
 
 def _create_retry_session(
     retries=5, backoff_factor=1, status_forcelist=(500, 502, 503, 504)
@@ -396,13 +401,49 @@ def _dhan_ohlc(symbol: str, period: str = "1y", interval: str = "1d") -> pd.Data
 
 
 def quote_batch(symbols: list[str]) -> dict[str, dict]:
-    """Broker-first LTP/OHLC snapshot. Falls back silently per symbol."""
+    """LTP/OHLC snapshot. Shoonya primary (NFO futures for F&O stocks),
+    Dhan fallback, per symbol."""
     out: dict[str, dict] = {s: {} for s in symbols}
+
+    # Phase 0: Try Shoonya for each symbol (primary source)
+    try:
+        from data.shoonya_fetcher import get_shoonya
+
+        shoonya = get_shoonya()
+        if shoonya and shoonya.login():
+            for sym in list(out.keys()):
+                if out[sym].get("ltp"):
+                    continue  # already populated
+                try:
+                    # Try NFO futures quote first (gives full OHLC+OI for F&O stocks)
+                    q = shoonya.fetch_fno_quote(sym)
+                    if q and q.get("ltp"):
+                        out[sym] = q
+                        out[sym]["source"] = "shoonya_fno"
+                        _QUOTE_SOURCE[sym] = "shoonya"
+                        continue
+                except Exception:
+                    pass
+                try:
+                    # Fall back to spot quote (ltp only)
+                    q = shoonya.fetch_quote(sym)
+                    if q and q.get("ltp"):
+                        out[sym] = q
+                        out[sym]["source"] = "shoonya_quote"
+                        _QUOTE_SOURCE[sym] = "shoonya"
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    # Phase 1: Dhan fallback for symbols still empty
     if not _dhan_enabled():
         return out
     grouped: dict[str, list[int]] = {}
     reverse: dict[tuple[str, str], str] = {}
     for sym in symbols:
+        if out.get(sym, {}).get("ltp"):
+            continue  # already populated by Shoonya
         inst = _dhan_find_instrument(sym)
         if not inst:
             continue
@@ -412,6 +453,20 @@ def quote_batch(symbols: list[str]) -> dict[str, dict]:
         reverse[(seg, str(sid))] = sym
     if not grouped:
         return out
+    _dhan_fill_quotes(grouped, reverse, out)
+    # Track source for symbols filled by Dhan
+    for sym in symbols:
+        if out.get(sym, {}).get("ltp") and sym not in _QUOTE_SOURCE:
+            _QUOTE_SOURCE[sym] = "dhan"
+    return out
+
+
+def _dhan_fill_quotes(
+    grouped: dict[str, list[int]],
+    reverse: dict[tuple[str, str], str],
+    out: dict[str, dict],
+) -> None:
+    """Fill quote data from Dhan API for symbols in grouped/reverse."""
     try:
         data = {}
         for seg, ids in grouped.items():
@@ -425,7 +480,7 @@ def quote_batch(symbols: list[str]) -> dict[str, dict]:
         for seg, rows in (data or {}).items():
             for sid, item in (rows or {}).items():
                 sym = reverse.get((seg, str(sid)))
-                if not sym:
+                if not sym or out.get(sym, {}).get("ltp"):
                     continue
                 ohlc_data = item.get("ohlc") or {}
                 prev = ohlc_data.get("close")
@@ -445,7 +500,80 @@ def quote_batch(symbols: list[str]) -> dict[str, dict]:
                 }
     except Exception as e:
         print(f"[dhan quote_batch] failed: {e}")
-    return out
+
+
+def get_data_sources() -> dict:
+    """Return aggregated data source info for dashboard display.
+
+    Returns:
+        {
+            "primary": str,          # overall primary source label
+            "quotes": str | None,    # "shoonya" | "dhan" | "yfinance" | None
+            "ohlc": str | None,      # "dhan_historical" | "yfinance" | None
+            "option_chain": str | None,  # per-symbol or global source
+            "option_chain_detail": dict  # {symbol: source}
+        }
+    """
+    # Determine primary quote source from _QUOTE_SOURCE
+    quote_sources = set(_QUOTE_SOURCE.values())
+    quote_primary = None
+    if "shoonya" in quote_sources:
+        quote_primary = "shoonya"
+    elif "dhan" in quote_sources:
+        quote_primary = "dhan"
+
+    # Determine primary OHLC source from _OHLC_SOURCE
+    ohlc_sources = set(_OHLC_SOURCE.values())
+    ohlc_primary = None
+    if "dhan_historical" in ohlc_sources:
+        ohlc_primary = "dhan"
+    elif "yfinance" in ohlc_sources:
+        ohlc_primary = "yfinance"
+    elif "cache" in ohlc_sources:
+        ohlc_primary = "cache"
+
+    # Option chain sources — normalize to simple names for dashboard display
+    _OC_SOURCE_MAP = {
+        "shoonya": "shoonya",
+        "dhan_optionchain": "dhan",
+        "public_dhan_optionchain": "dhan",
+        "research360": "research360",
+        "research360+dhan_ltp": "dhan",
+        "ai_scraper": "ai",
+        "local_json": "local",
+    }
+    oc_sources = dict(_OPTION_CHAIN_SOURCE)
+    oc_primary = None
+    for sym, src in oc_sources.items():
+        if src and not oc_primary:
+            # Extract base source name (strip suffixes like :shoonya, /something)
+            base = src.split(":")[0].split("/")[0]
+            oc_primary = _OC_SOURCE_MAP.get(base, base)
+            break
+
+    # Compute overall primary label
+    if quote_primary == "shoonya":
+        overall = "shoonya"
+    elif oc_primary == "shoonya":
+        overall = "shoonya"
+    elif quote_primary:
+        overall = quote_primary
+    elif oc_primary:
+        overall = oc_primary
+    elif ohlc_primary:
+        overall = ohlc_primary
+    else:
+        overall = "yfinance"
+
+    return {
+        "primary": overall,
+        "quotes": quote_primary,
+        "ohlc": ohlc_primary,
+        "option_chain": oc_primary,
+        "option_chain_detail": oc_sources,
+        "quote_detail": dict(_QUOTE_SOURCE),
+        "ohlc_detail": dict(_OHLC_SOURCE),
+    }
 
 
 def ltp(symbol: str) -> float | None:
@@ -462,6 +590,72 @@ def ltp(symbol: str) -> float | None:
         return round(float(info.last_price), 2) if info.last_price else None
     except Exception:
         return None
+
+
+def quote_batch_public(symbols: list[str]) -> dict[str, dict]:
+    """Fetch LTP/prev_close/change_pct from Dhan public F&O page (no auth needed).
+
+    Scrapes https://dhan.co/futures-stocks-list/ which has a complete
+    list of all F&O stocks with live prices. No API key required.
+    Returns dict[symbol, {ltp, prev_close, change_pct, open, volume, source}]
+    or {} for symbols not found on the page.
+    """
+    import json
+    import re
+
+    out: dict[str, dict] = {s: {} for s in symbols}
+    sym_set = {s.upper().replace(".NS", "") for s in symbols}
+
+    try:
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            )
+        }
+        r = requests.get(
+            "https://dhan.co/futures-stocks-list/",
+            headers=headers,
+            timeout=10,
+        )
+        if r.status_code != 200:
+            return out
+
+        match = re.search(
+            r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>',
+            r.text,
+            re.DOTALL,
+        )
+        if not match:
+            return out
+
+        js = json.loads(match.group(1))
+        items = (
+            js.get("props", {}).get("pageProps", {}).get("listData", {}).get("data", [])
+        )
+
+        for item in items:
+            raw_sym = (item.get("Sym") or "").upper().strip()
+            if not raw_sym or raw_sym not in sym_set:
+                continue
+
+            ltp = item.get("Ltp")
+            prev_close = item.get("BcClose")
+            chg_pct = item.get("PPerchange")  # already in percent (0.313 = 0.313%)
+
+            out[raw_sym] = {
+                "ltp": ltp,
+                "prev_close": prev_close,
+                "change_pct": chg_pct,
+                "open": item.get("Open"),
+                "volume": item.get("Volume"),
+                "source": "dhan_public",
+            }
+    except Exception as e:
+        logging.getLogger(__name__).warning("[quote_batch_public] failed: %s", e)
+
+    return out
 
 
 def _dhan_expiry(symbol: str, underlying_scrip: int, underlying_seg: str) -> str | None:
@@ -667,13 +861,25 @@ def _option_chain_from_public_dhan(symbol: str) -> dict:
     opsum = fno_data.get("opsum", {})
     if not opsum:
         return {"records": {"data": []}}
+    import time as _time
+
     expiries = []
+    now_ts = int(_time.time())
     for k, v in opsum.items():
         if seg == 1 and v.get("exptype") != "M":
             continue
-        expiries.append(int(k))
+        try:
+            ts = int(k)
+        except (ValueError, TypeError):
+            continue
+        if ts > now_ts:
+            expiries.append(ts)
     expiries.sort()
     if not expiries:
+        logging.getLogger(__name__).debug(
+            "[option_chain public dhan] %s: no future expiries found in opsum; returning empty",
+            symbol,
+        )
         return {"records": {"data": []}}
     target_exp = expiries[0]
     api_url = "https://open-web-scanx.dhan.co/scanx/optchainactive"
@@ -1103,6 +1309,9 @@ _OHLC_CACHE_BUCKET = 0
 
 def ohlc(symbol: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
     """Daily/intraday OHLC. Dhan primary, yfinance fallback."""
+    import contextlib
+    import io
+
     try:
         df = _dhan_ohlc(symbol, period=period, interval=interval)
         if not df.empty:
@@ -1114,13 +1323,16 @@ def ohlc(symbol: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
     tkr = YF_SYMBOL.get(symbol) or (
         symbol if "." in symbol or "=" in symbol or "^" in symbol else f"{symbol}.NS"
     )
-    df = yf.download(
-        tkr, period=period, interval=interval, progress=False, auto_adjust=False
-    )
+    # Suppress yfinance's noisy "possibly delisted" stdout messages
+    with contextlib.redirect_stdout(io.StringIO()):
+        df = yf.download(
+            tkr, period=period, interval=interval, progress=False, auto_adjust=False
+        )
     df = _flatten_columns(df)
     if df.empty:
         return df
     df.index.name = "date"
+    df.attrs["source"] = "yfinance"
     return df
 
 
@@ -1271,6 +1483,85 @@ def option_chain(symbol: str = "NIFTY", _skip_atm_filter: bool = False) -> dict:
             )
         return {"records": {"data": []}}
 
+    def _try_shoonya() -> dict:
+        """Fetch option chain via Shoonya API (primary source)."""
+        try:
+            from data.shoonya_fetcher import get_shoonya
+
+            shoonya = get_shoonya()
+            if shoonya:
+                result = shoonya.fetch_option_chain(symbol)
+                if result and result.get("strikes"):
+                    # Convert Shoonya format to feed.py format (records.data)
+                    records = []
+                    for s in result["strikes"]:
+                        records.append(
+                            {
+                                "strikePrice": s["strike"],
+                                "expiryDate": s.get("expiry", result["expiry"]),
+                                "CE": {
+                                    "strikePrice": s["strike"],
+                                    "expiryDate": s.get("expiry", result["expiry"]),
+                                    "underlying": result["symbol"],
+                                    "identifier": f"{result['symbol']}{s['expiry']}{s['strike']}CE",
+                                    "openInterest": s.get("oi", 0),
+                                    "changeinOpenInterest": 0,
+                                    "totalTradedVolume": s.get("volume", 0),
+                                    "lastPrice": s.get("ltp", 0),
+                                    "bidPrice": s.get("bid", 0),
+                                    "askPrice": s.get("ask", 0),
+                                    "impliedVolatility": s.get("iv", 0),
+                                }
+                                if s["option_type"] == "CE"
+                                else None,
+                                "PE": {
+                                    "strikePrice": s["strike"],
+                                    "expiryDate": s.get("expiry", result["expiry"]),
+                                    "underlying": result["symbol"],
+                                    "identifier": f"{result['symbol']}{s['expiry']}{s['strike']}PE",
+                                    "openInterest": s.get("oi", 0),
+                                    "changeinOpenInterest": 0,
+                                    "totalTradedVolume": s.get("volume", 0),
+                                    "lastPrice": s.get("ltp", 0),
+                                    "bidPrice": s.get("bid", 0),
+                                    "askPrice": s.get("ask", 0),
+                                    "impliedVolatility": s.get("iv", 0),
+                                }
+                                if s["option_type"] == "PE"
+                                else None,
+                            }
+                        )
+                    # Remove None entries (where CE/PE wasn't the matching type)
+                    # Actually we need to merge CE/PE at each strike
+                    merged = {}
+                    for r in records:
+                        sk = r["strikePrice"]
+                        if sk not in merged:
+                            merged[sk] = {
+                                "strikePrice": sk,
+                                "expiryDate": r["expiryDate"],
+                            }
+                        if r["CE"]:
+                            merged[sk]["CE"] = r["CE"]
+                        if r["PE"]:
+                            merged[sk]["PE"] = r["PE"]
+                    data_out = {
+                        "records": {"data": list(merged.values())},
+                        "underlying_price": result["underlying_price"],
+                        "_source": "shoonya",
+                        "filtered": {
+                            "underlying_price": result["underlying_price"],
+                            "atm_strike": round(result["underlying_price"] / 50) * 50,
+                            "strikes": [s["strike"] for s in result["strikes"]],
+                        },
+                    }
+                    return data_out
+        except Exception as e:
+            logging.getLogger(__name__).warning(
+                "[option_chain shoonya] failed for %s: %s", symbol, e
+            )
+        return {"records": {"data": []}}
+
     def _try_external_fallbacks() -> dict:
         for fn in (_option_chain_from_local_file,):
             try:
@@ -1286,7 +1577,17 @@ def option_chain(symbol: str = "NIFTY", _skip_atm_filter: bool = False) -> dict:
                 )
         return {"records": {"data": []}}
 
-    # 1. Dhan (preferred: has full data including LTPs when user has API access).
+    # 0. Shoonya (PRIMARY: OAuth authenticated, has full data including LTPs).
+    try:
+        data = _try_shoonya()
+        if data and data.get("records", {}).get("data"):
+            return _save_chain(data)
+    except Exception as e:
+        logging.getLogger(__name__).warning(
+            "[option_chain shoonya] failed for %s: %s", symbol, e
+        )
+
+    # 1. Dhan (fallback 1: has full data including LTPs when user has API access).
     try:
         data = _option_chain_from_dhan(symbol)
         if data and data.get("records", {}).get("data"):
@@ -1296,7 +1597,7 @@ def option_chain(symbol: str = "NIFTY", _skip_atm_filter: bool = False) -> dict:
             "[option_chain dhan] failed for %s: %s", symbol, e
         )
 
-    # 1.5. Public Dhan Scraper (bypass-safe, unauthenticated, full data).
+    # 1.5. Public Dhan Scraper (fallback 2: bypass-safe, unauthenticated, full data).
     try:
         data = _option_chain_from_public_dhan(symbol)
         if data and data.get("records", {}).get("data"):
@@ -1853,10 +2154,120 @@ def _cached_ohlc(
     if key in _OHLC_CACHE and not _OHLC_CACHE[key].empty:
         return _OHLC_CACHE[key].copy()
 
+    # Try Shoonya TPSeries for intraday intervals (1m, 5m, 15m, 30m, 60m)
+    if interval in ("1m", "5m", "15m", "30m", "60m", "1h", "1H"):
+        try:
+            from data.shoonya_fetcher import get_shoonya
+
+            shoonya = get_shoonya()
+            if shoonya and shoonya.login():
+                # Need to resolve symbol to exchange + token
+                # For indices, use NSE; for stocks, try NSE spot
+                exchange = "NSE"
+                token = _resolve_shoonya_token(shoonya, symbol, exchange)
+                if token:
+                    from datetime import datetime, timedelta
+
+                    end_dt = datetime.now()
+                    start_dt = end_dt - timedelta(days=_period_to_days(period))
+                    start_str = start_dt.strftime("%d-%m-%Y %H:%M:%S")
+                    end_str = end_dt.strftime("%d-%m-%Y %H:%M:%S")
+                    interval_min = _interval_to_minutes(interval)
+                    if interval_min:
+                        resp = shoonya.get_historical_candles(
+                            exchange, token, interval_min, start_str, end_str
+                        )
+                        if resp and resp.get("stat") == "Ok" and resp.get("values"):
+                            df = _shoonya_candles_to_df(resp["values"])
+                            if not df.empty:
+                                _OHLC_CACHE[key] = df.copy()
+                                return df
+        except Exception as e:
+            import logging
+
+            logging.getLogger(__name__).debug(
+                "Shoonya TPSeries failed for %s: %s", symbol, e
+            )
+
     df = ohlc(symbol, period=period, interval=interval)
     if not df.empty:
         _OHLC_CACHE[key] = df.copy()
     return df
+
+
+def _resolve_shoonya_token(shoonya, symbol: str, exchange: str) -> str | None:
+    """Resolve a symbol to its Shoonya token."""
+    try:
+        # Try known index tokens first
+        from data.shoonya_fetcher import _INDEX_NSE_TOKENS, _INDEX_SPOT_NAMES
+
+        base = symbol.upper().split()[0]
+        if base in _INDEX_NSE_TOKENS:
+            return _INDEX_NSE_TOKENS[base]
+        # Search via SearchScrip
+        res = shoonya._search_scrip(exchange, base)
+        if res and res.get("stat") == "Ok":
+            values = res.get("values", [])
+            if values:
+                return values[0].get("token") or values[0].get("tok")
+    except Exception:
+        pass
+    return None
+
+
+def _period_to_days(period: str) -> int:
+    period = period.lower()
+    if period.endswith("d"):
+        return int(period[:-1])
+    if period.endswith("mo") or period.endswith("m"):
+        return int(period[:-2]) * 30
+    if period.endswith("y"):
+        return int(period[:-1]) * 365
+    return 30  # default
+
+
+def _interval_to_minutes(interval: str) -> int | None:
+    interval = interval.lower()
+    if interval.endswith("m"):
+        return int(interval[:-1])
+    if interval.endswith("h"):
+        return int(interval[:-1]) * 60
+    if interval == "1d" or interval == "1D":
+        return 1440
+    return None
+
+
+def _shoonya_candles_to_df(values: list) -> pd.DataFrame:
+    """Convert Shoonya TPSeries values to DataFrame.
+    Shoonya returns: [timestamp, open, high, low, close, volume, oi]
+    """
+    if not values:
+        return pd.DataFrame()
+    rows = []
+    for v in values:
+        if len(v) >= 6:
+            try:
+                ts = datetime.strptime(v[0], "%d-%m-%Y %H:%M:%S")
+                rows.append(
+                    {
+                        "timestamp": ts,
+                        "open": float(v[1]),
+                        "high": float(v[2]),
+                        "low": float(v[3]),
+                        "close": float(v[4]),
+                        "volume": float(v[5]),
+                    }
+                )
+            except Exception:
+                continue
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    df.set_index("timestamp", inplace=True)
+    return df
+
+
+from datetime import datetime, timedelta, timezone
 
 
 def ohlc_cached(symbol: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
@@ -1872,16 +2283,29 @@ def ohlc_cached(symbol: str, period: str = "1y", interval: str = "1d") -> pd.Dat
 
 
 def sector_ohlc(sectors: list[str], period: str = "6mo") -> dict[str, pd.DataFrame]:
-    return {s: ohlc_cached(s, period=period) for s in sectors}
+    """Fetch OHLC for sector indices, gracefully handling individual failures."""
+    result = {}
+    for s in sectors:
+        try:
+            df = ohlc_cached(s, period=period)
+            if df is not None and not df.empty:
+                result[s] = df
+        except Exception:
+            continue
+    return result
 
 
 def universe_ohlc(tickers: list[str], period: str = "6mo") -> dict[str, pd.DataFrame]:
+    import contextlib
+    import io
     import os
     import time
     from datetime import timedelta, timezone
     from pathlib import Path
 
     import yfinance as yf
+
+    _quiet = contextlib.redirect_stdout(io.StringIO())
 
     cache_dir = Path("data/cache/ohlc")
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -1910,10 +2334,15 @@ def universe_ohlc(tickers: list[str], period: str = "6mo") -> dict[str, pd.DataF
                 continue
             try:
                 results[t] = pd.read_pickle(cache_file)
+                _OHLC_SOURCE[t] = results[t].attrs.get("source", "cache")
             except Exception:
                 missing_tickers.append(t)
         else:
             missing_tickers.append(t)
+
+    # Quick return if everything was cached
+    if not missing_tickers:
+        return results
 
     if not missing_tickers:
         return results
@@ -1925,6 +2354,8 @@ def universe_ohlc(tickers: list[str], period: str = "6mo") -> dict[str, pd.DataF
             try:
                 sym_df = _dhan_ohlc(t, period=period, interval="1d")
                 if not sym_df.empty:
+                    _OHLC_SOURCE[t] = "dhan_historical"
+                    sym_df.attrs["source"] = "dhan_historical"
                     sym_df.to_pickle(cache_dir / f"{t}_{today_str}.pkl")
                     results[t] = sym_df
                     continue
@@ -1956,24 +2387,15 @@ def universe_ohlc(tickers: list[str], period: str = "6mo") -> dict[str, pd.DataF
         if "close" not in sym_df.columns:
             return False
         sym_df.index.name = "date"
+        _OHLC_SOURCE[sym] = "yfinance"
+        sym_df.attrs["source"] = "yfinance"
         sym_df.to_pickle(cache_dir / f"{sym}_{today_str}.pkl")
         results[sym] = sym_df
         return True
 
     for chunk in chunks:
         try:
-            df_dict = yf.download(
-                tickers=" ".join(chunk),
-                period=period,
-                group_by="ticker",
-                threads=False,
-                progress=False,
-            )
-            time.sleep(1)  # rate limit spacing
-        except Exception as e:
-            print(f"yfinance batch download failed, retrying once: {e}")
-            time.sleep(2)
-            try:
+            with _quiet:
                 df_dict = yf.download(
                     tickers=" ".join(chunk),
                     period=period,
@@ -1981,6 +2403,19 @@ def universe_ohlc(tickers: list[str], period: str = "6mo") -> dict[str, pd.DataF
                     threads=False,
                     progress=False,
                 )
+            time.sleep(1)  # rate limit spacing
+        except Exception as e:
+            print(f"yfinance batch download failed, retrying once: {e}")
+            time.sleep(2)
+            try:
+                with _quiet:
+                    df_dict = yf.download(
+                        tickers=" ".join(chunk),
+                        period=period,
+                        group_by="ticker",
+                        threads=False,
+                        progress=False,
+                    )
             except Exception:
                 failed += len(chunk)
                 continue
@@ -2066,13 +2501,14 @@ def universe_ohlc(tickers: list[str], period: str = "6mo") -> dict[str, pd.DataF
                 sym = yf_t.replace(".NS", "")
                 try:
                     # Retry individual ticker for parsing sanity.
-                    one = yf.download(
-                        tickers=yf_t,
-                        period=period,
-                        group_by="ticker",
-                        threads=False,
-                        progress=False,
-                    )
+                    with _quiet:
+                        one = yf.download(
+                            tickers=yf_t,
+                            period=period,
+                            group_by="ticker",
+                            threads=False,
+                            progress=False,
+                        )
                     one = _flatten_columns(one)
                     if _persist_symbol(sym, one):
                         fetched += 1
@@ -2135,3 +2571,73 @@ def fetch_trendlyne_options_kpis(symbol: str = "NIFTY") -> dict:
     except Exception as e:
         logging.getLogger(__name__).warning(f"Trendlyne fetch failed for {symbol}: {e}")
         return {}
+
+
+def fetch_shoonya_security_info(exchange: str, token: str) -> dict | None:
+    """
+    Fetch contract specifications from Shoonya (GetSecurityInfo).
+    Returns dict with: ls (lot_size), ti (tick_size), frzqty (freeze_qty),
+    lct/uct (circuit limits), exd (expiry).
+    """
+    try:
+        from data.shoonya_fetcher import get_shoonya
+
+        shoonya = get_shoonya()
+        if shoonya and shoonya.login():
+            return shoonya.get_security_info(exchange, token)
+    except Exception as e:
+        logging.getLogger(__name__).debug("Shoonya security info fetch failed: %s", e)
+    return None
+
+
+def fetch_shoonya_index_list() -> list[dict]:
+    """
+    Fetch list of indices from Shoonya (GetIndexList).
+    Returns list of {symname, token, exch} dicts.
+    """
+    try:
+        from data.shoonya_fetcher import get_shoonya
+
+        shoonya = get_shoonya()
+        if shoonya and shoonya.login():
+            resp = shoonya.get_index_list()
+            if resp and resp.get("stat") == "Ok":
+                return resp.get("values", [])
+    except Exception as e:
+        logging.getLogger(__name__).debug("Shoonya index list fetch failed: %s", e)
+    return []
+
+
+def fetch_shoonya_historical_candles(
+    exchange: str, token: str, interval: int, start_time: str, end_time: str
+) -> dict | None:
+    """
+    Fetch OHLCV candles from Shoonya (TPSeries).
+    """
+    try:
+        from data.shoonya_fetcher import get_shoonya
+
+        shoonya = get_shoonya()
+        if shoonya and shoonya.login():
+            return shoonya.get_historical_candles(
+                exchange, token, interval, start_time, end_time
+            )
+    except Exception as e:
+        logging.getLogger(__name__).debug("Shoonya TPSeries fetch failed: %s", e)
+    return None
+
+
+def fetch_shoonya_market_quote(exchange: str, token: str) -> dict | None:
+    """
+    Fetch full market quote with depth from Shoonya (GetQuotes).
+    Returns dict with lp, o,h,l,c,v, oi, poi, and Best 5 bid/ask arrays.
+    """
+    try:
+        from data.shoonya_fetcher import get_shoonya
+
+        shoonya = get_shoonya()
+        if shoonya and shoonya.login():
+            return shoonya.get_market_quote(exchange, token)
+    except Exception as e:
+        logging.getLogger(__name__).debug("Shoonya market quote fetch failed: %s", e)
+    return None

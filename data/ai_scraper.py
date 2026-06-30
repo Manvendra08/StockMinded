@@ -14,7 +14,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 import requests
@@ -34,6 +34,9 @@ except ImportError:
 from config.loader import load_config
 
 logger = logging.getLogger(__name__)
+
+# Suppress urllib3 retry noise from failing providers (e.g. Groq SSL errors)
+logging.getLogger("urllib3.connectionpool").setLevel(logging.ERROR)
 
 
 def _get_ai_config() -> Optional[dict]:
@@ -124,6 +127,19 @@ _dead_providers: dict[str, float] = {}
 _DEAD_PROVIDER_TTL = 300.0  # Re-try dead provider after 5 minutes
 
 
+class TLS12Adapter(HTTPAdapter):
+    """HTTP Adapter that forces TLS 1.2 to bypass Windows OpenSSL/urllib3 TLS 1.3 handshake bugs."""
+
+    def init_poolmanager(self, *args, **kwargs):
+        import ssl
+
+        context = ssl.create_default_context()
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        context.maximum_version = ssl.TLSVersion.TLSv1_2
+        kwargs["ssl_context"] = context
+        return super().init_poolmanager(*args, **kwargs)
+
+
 def _create_llm_retry_session(
     retries=1, backoff_factor=0.5, status_forcelist=(429, 500, 502, 503, 504)
 ):
@@ -141,10 +157,45 @@ def _create_llm_retry_session(
         status_forcelist=status_forcelist,
         allowed_methods=["HEAD", "GET", "OPTIONS", "POST"],
     )
-    adapter = HTTPAdapter(max_retries=retry)
+    adapter = TLS12Adapter(max_retries=retry)
     session.mount("http://", adapter)
     session.mount("https://", adapter)
     return session
+
+
+def _mark_provider_dead(provider: str, ttl: float = _DEAD_PROVIDER_TTL) -> None:
+    _dead_providers[provider] = time.time() + ttl
+
+
+def _is_ssl_transport_error(exc: Exception) -> bool:
+    text = repr(exc).lower()
+    return (
+        "ssl" in text or "unexpected_eof_while_reading" in text or "ssleoferror" in text
+    )
+
+
+def _call_chat_completion(
+    *,
+    session: requests.Session,
+    url: str,
+    headers: dict[str, str],
+    model: str,
+    system_prompt: str,
+    prompt: str,
+    json_mode: bool,
+    timeout: int = 15,
+) -> str:
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ],
+        "response_format": {"type": "json_object"} if json_mode else None,
+    }
+    resp = session.post(url, headers=headers, json=payload, timeout=timeout)
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["message"]["content"]
 
 
 def call_llm(
@@ -154,7 +205,7 @@ def call_llm(
     max_tokens: int | None = None,
     return_provider: bool = False,
 ) -> Any:
-    """Universal LLM call with fallback: Groq -> Gemini -> OpenRouter."""
+    """Universal LLM call with fallback: Groq -> Gemini -> OpenRouter (6 models)."""
     config = _get_ai_config()
     if not config:
         return (None, "None") if return_provider else None
@@ -164,6 +215,7 @@ def call_llm(
     if groq_dead_until and time.time() < groq_dead_until:
         logger.debug("Groq marked dead until %.0f; skipping", groq_dead_until)
     elif config.get("groq_api_key"):
+        logger.info("LLM #1: llama-3.3-70b-versatile [provider=Groq]")
         try:
             session = _create_llm_retry_session()
             url = "https://api.groq.com/openai/v1/chat/completions"
@@ -184,6 +236,7 @@ def call_llm(
             resp.raise_for_status()
             text = resp.json()["choices"][0]["message"]["content"]
             res_val = json.loads(text) if json_mode else text
+            logger.info("LLM success: llama-3.3-70b-versatile [Groq]")
             return (
                 (res_val, "Groq (llama-3.3-70b-versatile)")
                 if return_provider
@@ -211,6 +264,7 @@ def call_llm(
             api_key = config["local"]["llm"]["api_key"]
             model_raw = config["local"]["llm"].get("model", "gemini-1.5-flash")
             model_name = model_raw.split("/")[-1] if "/" in model_raw else model_raw
+            logger.info("LLM #2: %s [provider=Gemini]", model_name)
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
             generation_config = {"response_mime_type": "application/json"}
             if max_tokens is not None:
@@ -245,6 +299,7 @@ def call_llm(
                 raise ValueError("Empty text part in Gemini response")
 
             res_val = json.loads(text) if json_mode else text
+            logger.info("LLM success: %s [Gemini]", model_name)
             return (res_val, f"Gemini ({model_name})") if return_provider else res_val
         except requests.exceptions.HTTPError as e:
             logger.warning(
@@ -260,47 +315,83 @@ def call_llm(
                 exc_info=True,
             )
 
-    # 3. OpenRouter Free (Fallback 2)
+    # 3. OpenRouter Free Models (Fallback 2+) — try multiple models
+    _OPENROUTER_FALLBACK_MODELS = (
+        "meta-llama/llama-3.1-70b-instruct:free",
+        "qwen/qwen2.5-7b-instruct:free",
+        "mistralai/mistral-7b-instruct:free",
+        "nvidia/nemotron-3-super-120b-a12b:free",
+        "nvidia/nemotron-3-ultra-550b-a55b:free",
+        "google/gemini-2.0-flash-exp:free",
+    )
     if config.get("openrouter_api_key"):
-        try:
-            session = _create_llm_retry_session()
-            url = "https://openrouter.ai/api/v1/chat/completions"
-            headers = {
-                "Authorization": f"Bearer {config['openrouter_api_key']}",
-                "HTTP-Referer": "http://localhost:5050",
-                "X-Title": "StockMinded",
-                "Content-Type": "application/json",
-            }
-            payload = {
-                "model": "google/gemini-2.0-flash-exp:free",
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": prompt},
-                ],
-                "response_format": {"type": "json_object"} if json_mode else None,
-            }
-            resp = session.post(url, headers=headers, json=payload, timeout=15)
-            resp.raise_for_status()
-            text = resp.json()["choices"][0]["message"]["content"]
-            res_val = json.loads(text) if json_mode else text
-            return (
-                (res_val, "OpenRouter (google/gemini-2.0-flash-exp:free)")
-                if return_provider
-                else res_val
-            )
-        except requests.exceptions.HTTPError as e:
-            logger.error(
-                f"OpenRouter LLM HTTP error ({e.response.status_code}): {e.response.text}. Headers: {e.response.headers}."
-            )
-        except json.JSONDecodeError as e:
-            logger.error(
-                f"OpenRouter LLM returned invalid JSON: {e}. Raw text: {text if 'text' in locals() else 'N/A'}."
-            )
-        except Exception as e:
-            logger.error(
-                f"OpenRouter LLM call failed unexpectedly: {e}.", exc_info=True
-            )
+        for model_id in _OPENROUTER_FALLBACK_MODELS:
+            logger.info("LLM #3: %s [provider=OpenRouter]", model_id)
+            try:
+                session = _create_llm_retry_session()
+                url = "https://openrouter.ai/api/v1/chat/completions"
+                headers = {
+                    "Authorization": f"Bearer {config['openrouter_api_key']}",
+                    "HTTP-Referer": "http://localhost:5050",
+                    "X-Title": "StockMinded",
+                    "Content-Type": "application/json",
+                }
+                payload = {
+                    "model": model_id,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "response_format": {"type": "json_object"} if json_mode else None,
+                    "max_tokens": max_tokens,
+                }
+                resp = session.post(url, headers=headers, json=payload, timeout=15)
+                resp.raise_for_status()
 
+                if not resp.content or not resp.content.strip():
+                    raise ValueError("empty response body (likely rate-limited)")
+                resp_data = resp.json()
+
+                if "error" in resp_data:
+                    err_msg = resp_data["error"]
+                    if isinstance(err_msg, dict):
+                        err_msg = err_msg.get("message", str(err_msg))
+                    logger.warning(
+                        f"OpenRouter ({model_id}) upstream error: {err_msg}. Trying next."
+                    )
+                else:
+                    text = resp_data["choices"][0]["message"]["content"]
+                    if not text or not text.strip():
+                        raise ValueError(
+                            f"OpenRouter ({model_id}) returned empty content"
+                        )
+                    res_val = json.loads(text) if json_mode else text
+                    logger.info("LLM success: %s [OpenRouter]", model_id)
+                    return (
+                        (res_val, f"OpenRouter ({model_id})")
+                        if return_provider
+                        else res_val
+                    )
+            except requests.exceptions.HTTPError as e:
+                logger.warning(
+                    f"OpenRouter ({model_id}) HTTP error ({e.response.status_code}): {e.response.text}. Trying next."
+                )
+            except json.JSONDecodeError as e:
+                logger.warning(
+                    f"OpenRouter ({model_id}) empty/invalid response: {e}. Trying next."
+                )
+            except (KeyError, IndexError) as e:
+                logger.warning(
+                    f"OpenRouter ({model_id}) response missing fields: {e}. Trying next."
+                )
+            except ValueError as e:
+                logger.warning(f"OpenRouter ({model_id}) {e}. Trying next.")
+            except Exception as e:
+                logger.warning(
+                    f"OpenRouter ({model_id}) call failed: {e}. Trying next."
+                )
+
+    logger.warning("LLM scan exhausted: all 8 models failed")
     return (None, "None") if return_provider else None
 
 
@@ -404,17 +495,47 @@ def test_llm_providers():
 
 
 def _ensure_dict(data: Any) -> Optional[dict]:
-    """Convert ScrapeGraphAI pydantic response to dict if needed."""
+    """Convert ScrapeGraphAI pydantic response to dict if needed.
+
+    Handles pydantic v1 (BaseModel.dict), pydantic v2 (BaseModel.model_dump),
+    and nested pydantic models recursively.
+    """
     if data is None:
         return None
     if isinstance(data, dict):
         return data
-    # Pydantic v2: model_dump()
+
+    # Pydantic v2: model_dump(mode="json") recursively converts all fields
     if hasattr(data, "model_dump"):
-        return data.model_dump()
+        try:
+            return data.model_dump(mode="json")
+        except Exception:
+            pass
+        try:
+            return data.model_dump()
+        except Exception:
+            pass
+
     # Pydantic v1: .dict()
     if hasattr(data, "dict"):
-        return data.dict()
+        try:
+            return data.dict()
+        except Exception:
+            pass
+
+    # Try converting via __dict__ or vars()
+    if hasattr(data, "__dict__"):
+        result = {}
+        for k, v in data.__dict__.items():
+            if not k.startswith("_"):
+                result[k] = (
+                    _ensure_dict(v)
+                    if hasattr(v, "model_dump") or hasattr(v, "dict")
+                    else v
+                )
+        if result:
+            return result
+
     # Last resort: serialize/deserialize
     try:
         return json.loads(json.dumps(data, default=str))
@@ -775,7 +896,6 @@ def _is_relevant_to_indian_market(title: str) -> bool:
     fallback_markers = (
         "moneycontrol",
         "livemint",
-        "tradingview",
         "icici",
         "hdfc",
         "axis",
@@ -1190,111 +1310,6 @@ def _fetch_and_parse_rss(query: str, recency_cutoff: float) -> list[tuple[str, s
     return headlines
 
 
-def _fetch_tradingview_news(symbols: list[str] = None) -> list[tuple[str, str]]:
-    """Fetch recent headlines from TradingView news-flow for Indian symbols.
-
-    Args:
-        symbols: List of NSE symbols (e.g., ["NIFTY", "BANKNIFTY"]).
-                Fetches from news-flow for primary symbol.
-    """
-    if not symbols:
-        symbols = ["NIFTY"]
-    headlines = []
-    symbol = symbols[0]  # Use primary symbol for news-flow
-    url = f"https://in.tradingview.com/news-flow/?symbol=NSE:{symbol}"
-
-    try:
-        logger.info(f"Fetching TradingView news-flow for {symbol}...")
-        # Use curl_cffi if available to handle SSL protocol errors (JA3 fingerprinting)
-        try:
-            from curl_cffi import requests as curl_requests
-
-            session = curl_requests.Session(impersonate="chrome120")
-            resp = session.get(url, timeout=20)
-        except ImportError:
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.9",
-                "DNT": "1",
-                "Connection": "keep-alive",
-                "Upgrade-Insecure-Requests": "1",
-            }
-            resp = requests.get(url, headers=headers, timeout=20)
-
-        resp.raise_for_status()
-        html_content = resp.text
-        # Extract news items from DOM using regex patterns
-        # TradingView news items have timestamp, headline, provider in divs/spans
-        # Pattern: capture headline text, timestamp, and provider
-
-        # Look for script tags containing JSON data (TradingView often embeds data in __INITIAL_STATE__ or similar)
-        script_pattern = r"<script[^>]*>(.*?)</script>"
-        scripts = re.findall(script_pattern, html_content, re.DOTALL)
-
-        tv_data = None
-        for script in scripts:
-            if "newsflows" in script.lower() or "articles" in script.lower():
-                try:
-                    # Try to extract JSON-like structures
-                    tv_data = script
-                    break
-                except:
-                    continue
-
-        # Fallback: parse HTML news cards directly
-        # TradingView structure: news items are in divs with data attributes or specific classes
-        news_pattern = r'<div[^>]*class="[^"]*newsItem[^"]*"[^>]*>(.*?)</div>\s*</div>'
-        news_items = re.findall(news_pattern, html_content, re.DOTALL | re.IGNORECASE)
-
-        # More flexible pattern for TradingView news cards
-        # Look for article links and surrounding content
-        article_pattern = r'<a[^>]*href="([^"]*?/news/[^"]*?)"[^>]*>([^<]*?)</a>'
-        articles = re.findall(article_pattern, html_content)
-
-        for article_url, headline_text in articles[:20]:
-            headline = headline_text.strip()
-            if (
-                headline
-                and len(headline) > 10
-                and not _is_noise_headline(headline)
-                and not _is_low_value_headline(headline)
-            ):
-                # Extract timestamp from page context or use current time
-                timestamp = datetime.now(timezone.utc).isoformat()
-                headlines.append((headline, timestamp))
-
-        # If regex parsing didn't work, try a simpler approach
-        if not headlines:
-            # Look for common patterns in TradingView HTML
-            # News cards typically contain: title text, timestamp, provider badge
-            title_pattern = (
-                r"<h[1-6][^>]*>([^<]*?(?:india|nifty|banknifty|stock)[^<]*?)</h[1-6]>"
-            )
-            titles = re.findall(title_pattern, html_content, re.IGNORECASE)
-            for title in titles[:15]:
-                clean_title = title.strip()
-                if (
-                    clean_title
-                    and not _is_noise_headline(clean_title)
-                    and not _is_low_value_headline(clean_title)
-                ):
-                    headlines.append(
-                        (clean_title, datetime.now(timezone.utc).isoformat())
-                    )
-
-        logger.info(
-            f"Successfully extracted {len(headlines)} headlines from TradingView"
-        )
-
-    except Exception as e:
-        logger.warning(
-            f"TradingView news fetch failed: {e}. Will use fallback sources."
-        )
-
-    return headlines
-
-
 def _fetch_icicidirect_news() -> list[tuple[str, str]]:
     """Fetch recent headlines from ICICI Direct market commentary."""
     url = "https://www.icicidirect.com/share-market-today/market-news-commentary"
@@ -1333,47 +1348,6 @@ def _fetch_icicidirect_news() -> list[tuple[str, str]]:
         )
     except Exception as e:
         logger.warning(f"ICICI Direct news fetch failed: {e}")
-    return headlines
-
-
-def _fetch_way2wealth_news() -> list[tuple[str, str]]:
-    """Fetch recent headlines from Way2Wealth market commentary."""
-    url = "https://www.way2wealth.com/market/marketcommentry/"
-    headlines = []
-    try:
-        logger.info("Fetching Way2Wealth news-flow...")
-        try:
-            from curl_cffi import requests as curl_requests
-
-            session = curl_requests.Session(impersonate="chrome120")
-            resp = session.get(url, timeout=20)
-        except ImportError:
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            }
-            resp = requests.get(url, headers=headers, timeout=20)
-
-        resp.raise_for_status()
-
-        # Extract headlines from header tags
-        titles = re.findall(
-            r"<h[2-4][^>]*>(.*?)</h[2-4]>", resp.text, re.DOTALL | re.IGNORECASE
-        )
-        for title in titles[:15]:
-            clean = re.sub(r"<[^>]+>", "", title).strip()
-            if (
-                clean
-                and len(clean) > 15
-                and not _is_noise_headline(clean)
-                and not _is_low_value_headline(clean)
-            ):
-                headlines.append((clean, datetime.now(timezone.utc).isoformat()))
-
-        logger.info(
-            f"Successfully extracted {len(headlines)} headlines from Way2Wealth"
-        )
-    except Exception as e:
-        logger.warning(f"Way2Wealth news fetch failed: {e}")
     return headlines
 
 
@@ -1460,12 +1434,12 @@ def _fetch_moneycontrol_news() -> list[tuple[str, str]]:
 
 
 def get_market_news_sentiment() -> Optional[dict]:
-    """Fetch market news, summarize sentiment via Gemini or local lexicon fallback.
+    """Fetch market news, summarize sentiment via LLM or local lexicon fallback.
 
     Pipeline:
-      1. Fetch direct headlines from TradingView, ICICI Direct, and Way2Wealth.
-      2. Attempt Gemini REST API summarization (1 API call).
-      3. If Gemini fails/rate-limited → local lexicon analysis (0 API calls).
+      1. Fetch headlines from ICICI Direct, Livemint, Moneycontrol.
+      2. Attempt LLM summarization (Groq → Gemini → OpenRouter).
+      3. If LLM fails → local lexicon analysis (0 API calls).
     """
     import time
 
@@ -1487,13 +1461,9 @@ def get_market_news_sentiment() -> Optional[dict]:
     headlines: list[tuple[str, str]] = []
     recency_cutoff = now - 36 * 3600  # Last 36 hours only
 
-    with ThreadPoolExecutor(max_workers=5) as executor:
+    with ThreadPoolExecutor(max_workers=4) as executor:
         future_to_source = {
-            executor.submit(
-                _fetch_tradingview_news, ["NIFTY", "BANKNIFTY"]
-            ): "tradingview",
             executor.submit(_fetch_icicidirect_news): "icicidirect",
-            executor.submit(_fetch_way2wealth_news): "way2wealth",
             executor.submit(_fetch_livemint_news): "livemint",
             executor.submit(_fetch_moneycontrol_news): "moneycontrol",
         }

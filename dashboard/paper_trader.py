@@ -28,6 +28,24 @@ import yfinance as yf
 IST = timezone(timedelta(hours=5, minutes=30))
 
 
+def _safe_int(val) -> int | None:
+    if val is None:
+        return None
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return None
+
+
+def _safe_float(val) -> float | None:
+    if val is None:
+        return None
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return None
+
+
 def _now_ist() -> datetime:
     return datetime.now(IST)
 
@@ -106,7 +124,41 @@ def get_fno_lot_sizes() -> dict[str, int]:
     return res
 
 
+def get_fno_security_info(exchange: str, token: str) -> dict | None:
+    """
+    Fetch contract specs (lot_size, tick_size, freeze_qty, circuit limits) from Shoonya.
+    """
+    try:
+        from data.feed import fetch_shoonya_security_info
+
+        info = fetch_shoonya_security_info(exchange, token)
+        if info and info.get("stat") == "Ok":
+            return {
+                "lot_size": _safe_int(info.get("ls")),
+                "tick_size": _safe_float(info.get("ti")),
+                "freeze_qty": _safe_int(info.get("frzqty")),
+                "lower_circuit": _safe_float(info.get("lct")),
+                "upper_circuit": _safe_float(info.get("uct")),
+                "expiry": info.get("exd"),
+                "symbol": info.get("tsym") or info.get("dnm"),
+            }
+    except Exception as e:
+        logging.getLogger(__name__).debug("Shoonya security info fetch failed: %s", e)
+    return None
+
+
 def get_futures_expiry(now_dt: datetime = None) -> str:
+    """Return the next monthly futures expiry date (last Tuesday).
+
+    NSE monthly derivative contracts (both indices and single stocks)
+    expire on the last Tuesday of the contract month. If the last
+    Tuesday falls on a trading holiday, expiry shifts to the previous
+    trading day.
+
+    Weekly contracts follow a different schedule:
+      - Indices: Tuesdays
+      - Single stocks: Thursdays
+    """
     import calendar
     from datetime import date, time, timedelta
 
@@ -118,22 +170,23 @@ def get_futures_expiry(now_dt: datetime = None) -> str:
     today = now_dt.date()
     year, month = today.year, today.month
 
-    def last_thursday_of(y, m):
+    def last_tuesday_of(y, m):
+        """Find the last Tuesday of a given year/month, with holiday rollback."""
         cal = calendar.monthcalendar(y, m)
         for week in reversed(cal):
-            thurs = week[calendar.THURSDAY]
-            if thurs != 0:
-                dt = date(y, m, thurs)
+            tue = week[calendar.TUESDAY]
+            if tue != 0:
+                dt = date(y, m, tue)
                 while _is_holiday(dt) or dt.weekday() >= 5:
                     dt -= timedelta(days=1)
                 return dt
 
-    curr_expiry = last_thursday_of(year, month)
+    curr_expiry = last_tuesday_of(year, month)
 
     if today > curr_expiry or (today == curr_expiry and now_dt.time() >= time(15, 30)):
         next_month = month + 1 if month < 12 else 1
         next_year = year if month < 12 else year + 1
-        curr_expiry = last_thursday_of(next_year, next_month)
+        curr_expiry = last_tuesday_of(next_year, next_month)
 
     return curr_expiry.strftime("%Y-%m-%d")
 
@@ -200,7 +253,12 @@ def atomic_db_update():
 
     locked = False
     lock_f = None
-    for attempt in range(10):  # Increased retries
+    # Ensure lock file exists before trying r+ open
+    try:
+        LOCK_FILE.touch(exist_ok=True)
+    except Exception:
+        pass
+    for attempt in range(20):  # Increased retries
         try:
             lock_f = open(LOCK_FILE, "r+")
             # Try to acquire lock on the lock file
@@ -214,8 +272,8 @@ def atomic_db_update():
             _save_db(db)
             break  # Success
         except (OSError, IOError) as e:
-            if attempt < 9:
-                time.sleep(0.1 * (attempt + 1))
+            if attempt < 19:
+                time.sleep(0.2 * (attempt + 1))
                 continue
             else:
                 raise
@@ -843,13 +901,18 @@ def _option_net_premium(legs: list[dict], price_map: dict) -> float | None:
 
 
 def _build_option_price_map(open_ops: list[dict]) -> dict:
+    from datetime import datetime
+
     from signals.options import chain_snapshot
 
     underlyings = list({t["symbol"] for t in open_ops})
     price_map = {}
+    ist_now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
     for sym in underlyings:
         try:
-            needed_expiries = list(
+            # Filter stale expiries (more than 7 days in the past)
+            min_valid_date = ist_now.date()
+            needed_expiries_raw = list(
                 {
                     leg["expiry"]
                     for t in open_ops
@@ -857,6 +920,30 @@ def _build_option_price_map(open_ops: list[dict]) -> dict:
                     for leg in t["legs"]
                 }
             )
+            needed_expiries = []
+            for e in needed_expiries_raw:
+                try:
+                    exp_date = datetime.strptime(e, "%Y-%m-%d").date()
+                    days_stale = (min_valid_date - exp_date).days
+                    # Skip clearly corrupt dates (>365 days in the past)
+                    if days_stale >= 365:
+                        logging.getLogger(__name__).warning(
+                            "%s: dropping corrupt expiry %s (%d days stale)",
+                            sym,
+                            e,
+                            days_stale,
+                        )
+                        continue
+                    if exp_date >= min_valid_date or days_stale < 7:
+                        needed_expiries.append(e)
+                except ValueError:
+                    needed_expiries.append(e)
+            if not needed_expiries:
+                logging.getLogger(__name__).warning(
+                    "%s: all target expiries %s are stale; using closest future expiry",
+                    sym,
+                    needed_expiries_raw,
+                )
             needed_strikes = list(
                 {
                     leg["strike"]
@@ -866,7 +953,9 @@ def _build_option_price_map(open_ops: list[dict]) -> dict:
                 }
             )
             chain = chain_snapshot(
-                sym, target_expiries=needed_expiries, target_strikes=needed_strikes
+                sym,
+                target_expiries=needed_expiries or None,
+                target_strikes=needed_strikes,
             )
             if chain.empty:
                 logging.getLogger(__name__).warning(
@@ -886,6 +975,11 @@ def _build_option_price_map(open_ops: list[dict]) -> dict:
                     len(found_strikes),
                     len(needed_strikes),
                 )
+            # Determine reasonable premium bounds based on underlying
+            # NIFTY options: premiums rarely exceed 2000
+            # BANKNIFTY options: premiums rarely exceed 2000
+            # Any value > 5000 is almost certainly spot/index contamination
+            MAX_REASONABLE_PREMIUM = 5000
             for trade in [t for t in open_ops if t["symbol"] == sym]:
                 for leg in trade["legs"]:
                     key = (leg["strike"], leg["expiry"], leg["type"])
@@ -896,7 +990,22 @@ def _build_option_price_map(open_ops: list[dict]) -> dict:
                     ]
                     if not row.empty:
                         try:
-                            price_map[key] = float(row.iloc[0][col])
+                            raw_price = float(row.iloc[0][col])
+                            # SANITY CHECK: reject spot/index contamination
+                            if raw_price > MAX_REASONABLE_PREMIUM:
+                                logging.getLogger(__name__).error(
+                                    "%s: REJECTED corrupt premium %s for %s (strike=%s, expiry=%s, type=%s) - exceeds max reasonable %s. "
+                                    "This indicates spot/index value leaked into option chain.",
+                                    sym,
+                                    raw_price,
+                                    key,
+                                    leg["strike"],
+                                    leg["expiry"],
+                                    leg["type"],
+                                    MAX_REASONABLE_PREMIUM,
+                                )
+                                continue  # Skip this leg - treat as missing price
+                            price_map[key] = raw_price
                         except Exception as e:
                             logging.getLogger(__name__).exception(
                                 "Failed to parse price for %s from chain for symbol %s: %s",
@@ -967,7 +1076,7 @@ def _smart_exit_check(
     elif current_regime == "VOL_CONTRACTION":
         vix_threshold *= 0.8  # 20% more sensitive during vol contraction
 
-    if entry_vix > 0 and vix_now > vix_floor:
+    if entry_vix > 0 and vix_now >= vix_floor:
         from signals.options import check_vix_spike_exit
 
         should_exit, _ = check_vix_spike_exit(vix_now, entry_vix, vix_threshold)
@@ -1120,6 +1229,21 @@ def check_option_exits(
             # Flat SL/TGT backup (skip during grace period to avoid bid-ask jitter exits)
             if not exit_reason and not _within_grace_period(t, now_ist):
                 pnl = (t.get("net_premium") or 0.0) - current_net
+
+                # SANITY BOUND: P&L cannot exceed theoretical max loss for defined-risk structures
+                max_loss_rupees = t.get("max_loss_rupees", 0.0)
+                if max_loss_rupees > 0 and abs(pnl) > max_loss_rupees * 1.1:
+                    logging.getLogger(__name__).error(
+                        "Trade %s %s: P&L %s exceeds theoretical max loss %s by %.0fx - CORRUPT DATA. "
+                        "Capping P&L to max_loss for safety.",
+                        t.get("id"),
+                        t.get("symbol"),
+                        pnl,
+                        max_loss_rupees,
+                        abs(pnl) / max_loss_rupees if max_loss_rupees else 0,
+                    )
+                    pnl = max(-max_loss_rupees, min(max_loss_rupees, pnl))
+
                 sl_limit = settings.get("options_sl_pct", 125.0) / 100.0
                 tgt_limit = settings.get("options_tgt_pct", 50.0) / 100.0
                 net_prem = t.get("net_premium")
@@ -1141,7 +1265,19 @@ def check_option_exits(
                     price = price_map.get(key) if price_map else None
                     leg["exit_premium"] = price
                 # current_net guaranteed non-None here
-                t["pnl"] = round((t.get("net_premium") or 0.0) - current_net, 2)
+                final_pnl = round((t.get("net_premium") or 0.0) - current_net, 2)
+                # Re-apply sanity bound on final P&L
+                max_loss_rupees = t.get("max_loss_rupees", 0.0)
+                if max_loss_rupees > 0 and abs(final_pnl) > max_loss_rupees * 1.1:
+                    logging.getLogger(__name__).error(
+                        "Trade %s %s: FINAL P&L %s exceeds max_loss %s - clamping.",
+                        t.get("id"),
+                        t.get("symbol"),
+                        final_pnl,
+                        max_loss_rupees,
+                    )
+                    final_pnl = max(-max_loss_rupees, min(max_loss_rupees, final_pnl))
+                t["pnl"] = final_pnl
                 closed.append(t)
     return closed
 
@@ -1213,6 +1349,23 @@ def _check_option_exits(
 
             exit_reason = "EOD_CUTOFF" if (is_eod and auto_close) else None
 
+            # Expiry check for Options (wait for EOD window or 15:15 on expiry day)
+            if not exit_reason:
+                from datetime import time as dt_time
+
+                today_str = now_ist.strftime("%Y-%m-%d")
+                for leg in t.get("legs", []):
+                    leg_exp = leg.get("expiry")
+                    if leg_exp:
+                        if today_str > leg_exp:
+                            exit_reason = "EXPIRY"
+                            break
+                        elif today_str == leg_exp and (
+                            now_ist.time() >= dt_time(15, 15) or is_eod
+                        ):
+                            exit_reason = "EXPIRY"
+                            break
+
             # Smart exits (fire first)
             if not exit_reason:
                 exit_reason = _smart_exit_check(
@@ -1235,6 +1388,21 @@ def _check_option_exits(
             # Flat SL/TGT backup (skip during grace period to avoid bid-ask jitter exits)
             if not exit_reason and not _within_grace_period(t, now_ist):
                 pnl = t.get("net_credit", 0.0) - current_net
+
+                # SANITY BOUND: P&L cannot exceed theoretical max loss for defined-risk structures
+                max_loss_rupees = t.get("max_loss_rupees", 0.0)
+                if max_loss_rupees > 0 and abs(pnl) > max_loss_rupees * 1.1:
+                    logging.getLogger(__name__).error(
+                        "Trade %s %s: P&L %s exceeds theoretical max loss %s by %.0fx - CORRUPT DATA. "
+                        "Capping P&L to max_loss for safety.",
+                        t.get("id"),
+                        t.get("symbol"),
+                        pnl,
+                        max_loss_rupees,
+                        abs(pnl) / max_loss_rupees if max_loss_rupees else 0,
+                    )
+                    pnl = max(-max_loss_rupees, min(max_loss_rupees, pnl))
+
                 sl_limit = settings.get("options_sl_pct", 125.0) / 100.0
                 tgt_limit = settings.get("options_tgt_pct", 50.0) / 100.0
                 net_credit = t.get("net_credit")
@@ -1255,7 +1423,19 @@ def _check_option_exits(
                     key = (leg["strike"], leg["expiry"], leg["type"])
                     price = price_map.get(key) if price_map else None
                     leg["exit_premium"] = price
-                t["pnl"] = round(t.get("net_credit", 0.0) - current_net, 2)
+                final_pnl = round(t.get("net_credit", 0.0) - current_net, 2)
+                # Re-apply sanity bound on final P&L
+                max_loss_rupees = t.get("max_loss_rupees", 0.0)
+                if max_loss_rupees > 0 and abs(final_pnl) > max_loss_rupees * 1.1:
+                    logging.getLogger(__name__).error(
+                        "Trade %s %s: FINAL P&L %s exceeds max_loss %s - clamping.",
+                        t.get("id"),
+                        t.get("symbol"),
+                        final_pnl,
+                        max_loss_rupees,
+                    )
+                    final_pnl = max(-max_loss_rupees, min(max_loss_rupees, final_pnl))
+                t["pnl"] = final_pnl
                 closed.append(t)
     return closed
 
@@ -1406,16 +1586,17 @@ def _get_option_setups(
         setup = pick_nifty_strategy(data, regime_name, bias, vix, vix_change, pcr, cfg)
 
     if setup is None:
-        journal.log_skipped_trade(
-            symbol,
-            "NEUTRAL",
-            "LOW",
-            "NO_STRATEGY",
-            regime_name,
-            bias,
-            "options_engine",
-            "No strategy for current regime/bias",
-        )
+        if not journal.has_skipped_today(symbol, "NO_STRATEGY", "options_engine"):
+            journal.log_skipped_trade(
+                symbol,
+                "NEUTRAL",
+                "LOW",
+                "NO_STRATEGY",
+                regime_name,
+                bias,
+                "options_engine",
+                "No strategy for current regime/bias",
+            )
         setups.append(
             {
                 "symbol": symbol,
@@ -1432,16 +1613,17 @@ def _get_option_setups(
     try:
         chain = chain_snapshot(symbol)
     except Exception as e:
-        journal.log_skipped_trade(
-            symbol,
-            "NEUTRAL",
-            "MED",
-            "CHAIN_ERROR",
-            regime_name,
-            bias,
-            "options_engine",
-            str(e),
-        )
+        if not journal.has_skipped_today(symbol, "CHAIN_ERROR", "options_engine"):
+            journal.log_skipped_trade(
+                symbol,
+                "NEUTRAL",
+                "MED",
+                "CHAIN_ERROR",
+                regime_name,
+                bias,
+                "options_engine",
+                str(e),
+            )
         setups.append(
             {
                 "symbol": symbol,
@@ -1455,16 +1637,17 @@ def _get_option_setups(
         return setups
 
     if chain.empty:
-        journal.log_skipped_trade(
-            symbol,
-            "NEUTRAL",
-            "MED",
-            "EMPTY_CHAIN",
-            regime_name,
-            bias,
-            "options_engine",
-            "Empty option chain",
-        )
+        if not journal.has_skipped_today(symbol, "EMPTY_CHAIN", "options_engine"):
+            journal.log_skipped_trade(
+                symbol,
+                "NEUTRAL",
+                "MED",
+                "EMPTY_CHAIN",
+                regime_name,
+                bias,
+                "options_engine",
+                "Empty option chain",
+            )
         return setups
 
     # Read lot_size/strike_step from the correct config section
@@ -1490,16 +1673,19 @@ def _get_option_setups(
     setup.entry_window_ok = in_window
     if not in_window or not setup.suitable:
         reason = setup.skip_reason if not setup.suitable else window_reason
-        journal.log_skipped_trade(
-            symbol,
-            "NEUTRAL",
-            "MED",
-            "NOT_SUITABLE",
-            regime_name,
-            bias,
-            "options_engine",
-            reason,
-        )
+        # Deduplicate: skip logging if we already logged the same skip for this
+        # symbol+reason+risk_gate today (VIX expansion repeats every 60s cycle)
+        if not journal.has_skipped_today(symbol, "NOT_SUITABLE", "options_engine"):
+            journal.log_skipped_trade(
+                symbol,
+                "NEUTRAL",
+                "MED",
+                "NOT_SUITABLE",
+                regime_name,
+                bias,
+                "options_engine",
+                reason,
+            )
 
     setup_dict = {
         "symbol": setup.symbol,
@@ -1623,8 +1809,15 @@ def check_and_close_trades() -> list[dict]:
             # Expiry check for Futures
             is_expired = False
             if trade.get("type") == "FUTURE" and trade.get("expiry_date"):
+                from datetime import time as dt_time
+
                 today_str = now_ist.strftime("%Y-%m-%d")
-                if today_str >= trade["expiry_date"]:
+                exp_date = trade["expiry_date"]
+                if today_str > exp_date:
+                    is_expired = True
+                elif today_str == exp_date and (
+                    now_ist.time() >= dt_time(15, 15) or is_eod
+                ):
                     is_expired = True
 
             if is_expired:
@@ -1779,6 +1972,18 @@ def close_option_trade_manual(trade_id: int, reason: str = "MANUAL") -> dict | N
         else:
             trade["pnl"] = 0.0
 
+        # SANITY BOUND: Clamp P&L to theoretical max loss
+        max_loss_rupees = trade.get("max_loss_rupees", 0.0)
+        if max_loss_rupees > 0 and abs(trade["pnl"]) > max_loss_rupees * 1.1:
+            logging.getLogger(__name__).error(
+                "Manual close trade %s %s: P&L %s exceeds theoretical max loss %s - clamping.",
+                trade.get("id"),
+                trade.get("symbol"),
+                trade["pnl"],
+                max_loss_rupees,
+            )
+            trade["pnl"] = max(-max_loss_rupees, min(max_loss_rupees, trade["pnl"]))
+
         return trade
 
 
@@ -1882,7 +2087,7 @@ def auto_enter_from_alerts(alerts: list[dict], cfg: dict | None = None) -> list[
                 break
 
             regime = alert.get("source_regime", "UNKNOWN")
-            if "RANGE" in regime.upper() and (open_trades_count + len(entered) >= 5):
+            if "RANGE" in regime.upper() and (open_trades_count + len(entered) >= 10):
                 journal.log_skipped_trade(
                     alert.get("symbol", ""),
                     alert.get("direction", "LONG"),
@@ -1891,7 +2096,7 @@ def auto_enter_from_alerts(alerts: list[dict], cfg: dict | None = None) -> list[
                     regime,
                     alert.get("flow_bias", "NEUTRAL"),
                     "regime_filter",
-                    "Max 5 concurrent positions in RANGE regime",
+                    "Max 10 concurrent positions in RANGE regime",
                 )
                 continue
 

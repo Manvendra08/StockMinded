@@ -173,6 +173,28 @@ class Journal:
         cols = [desc[0] for desc in cur.description]
         return [dict(zip(cols, row)) for row in rows]
 
+    def has_skipped_today(
+        self,
+        symbol: str,
+        skip_reason: str,
+        risk_gate: str,
+    ) -> bool:
+        """Check if a skip log entry already exists today for the same
+        symbol + skip_reason + risk_gate combo.
+        Prevents redundant logging across repeated engine cycles.
+        """
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        cur = self.conn.execute(
+            """SELECT 1 FROM skipped_trades
+               WHERE date(ts) = ?
+                 AND symbol = ?
+                 AND skip_reason = ?
+                 AND risk_gate = ?
+               LIMIT 1""",
+            (today, symbol, skip_reason, risk_gate),
+        )
+        return cur.fetchone() is not None
+
     def clear_skipped_trades(self, older_than_days: int) -> int:
         """Clear skipped trades older than N days.
 

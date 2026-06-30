@@ -107,7 +107,7 @@ options:
   strike_step: { NIFTY: 50, BANKNIFTY: 100 }
   expiry_preference: weekly # weekly | monthly
   max_risk_per_structure_pct: 0.0075
-  max_concurrent_structures: 4
+  max_concurrent_structures: 10
   iv_history_db: ./data/iv_history.sqlite # Per user choice - initial structures
   enabled_structures:
     - BULL_CALL_SPREAD
@@ -141,14 +141,14 @@ nifty_options:
   vol_expansion_threshold: 5.0 # % VIX change to block entry
   # Exit rules
   profit_take_pct: 0.50 # Book profit at 50% of max credit
-  stop_loss_mult: 1.25 # Stop loss at 1.25x credit received
+  stop_loss_mult: 1.0 # Stop loss at 1.0x credit received
   vix_spike_exit_pct: 10.0 # Close if VIX jumps >10% intraday
   # Minimum short-leg premium (per share): skip strikes where premium < this
   #   (walk TOWARDS ATM to get adequate credit; reject if ATM also below floor)
-  min_short_premium: 5.0
+  min_short_premium: 15.0
   # Maximum short-leg premium (per share): skip strikes where premium >= this
   #   (walk further OTM to reduce risk; reject if can't get below cap)
-  max_short_premium: 15.0
+  max_short_premium: 150.0
 
 # BANKNIFTY Option Selling - Defined Risk Only
 banknifty_options:
@@ -169,8 +169,8 @@ banknifty_options:
   profit_take_pct: 0.50
   stop_loss_mult: 1.25
   vix_spike_exit_pct: 10.0
-  min_short_premium: 5.0
-  max_short_premium: 15.0
+  min_short_premium: 15.0
+  max_short_premium: 500.0
 
 # Timing Engine - Overextension & Market Exhaustion Filters
 timing_engine:

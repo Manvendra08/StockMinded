@@ -6,6 +6,7 @@ Open: http://localhost:5050
 
 from __future__ import annotations
 
+import concurrent.futures as _cfutures
 import datetime as dt_mod
 import json
 import os
@@ -25,6 +26,10 @@ from dotenv import load_dotenv
 load_dotenv(PROJECT_ROOT / ".env")
 
 import logging
+
+# Suppress noisy external warnings
+logging.getLogger("src.intelligence.ml_predictor").setLevel(logging.ERROR)
+logging.getLogger("urllib3.connectionpool").setLevel(logging.ERROR)
 
 import numpy as np
 import pandas as pd
@@ -224,7 +229,7 @@ def _run_engine() -> dict:
         if _engine_busy:
             return {**cache_val, "engine_status": "BUSY", **_market_status_now()}
 
-    if cache_ts and (datetime.now() - cache_ts).total_seconds() < 120:
+    if cache_ts and (datetime.now() - cache_ts).total_seconds() < 300:
         return {**cache_val, **_market_status_now()}
 
     with _cache_lock:
@@ -238,115 +243,130 @@ def _run_engine() -> dict:
 
     source_errors = []
 
-    # Fetch stock data with error tracking
-    try:
-        stock_data_result = feed.universe_ohlc(universe, period="6mo")
-        # Some implementations return {"fetched": N, "data": {...}} while others return the raw dict.
-        if isinstance(stock_data_result, dict) and "data" in stock_data_result:
-            stock_data = stock_data_result.get("data") or {}
-            fetched = stock_data_result.get("fetched", 0) or 0
-        else:
-            stock_data = stock_data_result or {}
-            fetched = len(stock_data) if hasattr(stock_data, "__len__") else 0
+    # ── Parallel data fetch ─────────────────────────────────────────
+    # Run the three slow I/O calls concurrently
+    _stock_data = {}
+    _sector_data = {}
+    _fetched = 0
+    _usable = 0
 
-        # Hard early exit: stop the pipeline (and LLM) when no usable OHLC DataFrames exist.
-        # Some feeds may return a non-empty dict but with empty DataFrames (stale/unusable).
-        usable_symbol_count = sum(
-            1
-            for df in (stock_data.values() if isinstance(stock_data, dict) else [])
-            if df is not None and hasattr(df, "empty") and not df.empty
-        )
+    def _fetch_universe():
+        nonlocal _stock_data, _fetched, _usable
+        try:
+            result = feed.universe_ohlc(universe, period="6mo")
+            if isinstance(result, dict) and "data" in result:
+                _stock_data = result.get("data") or {}
+                _fetched = result.get("fetched", 0) or 0
+            else:
+                _stock_data = result or {}
+                _fetched = len(_stock_data) if hasattr(_stock_data, "__len__") else 0
+            _usable = sum(
+                1
+                for df in (
+                    _stock_data.values() if isinstance(_stock_data, dict) else []
+                )
+                if df is not None and hasattr(df, "empty") and not df.empty
+            )
+        except Exception as e:
+            source_errors.append(f"Stock feed failed: {e}")
 
-        if usable_symbol_count == 0:
-            market_now = _market_status_now()
-            result = {
-                **market_now,
-                "source_errors": source_errors
-                + [
-                    f"No usable OHLC data (usable_symbol_count=0, fetched={fetched}). Skipping Brain Audit."
-                ],
-                "nifty": {"close": 0, "change_pct": 0},
-                "banknifty": {"close": 0, "change_pct": 0},
-                "regime": {
-                    "name": "UNKNOWN",
-                    "trend_score": 0,
-                    "vix": 0,
-                    "vix_5d_change_pct": 0,
-                    "adx": 0,
-                    "breadth_pct_above_50dma": 0,
-                    "notes": "No fresh universe OHLC; engine short-circuited.",
-                },
-                "flows": {
-                    "fii_dii_5d": {},
-                    "top_inflow": [],
-                    "top_outflow": [],
-                    "pcr_oi": None,
-                    "pcr_vol": None,
-                    "max_pain": None,
-                    "bias": "NEUTRAL",
-                    "pcr_stale": True,
-                    "mp_stale": True,
-                    "pcr_updated_at": None,
-                    "mp_updated_at": None,
-                    "notes": "",
-                    "option_source": None,
-                    "ai_sentiment": None,
-                    "fii_derivatives_5d": {},
-                    "fii_derivatives_stale": False,
-                    "trendlyne_kpis": {},
-                    "modified_max_pain": None,
-                    "iv_percentile": None,
-                },
-                "leaders": [],
-                "laggards": [],
-                "all_ranks": [],
-                "sector_rs": [],
-                "structure": {"primary": None, "secondary": None, "notes": "N/A"},
-                "risk": {
-                    "capital": load_config().get("account", {}).get("capital", 0),
-                    "per_trade_pct": load_config()
-                    .get("risk", {})
-                    .get("per_trade_pct", 0),
-                    "daily_stop_pct": load_config()
-                    .get("risk", {})
-                    .get("daily_stop_pct", 0),
-                    "monthly_stop_pct": load_config()
-                    .get("risk", {})
-                    .get("monthly_stop_pct", 0),
-                    "margin_util_cap": load_config()
-                    .get("risk", {})
-                    .get("margin_util_cap", 0),
-                },
-                "verdict": verdict_mod.build_trade_verdict(
-                    {"regime": {"name": "UNKNOWN"}, "flows": {"bias": "NEUTRAL"}}
-                ).to_dict()
-                if hasattr(verdict_mod, "build_trade_verdict")
-                else {"action": "WAIT"},
-                "skips": {
-                    "today": [],
-                    "summary": {"total": 0, "by_reason": {}, "by_gate": {}},
-                },
-                "verdict_trace": {
-                    "inputs": {"fetched": 0},
-                    "blocks": [],
-                    "reasons": [],
-                },
-                "signals_computed_at": market_now.get("ts"),
-            }
-            with _cache_lock:
-                _cache = result
-                _cache_ts = datetime.now()
-            return result
-    except Exception as e:
-        stock_data = {}
-        source_errors.append(f"Stock feed failed: {e}")
+    def _fetch_sectors():
+        nonlocal _sector_data
+        try:
+            _sector_data = feed.sector_ohlc(sectors, period="6mo")
+        except Exception as e:
+            source_errors.append(f"Sector feed failed: {e}")
 
-    # Fetch sector data with error tracking
-    try:
-        sector_data = feed.sector_ohlc(sectors, period="6mo")
-    except Exception as e:
-        sector_data = {}
-        source_errors.append(f"Sector feed failed: {e}")
+    with _cfutures.ThreadPoolExecutor(max_workers=2) as _pool:
+        _f_univ = _pool.submit(_fetch_universe)
+        _f_sec = _pool.submit(_fetch_sectors)
+        _cfutures.wait([_f_univ, _f_sec])
+
+    stock_data = _stock_data
+    sector_data = _sector_data
+    fetched = _fetched
+    usable_symbol_count = _usable
+
+    # Hard early exit: stop the pipeline (and LLM) when no usable OHLC DataFrames exist.
+    if usable_symbol_count == 0:
+        market_now = _market_status_now()
+        result = {
+            **market_now,
+            "source_errors": source_errors
+            + [
+                f"No usable OHLC data (usable_symbol_count=0, fetched={fetched}). Skipping Brain Audit."
+            ],
+            "nifty": {"close": 0, "change_pct": 0},
+            "banknifty": {"close": 0, "change_pct": 0},
+            "regime": {
+                "name": "UNKNOWN",
+                "trend_score": 0,
+                "vix": 0,
+                "vix_5d_change_pct": 0,
+                "adx": 0,
+                "breadth_pct_above_50dma": 0,
+                "notes": "No fresh universe OHLC; engine short-circuited.",
+            },
+            "flows": {
+                "fii_dii_5d": {},
+                "top_inflow": [],
+                "top_outflow": [],
+                "pcr_oi": None,
+                "pcr_vol": None,
+                "max_pain": None,
+                "bias": "NEUTRAL",
+                "pcr_stale": True,
+                "mp_stale": True,
+                "pcr_updated_at": None,
+                "mp_updated_at": None,
+                "notes": "",
+                "option_source": None,
+                "ai_sentiment": None,
+                "fii_derivatives_5d": {},
+                "fii_derivatives_stale": False,
+                "trendlyne_kpis": {},
+                "modified_max_pain": None,
+                "iv_percentile": None,
+            },
+            "leaders": [],
+            "laggards": [],
+            "all_ranks": [],
+            "sector_rs": [],
+            "structure": {"primary": None, "secondary": None, "notes": "N/A"},
+            "risk": {
+                "capital": load_config().get("account", {}).get("capital", 0),
+                "per_trade_pct": load_config().get("risk", {}).get("per_trade_pct", 0),
+                "daily_stop_pct": load_config()
+                .get("risk", {})
+                .get("daily_stop_pct", 0),
+                "monthly_stop_pct": load_config()
+                .get("risk", {})
+                .get("monthly_stop_pct", 0),
+                "margin_util_cap": load_config()
+                .get("risk", {})
+                .get("margin_util_cap", 0),
+            },
+            "verdict": verdict_mod.build_trade_verdict(
+                {"regime": {"name": "UNKNOWN"}, "flows": {"bias": "NEUTRAL"}}
+            ).to_dict()
+            if hasattr(verdict_mod, "build_trade_verdict")
+            else {"action": "WAIT"},
+            "skips": {
+                "today": [],
+                "summary": {"total": 0, "by_reason": {}, "by_gate": {}},
+            },
+            "verdict_trace": {
+                "inputs": {"fetched": 0},
+                "blocks": [],
+                "reasons": [],
+            },
+            "signals_computed_at": market_now.get("ts"),
+        }
+        with _cache_lock:
+            _cache = result
+            _cache_ts = datetime.now()
+            _engine_busy = False
+        return result
 
     regime_snap = regime_mod.classify("NIFTY", stock_universe_data=stock_data)
     try:
@@ -410,7 +430,9 @@ def _run_engine() -> dict:
 
     structure = sm.plan_for(regime_snap.regime)
 
-    # NIFTY close for header
+    # ── Index quotes for the header bar ──
+    # Use yfinance OHLC from cache (already fetched above) for prev_close / change_pct.
+    # The live LTP from Shoonya is available via /api/intraday if needed.
     try:
         nifty_df = feed.ohlc_cached("NIFTY", period="1mo")
         if not nifty_df.empty:
@@ -429,7 +451,6 @@ def _run_engine() -> dict:
 
     # BankNifty — fallback to ^NSEBANK via yfinance if primary feed fails
     bn_df = pd.DataFrame()
-    bn_fallback_used = False
     try:
         bn_df = feed.ohlc_cached("BANKNIFTY", period="1mo")
         if not bn_df.empty:
@@ -452,7 +473,6 @@ def _run_engine() -> dict:
                         "Volume": "volume",
                     }
                 )
-                bn_fallback_used = True
                 source_errors.append("BankNifty: used yfinance fallback")
         except Exception as e2:
             source_errors.append(f"BankNifty fallback also failed: {e2}")
@@ -466,14 +486,12 @@ def _run_engine() -> dict:
     account_cfg = cfg.get("account", {})
 
     # Compute data freshness based on cache file ages
-    import time
-
     cache_dir = Path("data/cache/ohlc")
     today_str = datetime.now().strftime("%Y-%m-%d")
     max_age_secs = 0
     checked = 0
     if cache_dir.exists():
-        for t in universe[:10]:  # Spot check first 10 tickers
+        for t in universe[:5]:  # Spot check first 5 tickers
             p = cache_dir / f"{t}_{today_str}.pkl"
             if p.exists():
                 age = time.time() - p.stat().st_mtime
@@ -518,6 +536,7 @@ def _run_engine() -> dict:
         "session_date": status.get("session_date"),
         "last_trading_date": last_trading_date,
         "data_freshness": data_freshness,
+        "data_sources": feed.get_data_sources(),
         "source_errors": source_errors,
         "nifty": {"close": round(nifty_close, 2), "change_pct": nifty_chg_pct},
         "banknifty": {"close": round(bn_close, 2), "change_pct": bn_chg_pct},
@@ -602,7 +621,7 @@ def _run_engine() -> dict:
             "margin_util_cap": risk_cfg.get("margin_util_cap", 0),
         },
     }
-    # Issue #6 callsite fix: compute iv_rank and pass it so naked-sell gate works
+    # Compute iv_rank — re-use chain snapshot from flows if already fetched
     _iv_rank_for_verdict = None
     try:
         from signals.options import atm_iv as _atm_iv
@@ -612,6 +631,7 @@ def _run_engine() -> dict:
         _db_path = cfg.get("options", {}).get(
             "iv_history_db", "./data/iv_history.sqlite"
         )
+        # Cache the chain snapshot within this engine run to avoid redundant fetches
         _chain = _chain_snap("NIFTY")
         _spot = nifty_close
         if not _chain.empty and _spot > 0:
@@ -812,6 +832,10 @@ def _generate_trade_alerts(data: dict) -> list[dict]:
                 allow_longs = False
                 allow_shorts = False
         if is_symbol_expiry_today("BANKNIFTY"):
+            if (now_ist.hour, now_ist.minute) >= (12, 0):
+                allow_longs = False
+                allow_shorts = False
+        if is_symbol_expiry_today("SENSEX"):
             if (now_ist.hour, now_ist.minute) >= (12, 0):
                 allow_longs = False
                 allow_shorts = False
@@ -1489,10 +1513,23 @@ def api_option_chain():
         return jsonify({"error": str(e)}), 500
 
 
+# TTL cache for intraday endpoint to reduce redundant yfinance downloads
+_INTRADAY_CACHE: dict[str, tuple[float, dict]] = {}
+_INTRADAY_CACHE_TTL = 30  # seconds
+
+
 @app.route("/api/intraday")
 def api_intraday():
     """Live intraday snapshot: LTP, day OHLC, change%, volume for watchlist."""
     try:
+        # Check cache
+        now = time.time()
+        if (
+            _INTRADAY_CACHE.get("data")
+            and (now - _INTRADAY_CACHE.get("ts", 0)) < _INTRADAY_CACHE_TTL
+        ):
+            return jsonify(_INTRADAY_CACHE["data"])
+
         cfg = load_config()
         top_n = cfg.get("intraday_top_n", 30)
         universe = load_universe(cfg)
@@ -1528,7 +1565,9 @@ def api_intraday():
         for sym, raw in zip(top_syms, instruments):
             try:
                 q = broker_quotes.get(sym) or {}
-                if q.get("source") == "dhan_quote":
+                source = q.get("source", "")
+                # Shoonya FNO futures quotes have full OHLC; shoonya_quote has ltp only
+                if source in ("shoonya_fno", "shoonya_quote", "dhan_quote"):
                     ltp = round(float(q["ltp"]), 2) if q.get("ltp") else None
                     open_ = round(float(q["open"]), 2) if q.get("open") else None
                     high = round(float(q["high"]), 2) if q.get("high") else None
@@ -1615,12 +1654,10 @@ def api_intraday():
                         "vol": avg_vol,
                         "today_vol": today_vol,
                         "rel_vol": rel_vol,
+                        "source": source or q.get("source", "yfinance"),
                     }
                 )
-            except Exception as e:
-                logging.getLogger(__name__).exception(
-                    "Failed to fetch ticker data for %s: %s", sym, e
-                )
+            except Exception:
                 rows.append(
                     {
                         "symbol": sym,
@@ -1633,6 +1670,7 @@ def api_intraday():
                         "vol": None,
                         "today_vol": 0,
                         "rel_vol": None,
+                        "source": "error",
                     }
                 )
 
@@ -1675,14 +1713,15 @@ def api_intraday():
             print(f"[intraday candle error] {e}")
             traceback.print_exc()
 
-        return jsonify(
-            {
-                "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S IST"),
-                "watchlist": rows,
-                "nifty_candles": candles,
-                "timeframe": tf,
-            }
-        )
+        response_data = {
+            "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S IST"),
+            "watchlist": rows,
+            "nifty_candles": candles,
+            "timeframe": tf,
+        }
+        _INTRADAY_CACHE["data"] = response_data
+        _INTRADAY_CACHE["ts"] = time.time()
+        return jsonify(response_data)
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -1820,17 +1859,98 @@ def api_paper_trades():
 
 @app.route("/api/paper/open")
 def api_paper_open():
-    """Get only open trades with live P&L."""
+    """Get only open trades with live P&L and prev-day change.
+
+    Data source priority:
+      1. Dhan public F&O page (no auth, scraped)
+      2. yfinance (fallback for LTP only)
+      3. Dhan API (fallback for prev_close/change_pct)
+    """
     try:
         trades = _merged_open_trades()
-        # Enrich with live unrealized P&L
         if trades:
             symbols = list(set(t["symbol"] for t in trades))
-            prices = pt._get_ltp_batch(symbols)
+
+            # 1. Primary: Dhan public F&O page (no auth needed, has LTP + prev_close + change_pct)
+            from data.feed import quote_batch, quote_batch_public
+
+            quotes = quote_batch_public(symbols)
+
+            # 2. Fallback LTP: yfinance via _get_ltp_batch for symbols still missing
+            missing_ltp = [s for s in symbols if not quotes.get(s, {}).get("ltp")]
+            if missing_ltp:
+                yf_prices = pt._get_ltp_batch(missing_ltp)
+                for s in missing_ltp:
+                    ltp = yf_prices.get(s)
+                    if ltp is not None:
+                        if s not in quotes or not quotes[s]:
+                            quotes[s] = {}
+                        quotes[s]["ltp"] = ltp
+                        # yfinance doesn't provide prev_close/change_pct reliably
+                        # so leave those as-is
+
+            # 3. Fallback prev_close/change_pct: Dhan API for symbols still missing those
+            missing_meta = [
+                s
+                for s in symbols
+                if quotes.get(s, {}).get("ltp") is not None
+                and quotes[s].get("prev_close") is None
+            ]
+            if missing_meta:
+                dhan_q = quote_batch(missing_meta)
+                for s in missing_meta:
+                    dq = dhan_q.get(s, {})
+                    if dq.get("prev_close") is not None:
+                        if s not in quotes or not quotes[s]:
+                            quotes[s] = {}
+                        quotes[s]["prev_close"] = dq["prev_close"]
+                        quotes[s]["change_pct"] = dq.get("change_pct")
+
+            # 4. Final fallback: yfinance previous_close for symbols still missing prev_close
+            still_missing = [
+                s
+                for s in symbols
+                if quotes.get(s, {}).get("ltp") is not None
+                and quotes[s].get("prev_close") is None
+            ]
+            if still_missing:
+                import yfinance as yf
+
+                yf_syms = [
+                    f"{s}.NS" if not s.startswith("^") and "." not in s else s
+                    for s in still_missing
+                ]
+                try:
+                    tickers = yf.Tickers(" ".join(yf_syms))
+                    for sym, yf_s in zip(still_missing, yf_syms):
+                        try:
+                            info = tickers.tickers[yf_s].fast_info
+                            prev = (
+                                round(float(info.previous_close), 2)
+                                if hasattr(info, "previous_close")
+                                and info.previous_close
+                                else None
+                            )
+                            if prev is not None:
+                                if sym not in quotes or not quotes[sym]:
+                                    quotes[sym] = {}
+                                quotes[sym]["prev_close"] = prev
+                                ltp = quotes[sym].get("ltp")
+                                if ltp is not None:
+                                    quotes[sym]["change_pct"] = round(
+                                        100 * (ltp - prev) / prev, 2
+                                    )
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+            # Enrich each trade
             for t in trades:
                 if t.get("legs"):
                     continue
-                ltp = prices.get(t["symbol"])
+                q = quotes.get(t["symbol"], {})
+                ltp = q.get("ltp")
                 if ltp is not None and t.get("entry_price"):
                     if t.get("direction") == "SHORT":
                         t["unrealized_pnl"] = round(
@@ -1847,7 +1967,18 @@ def api_paper_open():
                             100 * (ltp - t["entry_price"]) / t["entry_price"], 2
                         )
                     t["current_price"] = ltp
-        return jsonify({"trades": trades})
+                prev_close = q.get("prev_close")
+                chg_pct = q.get("change_pct")
+                # Compute change_pct from ltp + prev_close if not provided by source
+                if chg_pct is None and ltp and prev_close:
+                    chg_pct = round(100 * (ltp - prev_close) / prev_close, 2)
+                t["prev_close"] = prev_close
+                t["chg_pct"] = chg_pct
+
+        # Response-level timestamp for the CMP header
+        ist_now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
+        fetched_at = ist_now.strftime("%d/%m %I:%M %p")
+        return jsonify({"trades": trades, "fetched_at": fetched_at})
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -2197,12 +2328,30 @@ def api_options_structures():
                         t["current_net_premium"] = current_net
                         entry_net = t.get("net_premium") or t.get("net_credit") or 0.0
                         t["pnl"] = round(entry_net - current_net, 2)
+                        # SANITY BOUND: Clamp P&L to theoretical max loss
+                        max_loss_rupees = t.get("max_loss_rupees", 0.0)
+                        if (
+                            max_loss_rupees > 0
+                            and abs(t["pnl"]) > max_loss_rupees * 1.1
+                        ):
+                            logging.getLogger(__name__).error(
+                                "Display enrich trade %s %s: P&L %s exceeds theoretical max loss %s - clamping.",
+                                t.get("id"),
+                                t.get("symbol"),
+                                t["pnl"],
+                                max_loss_rupees,
+                            )
+                            t["pnl"] = max(
+                                -max_loss_rupees, min(max_loss_rupees, t["pnl"])
+                            )
             except Exception as e:
                 logging.getLogger(__name__).exception(
                     "Failed to enrich open option trades: %s", e
                 )
 
-        return jsonify({"option_trades": ops})
+        ist_now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
+        fetched_at = ist_now.strftime("%d/%m %I:%M %p")
+        return jsonify({"option_trades": ops, "fetched_at": fetched_at})
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -2960,6 +3109,103 @@ def _automation_worker():
                 _engine_busy = False
 
         time.sleep(60)  # Wake up every minute
+
+
+# ── News Headlines ───────────────────────────────────────────────────
+_NEWS_CACHE: dict | None = None
+_NEWS_CACHE_TS: float = 0
+_NEWS_CACHE_TTL: float = 300.0  # 5 minutes
+
+
+@app.route("/api/news/headlines")
+def api_news_headlines():
+    """Return recent market news headlines from all sources."""
+    global _NEWS_CACHE, _NEWS_CACHE_TS
+    try:
+        now = time.time()
+        if _NEWS_CACHE is not None and (now - _NEWS_CACHE_TS) < _NEWS_CACHE_TTL:
+            return jsonify(_NEWS_CACHE)
+
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        from data.ai_scraper import (
+            _fetch_icicidirect_news,
+            _fetch_livemint_news,
+            _fetch_moneycontrol_news,
+            get_market_news_sentiment,
+        )
+
+        headlines: list[dict] = []
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            futures = {
+                executor.submit(_fetch_icicidirect_news): "icicidirect",
+                executor.submit(_fetch_livemint_news): "livemint",
+                executor.submit(_fetch_moneycontrol_news): "moneycontrol",
+            }
+            for future in as_completed(futures):
+                src = futures[future]
+                try:
+                    result = future.result()
+                    if result:
+                        for title, pub in result:
+                            headlines.append(
+                                {
+                                    "title": title,
+                                    "published_at": pub,
+                                    "source": src,
+                                }
+                            )
+                except Exception:
+                    pass
+
+        # Deduplicate by title
+        seen: set = set()
+        deduped = []
+        for h in headlines:
+            key = h["title"].lower().strip()
+            if key not in seen:
+                seen.add(key)
+                deduped.append(h)
+
+        # Sort by published_at descending (most recent first)
+        deduped.sort(key=lambda x: x.get("published_at", ""), reverse=True)
+
+        # Fetch AI sentiment verdict (non-blocking on failure)
+        verdict = None
+        try:
+            sentiment = get_market_news_sentiment()
+            if sentiment:
+                verdict = {
+                    "overall_market_sentiment": sentiment.get(
+                        "overall_market_sentiment"
+                    ),
+                    "sentiment_score": sentiment.get("sentiment_score"),
+                    "sentiment_strength": sentiment.get("sentiment_strength"),
+                    "justification": sentiment.get("justification"),
+                    "key_catalysts": (sentiment.get("key_catalysts") or [])[:3],
+                    "actionable_trade_ideas": (
+                        sentiment.get("actionable_trade_ideas") or []
+                    )[:3],
+                    "confidence": sentiment.get("confidence"),
+                    "model_used": sentiment.get("model_used"),
+                }
+        except Exception as sent_err:
+            logging.getLogger(__name__).warning(
+                "Sentiment verdict fetch failed: %s", sent_err
+            )
+
+        result = {
+            "headlines": deduped[:100],  # cap at 100
+            "total": len(deduped),
+            "verdict": verdict,
+        }
+        _NEWS_CACHE = result
+        _NEWS_CACHE_TS = now
+        return jsonify(result)
+
+    except Exception as e:
+        logging.getLogger(__name__).exception("News headlines failed: %s", e)
+        return jsonify({"error": str(e), "headlines": []}), 500
 
 
 if __name__ == "__main__":

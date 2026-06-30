@@ -373,10 +373,28 @@
                 }
 
                 .freshness-line {
-                  margin: -6px 0 24px;
-                  font-size: 0.78rem;
-                  color: var(--text-muted);
-                }
+                                  margin: -6px 0 24px;
+                                  font-size: 0.78rem;
+                                  color: var(--text-muted);
+                                }
+                                .src-badge {
+                                  display: inline-block;
+                                  padding: 1px 7px;
+                                  border-radius: 4px;
+                                  font-size: 0.7rem;
+                                  font-weight: 600;
+                                  margin-left: 6px;
+                                  background: var(--glass);
+                                  border: 1px solid var(--glass-border);
+                                  color: var(--text-muted);
+                                }
+                                .src-shoonya { background: rgba(59,130,246,0.12); border-color: rgba(59,130,246,0.3); color: #60a5fa; }
+                                                                .src-dhan { background: rgba(16,185,129,0.12); border-color: rgba(16,185,129,0.3); color: #34d399; }
+                                                                .src-yfinance { background: rgba(251,191,36,0.12); border-color: rgba(251,191,36,0.3); color: #fbbf24; }
+                                                                .src-cache { background: rgba(139,149,168,0.12); border-color: rgba(139,149,168,0.3); color: #8b95a8; }
+                                                                .src-research360 { background: rgba(139,92,246,0.12); border-color: rgba(139,92,246,0.3); color: #a78bfa; }
+                                                                .src-ai { background: rgba(6,182,212,0.12); border-color: rgba(6,182,212,0.3); color: #22d3ee; }
+                                                                .src-local { background: rgba(245,158,11,0.12); border-color: rgba(245,158,11,0.3); color: #fbbf24; }
 
                 .up {
                   color: var(--accent-green);
@@ -2813,7 +2831,7 @@
             <!-- Risk bar (MOVED TO PAPER TRADER) -->
 
             <!-- ═══ OPTION CHAIN ═══ -->
-            <section class="option-chain-section card" style="margin-top: 24px">
+            <section id="option-chain" class="option-chain-section card" style="margin-top: 24px">
                 <div class="card-title" style="justify-content: space-between">
                     <div style="display: flex; align-items: center; gap: 8px">
                         <span class="icon">⛓️</span> NIFTY Option Chain
@@ -2938,7 +2956,30 @@
 
             function renderFreshnessLine(d) {
                 const ts = d.signals_computed_at || d.ts || "—";
-                let html = `Data as of: ${ts} · Market: ${d.market_status || "—"}`;
+                const ds = d.data_sources || {};
+                let srcParts = [];
+                // Show overall primary source prominently
+                if (ds.primary)
+                    srcParts.push(
+                        `<span class="src-badge src-${ds.primary}">Primary: ${ds.primary.toUpperCase()}</span>`,
+                    );
+                if (ds.quotes)
+                    srcParts.push(
+                        `<span class="src-badge src-${ds.quotes}">Quotes: ${ds.quotes.toUpperCase()}</span>`,
+                    );
+                if (ds.ohlc)
+                    srcParts.push(
+                        `<span class="src-badge src-${ds.ohlc}">OHLC: ${ds.ohlc.toUpperCase()}</span>`,
+                    );
+                if (ds.option_chain)
+                    srcParts.push(
+                        `<span class="src-badge src-${ds.option_chain}">Options: ${ds.option_chain.toUpperCase()}</span>`,
+                    );
+                const srcHtml = srcParts.length
+                    ? `<span style="margin-left:12px">📡 ${srcParts.join(" ")}</span>`
+                    : "";
+
+                let html = `Data as of: ${ts} · Market: ${d.market_status || "—"}${srcHtml}`;
 
                 const healthBtn = document.getElementById("system-health-btn");
                 const healthDot = document.getElementById("health-dot");
@@ -3604,7 +3645,8 @@
 
             function renderRankTable(tableId, items) {
                 const tbody = document.querySelector(`#${tableId} tbody`);
-                tbody.innerHTML = items
+                if (!tbody) return;
+                tbody.innerHTML = (items || [])
                     .map((r) => {
                         const rsVal = Number(r.rs_slope || 0);
                         const vs50Val = Number(r.pct_vs_50dma || 0);
@@ -3911,7 +3953,10 @@
                     if (data.error) throw new Error(data.error);
 
                     const records = data.records?.data || [];
-                    const underlyingPrice = data.records?.underlyingValue || 0;
+                    let underlyingPrice = data.records?.underlyingValue || data.underlying_price || data.filtered?.underlying_price || 0;
+                    if (underlyingPrice === 0 && records.length > 0) {
+                        underlyingPrice = records[Math.floor(records.length / 2)].strikePrice || 0;
+                    }
                     const ts =
                         data.records?.timestamp || new Date().toLocaleString();
                     const source = data._source || "unknown";
@@ -3958,7 +4003,32 @@
             <div>Expiry: <span style="color:var(--accent-blue); font-weight:700;">${expiryDisplay}</span></div>
           </div>
         `;
-                    if (srcEl) srcEl.textContent = source;
+                    if (srcEl) {
+                        srcEl.textContent = source;
+                        // Color-code source badge
+                        const srcClean = source.replace(/[:].*$/, "");
+                        srcEl.style.background = srcClean.includes("shoonya")
+                            ? "rgba(59,130,246,0.12)"
+                            : srcClean.includes("dhan")
+                              ? "rgba(16,185,129,0.12)"
+                              : srcClean.includes("cache")
+                                ? "rgba(139,149,168,0.12)"
+                                : "rgba(251,191,36,0.12)";
+                        srcEl.style.borderColor = srcClean.includes("shoonya")
+                            ? "rgba(59,130,246,0.3)"
+                            : srcClean.includes("dhan")
+                              ? "rgba(16,185,129,0.3)"
+                              : srcClean.includes("cache")
+                                ? "rgba(139,149,168,0.3)"
+                                : "rgba(251,191,36,0.3)";
+                        srcEl.style.color = srcClean.includes("shoonya")
+                            ? "#60a5fa"
+                            : srcClean.includes("dhan")
+                              ? "#34d399"
+                              : srcClean.includes("cache")
+                                ? "#8b95a8"
+                                : "#fbbf24";
+                    }
 
                     // Detect if we have live prices or OI-only data
                     const hasLTP = records.some(
@@ -3996,12 +4066,20 @@
 
                     // Filter for strikes near the money (+/- 400 points)
                     const atm = Math.round(underlyingPrice / 50) * 50;
-                    const filtered = records.filter(
+                    let filtered = atm > 0 ? records.filter(
                         (r) => Math.abs(r.strikePrice - atm) <= 400,
-                    );
+                    ) : records;
+                    if (filtered.length === 0 && records.length > 0) {
+                        // Fallback if ATM filter excluded everything
+                        const mid = Math.floor(records.length / 2);
+                        filtered = records.slice(Math.max(0, mid - 8), mid + 8);
+                    }
 
-                    tbody.innerHTML = filtered
-                        .map((r) => {
+                    if (filtered.length === 0) {
+                        tbody.innerHTML = `<tr><td colspan="7" style="text-align:center; padding:24px; color:var(--text-muted);">No option chain data available currently. Check feed connection or market status.</td></tr>`;
+                    } else {
+                        tbody.innerHTML = filtered
+                            .map((r) => {
                             const ce = r.CE || {};
                             const pe = r.PE || {};
                             const isAtm = r.strikePrice === atm;
@@ -4053,6 +4131,7 @@
           `;
                         })
                         .join("");
+                    }
                 } catch (e) {
                     tsEl.textContent = "Failed to load chain: " + e.message;
                 }

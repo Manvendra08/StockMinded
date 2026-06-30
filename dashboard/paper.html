@@ -1531,6 +1531,9 @@
                 <button class="tab-btn" onclick="switchTab('diagnostics')">
                     🔍 Diagnostics
                 </button>
+                <button class="tab-btn" onclick="switchTab('news')">
+                    📰 News
+                </button>
                 <button class="tab-btn" onclick="switchTab('settings')">
                     ⚙️ Settings
                 </button>
@@ -1966,6 +1969,41 @@
                         ></div>
                     </div>
                 </div>
+            </div>
+
+            <!-- Tab: News -->
+            <div class="tab-pane" id="tab-news">
+                <div class="section-header">
+                    <div class="section-title">
+                        <span class="dot dot-blue"></span>
+                        Market News (Last 48 Hours)
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 10px">
+                        <span
+                            id="news-count"
+                            style="font-size: 0.75rem; color: var(--text-muted)"
+                        ></span>
+                        <button
+                            class="btn btn-sm btn-ghost"
+                            onclick="loadNews()"
+                        >
+                            <span class="spin"></span
+                            ><span class="btn-text">↻ Refresh</span>
+                        </button>
+                    </div>
+                </div>
+                <div id="news-verdict" style="display: block"></div>
+                <div
+                    id="news-empty"
+                    style="display: none"
+                    class="analysis-list"
+                >
+                    No news articles fetched yet.
+                </div>
+                <div
+                    id="news-list"
+                    style="display: flex; flex-direction: column; gap: 8px"
+                ></div>
             </div>
 
             <!-- Tab: Settings -->
@@ -2686,6 +2724,7 @@
                     "eod",
                     "insights",
                     "diagnostics",
+                    "news",
                     "settings",
                 ];
                 const btns = document.querySelectorAll(".tab-btn");
@@ -2705,6 +2744,7 @@
                 if (name === "open") loadOpen();
                 if (name === "options") loadOptions();
                 if (name === "diagnostics") loadSkipped();
+                if (name === "news") loadNews();
             }
 
             function showEvidence(id) {
@@ -3670,6 +3710,217 @@
                 }
             }
 
+            // ── Load News Headlines ───────────────────────────────────────
+            async function loadNews() {
+                try {
+                    const r = await fetch("/api/news/headlines");
+                    const d = await r.json();
+                    const container = document.getElementById("news-list");
+                    const empty = document.getElementById("news-empty");
+                    const count = document.getElementById("news-count");
+                    const verdictContainer =
+                        document.getElementById("news-verdict");
+                    if (!container) return;
+
+                    // ── AI Sentiment Verdict ──
+                    if (verdictContainer && d.verdict) {
+                        var v = d.verdict;
+                        var sentimentColor =
+                            v.overall_market_sentiment === "BULLISH"
+                                ? "#22c55e"
+                                : v.overall_market_sentiment === "BEARISH"
+                                  ? "#ef4444"
+                                  : "#6b7280";
+                        var sentimentIcon =
+                            v.overall_market_sentiment === "BULLISH"
+                                ? "▲"
+                                : v.overall_market_sentiment === "BEARISH"
+                                  ? "▼"
+                                  : "◆";
+                        var scoreBar = "";
+                        if (v.sentiment_score != null) {
+                            var pct = Math.round(
+                                ((v.sentiment_score + 1) / 2) * 100,
+                            );
+                            var barColor =
+                                pct > 60
+                                    ? "#22c55e"
+                                    : pct < 40
+                                      ? "#ef4444"
+                                      : "#6b7280";
+                            scoreBar =
+                                '<div style="margin-top:8px;">' +
+                                '<div style="font-size:0.7rem;color:var(--text-muted);margin-bottom:4px;">Sentiment Score</div>' +
+                                '<div style="height:6px;background:var(--bg-primary);border-radius:3px;overflow:hidden;">' +
+                                '<div style="height:100%;width:' +
+                                pct +
+                                "%;background:" +
+                                barColor +
+                                ';border-radius:3px;transition:width 0.5s;"></div></div></div>';
+                        }
+
+                        var catalystsHtml = "";
+                        if (v.key_catalysts && v.key_catalysts.length) {
+                            catalystsHtml =
+                                '<div style="margin-top:10px;">' +
+                                '<div style="font-size:0.7rem;font-weight:600;color:var(--text-muted);text-transform:uppercase;margin-bottom:4px;">Key Catalysts</div>' +
+                                '<ul style="margin:0;padding-left:16px;font-size:0.78rem;color:var(--text-primary);line-height:1.5;">' +
+                                v.key_catalysts
+                                    .map(function (c) {
+                                        var cColor =
+                                            c.type === "POS"
+                                                ? "#22c55e"
+                                                : c.type === "NEG"
+                                                  ? "#ef4444"
+                                                  : "#6b7280";
+                                        return (
+                                            '<li><span style="color:' +
+                                            cColor +
+                                            ';font-weight:600;">' +
+                                            (c.type || "NEUT") +
+                                            "</span> " +
+                                            escapeHtml(c.description || "") +
+                                            "</li>"
+                                        );
+                                    })
+                                    .join("") +
+                                "</ul></div>";
+                        }
+
+                        var ideasHtml = "";
+                        if (
+                            v.actionable_trade_ideas &&
+                            v.actionable_trade_ideas.length
+                        ) {
+                            ideasHtml =
+                                '<div style="margin-top:10px;">' +
+                                '<div style="font-size:0.7rem;font-weight:600;color:var(--text-muted);text-transform:uppercase;margin-bottom:4px;">Trade Ideas</div>' +
+                                '<ul style="margin:0;padding-left:16px;font-size:0.78rem;color:var(--text-primary);line-height:1.5;">' +
+                                v.actionable_trade_ideas
+                                    .map(function (t) {
+                                        var dColor =
+                                            t.direction === "LONG"
+                                                ? "#22c55e"
+                                                : t.direction === "SHORT"
+                                                  ? "#ef4444"
+                                                  : "#6b7280";
+                                        return (
+                                            '<li><span style="color:' +
+                                            dColor +
+                                            ';font-weight:600;">' +
+                                            (t.direction || "") +
+                                            " " +
+                                            escapeHtml(t.ticker || "") +
+                                            "</span> — " +
+                                            escapeHtml(t.reason || "") +
+                                            "</li>"
+                                        );
+                                    })
+                                    .join("") +
+                                "</ul></div>";
+                        }
+
+                        var modelTag =
+                            v.model_used && v.model_used !== "None"
+                                ? '<div style="margin-top:8px;font-size:0.65rem;color:var(--text-muted);">Analysis by: ' +
+                                  escapeHtml(v.model_used) +
+                                  "</div>"
+                                : "";
+
+                        var justificationHtml = v.justification
+                            ? '<div style="margin-top:8px;font-size:0.82rem;line-height:1.5;color:var(--text-primary);">' +
+                              escapeHtml(v.justification) +
+                              "</div>"
+                            : "";
+
+                        verdictContainer.innerHTML =
+                            '<div style="border-left:4px solid ' +
+                            sentimentColor +
+                            '; background:var(--glass); border-radius:var(--radius-sm); padding:14px 16px; margin-bottom:16px;">' +
+                            '<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">' +
+                            '<span style="font-size:1.2rem;color:' +
+                            sentimentColor +
+                            ';">' +
+                            sentimentIcon +
+                            "</span>" +
+                            '<span style="font-weight:700;font-size:0.95rem;color:' +
+                            sentimentColor +
+                            ';">' +
+                            (v.overall_market_sentiment || "NEUTRAL") +
+                            "</span>" +
+                            (v.sentiment_strength
+                                ? '<span style="font-size:0.7rem;padding:2px 8px;border-radius:10px;background:' +
+                                  sentimentColor +
+                                  "20;color:" +
+                                  sentimentColor +
+                                  ';">' +
+                                  v.sentiment_strength +
+                                  "</span>"
+                                : "") +
+                            (v.confidence
+                                ? '<span style="font-size:0.7rem;padding:2px 8px;border-radius:10px;background:var(--glass-border);color:var(--text-muted);margin-left:4px;">conf: ' +
+                                  v.confidence +
+                                  "</span>"
+                                : "") +
+                            "</div>" +
+                            scoreBar +
+                            justificationHtml +
+                            catalystsHtml +
+                            ideasHtml +
+                            modelTag +
+                            "</div>";
+                    } else if (verdictContainer) {
+                        verdictContainer.innerHTML = "";
+                    }
+
+                    if (d.error || !d.headlines || !d.headlines.length) {
+                        if (empty) empty.style.display = "flex";
+                        container.innerHTML = "";
+                        if (count) count.textContent = "0 articles";
+                        return;
+                    }
+                    if (empty) empty.style.display = "none";
+                    if (count)
+                        count.textContent = d.headlines.length + " articles";
+                    container.innerHTML = d.headlines
+                        .map(function (h) {
+                            var src = h.source || "unknown";
+                            var ts = h.published_at
+                                ? h.published_at.slice(0, 16).replace("T", " ")
+                                : "";
+                            var colors = {
+                                icicidirect: "#e91e63",
+                                livemint: "#4caf50",
+                                moneycontrol: "#f44336",
+                            };
+                            var color =
+                                colors[src.toLowerCase()] ||
+                                "var(--text-muted)";
+                            return (
+                                '<div style="padding:8px 12px; border-radius:var(--radius-sm); background:var(--glass); border:1px solid var(--glass-border); display:flex; align-items:flex-start; gap:10px;">' +
+                                '<span style="font-size:0.6rem; font-weight:700; text-transform:uppercase; padding:2px 6px; border-radius:4px; background:' +
+                                color +
+                                "20; color:" +
+                                color +
+                                '; white-space:nowrap; margin-top:1px;">' +
+                                src +
+                                "</span>" +
+                                '<div style="flex:1; min-width:0;">' +
+                                '<div style="font-size:0.82rem; line-height:1.4; color:var(--text-primary);">' +
+                                escapeHtml(h.title) +
+                                "</div>" +
+                                (ts
+                                    ? '<div style="font-size:0.65rem; color:var(--text-muted); margin-top:4px;">' +
+                                      ts +
+                                      "</div>"
+                                    : "") +
+                                "</div></div>"
+                            );
+                        })
+                        .join("");
+                } catch (_) {}
+            }
+
             function renderVerdictTrace(trace) {
                 if (!trace || !trace.inputs) {
                     document.getElementById("trace-panel").style.opacity =
@@ -3834,8 +4085,9 @@
                                 : t.exit_premium !== undefined &&
                                     t.exit_premium !== null
                                   ? fmtInr(t.exit_premium)
-                                  : t.pnl !== undefined && t.pnl !== null
-                                    ? fmtInr(premiumValue - t.pnl)
+                                  : t.current_net_premium !== undefined &&
+                                      t.current_net_premium !== null
+                                    ? fmtInr(t.current_net_premium)
                                     : "—";
                         const displayPnl = colorPnl(t.pnl);
                         const entryTime =
@@ -4105,7 +4357,7 @@
                         {
                             label: "Option Chain",
                             value: "Live",
-                            link: "/option-chain",
+                            link: "/#option-chain",
                         },
                     ];
 
@@ -4176,6 +4428,7 @@
                     loadHistory(),
                     loadEODHistory(),
                     loadSkipped(),
+                    loadNews(),
                 ]);
             }
 

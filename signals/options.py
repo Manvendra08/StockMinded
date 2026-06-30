@@ -65,29 +65,35 @@ def _next_expiry(symbol="NIFTY", preference="weekly"):
             if days_ahead <= 0:
                 days_ahead += 7
             exp_date = today + timedelta(days=days_ahead)
+        elif symbol == "SENSEX":
+            # SENSEX weekly options expire on Thursdays
+            days_ahead = calendar.THURSDAY - today.weekday()
+            if days_ahead <= 0:
+                days_ahead += 7
+            exp_date = today + timedelta(days=days_ahead)
         else:
-            # NSE changed NIFTY weekly expiry from Thursday → Tuesday (effective Apr 2025)
+            # NIFTY and other indices: NSE changed NIFTY weekly expiry from Thursday → Tuesday (effective Apr 2025)
             days_ahead = calendar.TUESDAY - today.weekday()
             if days_ahead <= 0:  # already Tuesday or past it this week
                 days_ahead += 7
             exp_date = today + timedelta(days=days_ahead)
     else:
-        # Monthly last-Thursday expiry logic for both NIFTY and BANKNIFTY
+        # Monthly last-Tuesday expiry logic for both NIFTY and BANKNIFTY
         cal = calendar.monthcalendar(today.year, today.month)
         last_week = cal[-1]
-        if last_week[calendar.THURSDAY] != 0:
-            exp_date = date(today.year, today.month, last_week[calendar.THURSDAY])
+        if last_week[calendar.TUESDAY] != 0:
+            exp_date = date(today.year, today.month, last_week[calendar.TUESDAY])
         else:
-            exp_date = date(today.year, today.month, cal[-2][calendar.THURSDAY])
+            exp_date = date(today.year, today.month, cal[-2][calendar.TUESDAY])
         if exp_date < today:
             next_month = today.month + 1 if today.month < 12 else 1
             next_year = today.year if today.month < 12 else today.year + 1
             cal = calendar.monthcalendar(next_year, next_month)
             last_week = cal[-1]
-            if last_week[calendar.THURSDAY] != 0:
-                exp_date = date(next_year, next_month, last_week[calendar.THURSDAY])
+            if last_week[calendar.TUESDAY] != 0:
+                exp_date = date(next_year, next_month, last_week[calendar.TUESDAY])
             else:
-                exp_date = date(next_year, next_month, cal[-2][calendar.THURSDAY])
+                exp_date = date(next_year, next_month, cal[-2][calendar.TUESDAY])
     while _is_holiday(exp_date) or exp_date.weekday() >= 5:
         exp_date -= timedelta(days=1)
     return exp_date.strftime("%d-%b-%Y")
@@ -195,12 +201,62 @@ def chain_snapshot(symbol, target_expiries=None, target_strikes=None) -> pd.Data
     non_zero_dte = [e for e in expiries if not _is_today(e)]
     closest_expiry = non_zero_dte[0] if non_zero_dte else expiries[0]
 
-    standardized_valid = set()
+    # Filter target_expiries: only keep future expiries (or today's)
+    today_local_date = today_local
+    filtered_targets = []
     if target_expiries:
         for e in target_expiries:
             parsed = parse_exp(e)
             if parsed != datetime.max:
-                standardized_valid.add(parsed.strftime("%Y-%m-%d"))
+                days_stale = (today_local_date - parsed.date()).days
+                # Keep only today or future expiries; skip clearly stale ones
+                # Near-stale (<7d) allowed for grace on recent closed trades;
+                # dates >365d in the past are definitely data corruption.
+                if days_stale < -365 or days_stale >= 365:
+                    logging.getLogger(__name__).warning(
+                        "%s: dropping corrupt expiry %s (%d days stale)",
+                        symbol,
+                        e,
+                        days_stale,
+                    )
+                    continue
+                if parsed.date() >= today_local_date or days_stale < 7:
+                    filtered_targets.append(e)
+        if filtered_targets != target_expiries:
+            removed = [e for e in target_expiries if e not in filtered_targets]
+            if removed:
+                logging.getLogger(__name__).warning(
+                    "%s: filtered stale target_expiries: removed %s, kept %s",
+                    symbol,
+                    removed,
+                    filtered_targets,
+                )
+
+    standardized_valid = set()
+    if filtered_targets:
+        found_any = False
+        for e in filtered_targets:
+            parsed = parse_exp(e)
+            if parsed != datetime.max:
+                std = parsed.strftime("%Y-%m-%d")
+                if std in [
+                    parse_exp(x).strftime("%Y-%m-%d")
+                    for x in expiries
+                    if parse_exp(x) != datetime.max
+                ]:
+                    standardized_valid.add(std)
+                    found_any = True
+        if not found_any:
+            # Fallback: target expiries not in chain (likely stale); use closest valid expiry
+            logging.getLogger(__name__).warning(
+                "%s: target expiries %s not in chain; falling back to %s",
+                symbol,
+                filtered_targets,
+                closest_expiry,
+            )
+            parsed_closest = parse_exp(closest_expiry)
+            if parsed_closest != datetime.max:
+                standardized_valid.add(parsed_closest.strftime("%Y-%m-%d"))
     else:
         parsed_closest = parse_exp(closest_expiry)
         if parsed_closest != datetime.max:
@@ -372,12 +428,17 @@ def is_expiry_day(expiry_str: str) -> bool:
 
 
 def _expiry_date_for_symbol(symbol: str) -> str | None:
-    """Return the current expiry date string for a symbol based on NSE schedule.
+    """Return the nearest (current or next) expiry date for a symbol.
 
-    NIFTY: weekly expiry every Tuesday.
-    BANKNIFTY: monthly expiry — last Tuesday of the month.
+    For weekly symbols (NIFTY Tue, SENSEX Thu): finds the most recent
+    occurrence of the target weekday (including today), then applies
+    holiday rollback (previous trading day).
 
-    Returns None on calculation failure.
+    For monthly symbols (BANKNIFTY): last Tuesday of the month with
+    holiday rollback.
+
+    Used by is_symbol_expiry_today() to determine if today IS the
+    effective expiry day.
     """
     try:
         from datetime import date as dt_date
@@ -394,16 +455,28 @@ def _expiry_date_for_symbol(symbol: str) -> str | None:
             )
             exp_date = dt_date(today.year, today.month, last_tuesday)
         else:
-            # NIFTY: next Tuesday
-            days_ahead = cal.TUESDAY - today.weekday()
-            if days_ahead <= 0:
-                days_ahead += 7
-            exp_date = today + timedelta(days=days_ahead)
+            # Weekly expiry: determine target weekday from symbol
+            target_weekday = (
+                calendar.THURSDAY if symbol == "SENSEX" else calendar.TUESDAY
+            )
+            # Days since the most recent target weekday (0 if today is expiry day)
+            days_since = (today.weekday() - target_weekday) % 7
+            exp_date = today - timedelta(days=days_since)
 
+        # Holiday rollback: if expiry lands on a holiday/weekend, move to previous trading day
         while _is_holiday(exp_date) or exp_date.weekday() >= 5:
             exp_date -= timedelta(days=1)
-            if exp_date < today:
-                # Holiday pushed us before today — use the prior calculation directly
+            if exp_date.month != today.month and symbol == "BANKNIFTY":
+                # Monthly expiry rolled into previous month — find next month's
+                next_month = today.month + 1 if today.month < 12 else 1
+                next_year = today.year if today.month < 12 else today.year + 1
+                month_cal = cal.monthcalendar(next_year, next_month)
+                last_tuesday = max(
+                    week[cal.TUESDAY] for week in month_cal if week[cal.TUESDAY] != 0
+                )
+                exp_date = dt_date(next_year, next_month, last_tuesday)
+                while _is_holiday(exp_date) or exp_date.weekday() >= 5:
+                    exp_date -= timedelta(days=1)
                 break
 
         return exp_date.strftime("%d-%b-%Y")
