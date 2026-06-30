@@ -422,8 +422,12 @@ def quote_batch(symbols: list[str]) -> dict[str, dict]:
                         out[sym]["source"] = "shoonya_fno"
                         _QUOTE_SOURCE[sym] = "shoonya"
                         continue
-                except Exception:
-                    pass
+                except Exception as e:
+                    logging.getLogger(__name__).warning(
+                        "[quote_batch] shoonya fetch_fno_quote failed for %s: %s",
+                        sym,
+                        e,
+                    )
                 try:
                     # Fall back to spot quote (ltp only)
                     q = shoonya.fetch_quote(sym)
@@ -431,10 +435,14 @@ def quote_batch(symbols: list[str]) -> dict[str, dict]:
                         out[sym] = q
                         out[sym]["source"] = "shoonya_quote"
                         _QUOTE_SOURCE[sym] = "shoonya"
-                except Exception:
-                    pass
-    except Exception:
-        pass
+                except Exception as e:
+                    logging.getLogger(__name__).warning(
+                        "[quote_batch] shoonya fetch_quote failed for %s: %s", sym, e
+                    )
+    except Exception as e:
+        logging.getLogger(__name__).warning(
+            "[quote_batch] shoonya initialization failed: %s", e
+        )
 
     # Phase 1: Dhan fallback for symbols still empty
     if not _dhan_enabled():
@@ -2210,8 +2218,10 @@ def _resolve_shoonya_token(shoonya, symbol: str, exchange: str) -> str | None:
             values = res.get("values", [])
             if values:
                 return values[0].get("token") or values[0].get("tok")
-    except Exception:
-        pass
+    except Exception as e:
+        logging.getLogger(__name__).warning(
+            "[_resolve_shoonya_token] failed for %s on %s: %s", symbol, exchange, e
+        )
     return None
 
 
@@ -2523,54 +2533,99 @@ def universe_ohlc(tickers: list[str], period: str = "6mo") -> dict[str, pd.DataF
     return results
 
 
+_trendlyne_cache: dict[str, tuple[float, dict]] = {}
+
+
 def fetch_trendlyne_options_kpis(symbol: str = "NIFTY") -> dict:
     """
     Fetch high-level KPIs from Trendlyne Smart Options dashboard.
-    Uses curl_cffi for Cloudflare bypass and extracts data from the SPA state.
+    Uses curl_cffi for Cloudflare bypass and extracts data from the SPA state or regex.
+    Caches results to prevent rate limiting and handles HTTP 500 gracefully.
     """
+    import time
+
     t_symbol = symbol.upper()
-    # Mapping for indices as Trendlyne uses specific slugs
+    now = time.time()
+    if t_symbol in _trendlyne_cache:
+        cached_ts, cached_data = _trendlyne_cache[t_symbol]
+        if now - cached_ts < 900 and cached_data:
+            return cached_data
+
     slug_map = {"NIFTY": "NIFTY", "BANKNIFTY": "BANKNIFTY", "FINNIFTY": "FINNIFTY"}
     slug = slug_map.get(t_symbol, t_symbol)
     url = f"https://smartoptions.trendlyne.com/dashboard/options/latest/{slug}/"
 
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Referer": "https://smartoptions.trendlyne.com/",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
     }
 
     try:
         from curl_cffi import requests as curl_requests
 
         session = curl_requests.Session(impersonate="chrome120")
-        resp = session.get(url, headers=headers, timeout=15)
+        resp = session.get(url, headers=headers, timeout=12)
         resp.raise_for_status()
 
         import json
         import re
 
-        # Extract the state JSON from the script tag (standard Trendlyne SPA pattern)
+        kpis = {}
         match = re.search(
             r"window\.__INITIAL_STATE__\s*=\s*({.*?});", resp.text, re.DOTALL
         )
-        if not match:
-            return {}
+        if match:
+            state = json.loads(match.group(1))
+            dashboard = state.get("optionsDashboard", {}).get("latest", {})
+            kpis = {
+                "fii_index_long_short_ratio": dashboard.get("fiiLongShortRatio"),
+                "modified_max_pain": dashboard.get("modifiedMaxPain"),
+                "iv_percentile": dashboard.get("ivPercentile"),
+                "sentiment": dashboard.get("sentiment"),
+                "pcr_oi": dashboard.get("pcr"),
+                "source": "trendlyne",
+            }
+        else:
+            # Fallback regex extraction if Trendlyne SPA layout changed
+            def _extract_val(pattern: str):
+                m = re.search(pattern, resp.text, re.IGNORECASE)
+                if m:
+                    try:
+                        return float(m.group(1))
+                    except ValueError:
+                        return m.group(1)
+                return None
 
-        state = json.loads(match.group(1))
-        dashboard = state.get("optionsDashboard", {}).get("latest", {})
+            kpis = {
+                "fii_index_long_short_ratio": _extract_val(
+                    r'["\']?fiiLongShortRatio["\']?\s*[:=]\s*["\']?([0-9\.\-]+)'
+                ),
+                "modified_max_pain": _extract_val(
+                    r'["\']?modifiedMaxPain["\']?\s*[:=]\s*["\']?([0-9\.\-]+)'
+                ),
+                "iv_percentile": _extract_val(
+                    r'["\']?ivPercentile["\']?\s*[:=]\s*["\']?([0-9\.\-]+)'
+                ),
+                "sentiment": _extract_val(
+                    r'["\']?sentiment["\']?\s*[:=]\s*["\']?([A-Za-z]+)'
+                ),
+                "pcr_oi": _extract_val(r'["\']?pcr["\']?\s*[:=]\s*["\']?([0-9\.\-]+)'),
+                "source": "trendlyne",
+            }
 
-        return {
-            "fii_index_long_short_ratio": dashboard.get("fiiLongShortRatio"),
-            "modified_max_pain": dashboard.get("modifiedMaxPain"),
-            "iv_percentile": dashboard.get("ivPercentile"),
-            "sentiment": dashboard.get("sentiment"),
-            "pcr_oi": dashboard.get("pcr"),
-            "source": "trendlyne",
-        }
+        # Filter out None values
+        kpis = {k: v for k, v in kpis.items() if v is not None}
+        if len(kpis) > 1:
+            _trendlyne_cache[t_symbol] = (now, kpis)
+            return kpis
+
     except Exception as e:
-        logging.getLogger(__name__).warning(f"Trendlyne fetch failed for {symbol}: {e}")
-        return {}
+        logging.getLogger(__name__).debug(f"Trendlyne fetch failed for {symbol}: {e}")
+
+    # On error or missing data, return stale cache if available
+    if t_symbol in _trendlyne_cache:
+        return _trendlyne_cache[t_symbol][1]
+
+    return {}
 
 
 def fetch_shoonya_security_info(exchange: str, token: str) -> dict | None:

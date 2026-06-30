@@ -2977,7 +2977,9 @@
                         stats.total_trades;
                     document.getElementById("s-total-sub").textContent =
                         filterDate ? `Date: ${filterDate}` : `Since inception`;
-                } catch (_) {}
+                } catch (_) {
+                    console.warn("[loadStats] render failed", _);
+                }
             }
 
             async function purgeDB(btn) {
@@ -3117,7 +3119,9 @@
                     if (document.getElementById("set-smart-reentry"))
                         document.getElementById("set-smart-reentry").checked =
                             !!s.smart_reentry_enabled;
-                } catch (_) {}
+                } catch (_) {
+                    console.warn("[loadSettings] render failed", _);
+                }
             }
 
             async function saveSettings(btn) {
@@ -3425,7 +3429,9 @@
 
                     // Also update stats cards if they should reflect the current filter
                     loadStats();
-                } catch (_) {}
+                } catch (_) {
+                    console.warn("[loadHistory] render failed", _);
+                }
             }
 
             // ── Load EOD Summaries ────────────────────────────────────────
@@ -3447,7 +3453,9 @@
                     }
                     // Render exit reason analytics
                     renderExitReasonAnalytics(_allTrades);
-                } catch (_) {}
+                } catch (_) {
+                    console.warn("[loadEODHistory] render failed", _);
+                }
             }
 
             function renderExitReasonAnalytics(trades) {
@@ -3679,7 +3687,9 @@
                                 .join("");
                         }
                     }
-                } catch (_) {}
+                } catch (_) {
+                    console.warn("[loadSkipped] render failed", _);
+                }
             }
 
             async function clearSkipped() {
@@ -3708,6 +3718,14 @@
                 } catch (e) {
                     toast("Error clearing skip log", "err");
                 }
+            }
+
+            // ── HTML escape helper ──────────────────────────────────────────
+            function escapeHtml(str) {
+                if (!str) return "";
+                var div = document.createElement("div");
+                div.appendChild(document.createTextNode(str));
+                return div.innerHTML;
             }
 
             // ── Load News Headlines ───────────────────────────────────────
@@ -3918,7 +3936,9 @@
                             );
                         })
                         .join("");
-                } catch (_) {}
+                } catch (_) {
+                    console.warn("[loadNews] render failed", _);
+                }
             }
 
             function renderVerdictTrace(trace) {
@@ -4113,7 +4133,9 @@
       </tr>`;
                     });
                     tbody.innerHTML = html;
-                } catch (e) {}
+                } catch (e) {
+                    console.warn("[loadOptions] render failed", e);
+                }
             }
 
             async function closeOptionPosition(tradeId, btn) {
@@ -4379,7 +4401,9 @@
 
                     // Update trace if available
                     if (d.verdict_trace) renderVerdictTrace(d.verdict_trace);
-                } catch (_) {}
+                } catch (_) {
+                    console.warn("[renderIndexBar] render failed", _);
+                }
             }
 
             async function renderTicker() {
@@ -4414,7 +4438,9 @@
                     document.getElementById("ticker-inner").innerHTML = html
                         ? html + html
                         : '<span class="ticker-item">—</span>';
-                } catch (_) {}
+                } catch (_) {
+                    console.warn("[renderTicker] render failed", _);
+                }
             }
 
             // ── Full Refresh ─────────────────────────────────────────────
@@ -4514,7 +4540,9 @@
                         );
                         await loadAll();
                     }
-                } catch (_) {}
+                } catch (_) {
+                    console.warn("[checkSLTGTSilent] fetch failed", _);
+                }
             }
 
             // ── EOD Auto-trigger at 3:30 PM ──────────────────────────────
@@ -4540,7 +4568,12 @@
                                 headers: { "Content-Type": "application/json" },
                                 body: JSON.stringify({ message: msg }),
                             });
-                        } catch (_) {}
+                        } catch (_) {
+                            console.warn(
+                                "[scheduleEOD] Telegram send failed",
+                                _,
+                            );
+                        }
                     }
                     scheduleEOD(); // Re-schedule for tomorrow
                 }, ms);

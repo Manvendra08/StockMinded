@@ -229,7 +229,19 @@ def _save_db(db: dict) -> None:
 
 @contextlib.contextmanager
 def atomic_db_update():
-    """Transaction-style database update with Windows cross-process locking and retries."""
+    """Transaction-style database update with Windows cross-process locking and retries.
+
+    H5 FIX: Separated lock-acquisition retries from save failures.
+    Previously, if _save_db() raised an OSError (e.g. disk full), the retry
+    loop would attempt to re-yield, which is invalid for a contextmanager
+    generator. Now:
+      - Lock acquisition: retries up to 20 times on contention.
+      - Save failure: logs error and re-raises immediately (no retry).
+      - The caller always receives the exception on save failure, so it
+        knows the mutation was NOT persisted.
+    """
+    import copy
+
     DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
 
     # Ensure lock file exists
@@ -251,44 +263,67 @@ def atomic_db_update():
                 indent=2,
             )
 
-    locked = False
+    # Phase 1: Acquire lock with retries
     lock_f = None
-    # Ensure lock file exists before trying r+ open
     try:
         LOCK_FILE.touch(exist_ok=True)
-    except Exception:
-        pass
-    for attempt in range(20):  # Increased retries
+    except Exception as e:
+        logging.getLogger(__name__).warning(
+            "[atomic_db_update] lock file touch failed: %s", e
+        )
+
+    for attempt in range(20):
         try:
             lock_f = open(LOCK_FILE, "r+")
-            # Try to acquire lock on the lock file
             msvcrt.locking(lock_f.fileno(), msvcrt.LK_NBLCK, 1)
-            locked = True
-
-            db = _load_db()
-
-            yield db
-
-            _save_db(db)
-            break  # Success
-        except (OSError, IOError) as e:
+            break  # Lock acquired
+        except (OSError, IOError):
+            if lock_f:
+                try:
+                    lock_f.close()
+                except Exception as e:
+                    logging.getLogger(__name__).warning(
+                        "[atomic_db_update] lock_f close error on retry %s: %s",
+                        attempt,
+                        e,
+                    )
+                lock_f = None
             if attempt < 19:
                 time.sleep(0.2 * (attempt + 1))
                 continue
             else:
                 raise
-        finally:
-            if locked and lock_f:
-                try:
-                    lock_f.seek(0)
-                    msvcrt.locking(lock_f.fileno(), msvcrt.LK_UNLCK, 1)
-                except:
-                    pass
-            if lock_f:
-                try:
-                    lock_f.close()
-                except:
-                    pass
+
+    # Phase 2: Load, yield, save (NO retry on save failure)
+    try:
+        db = _load_db()
+        yield db
+        _save_db(db)
+    except (OSError, IOError) as save_err:
+        # H5 FIX: Log save failure explicitly so the caller knows data was NOT persisted
+        logging.getLogger(__name__).error(
+            "atomic_db_update: SAVE FAILED — mutations were NOT persisted to disk. "
+            "Error: %s",
+            save_err,
+            exc_info=True,
+        )
+        raise
+    finally:
+        # Release lock
+        if lock_f:
+            try:
+                lock_f.seek(0)
+                msvcrt.locking(lock_f.fileno(), msvcrt.LK_UNLCK, 1)
+            except Exception as e:
+                logging.getLogger(__name__).warning(
+                    "[atomic_db_update] lock release failed: %s", e
+                )
+            try:
+                lock_f.close()
+            except Exception as e:
+                logging.getLogger(__name__).warning(
+                    "[atomic_db_update] lock_f close failed: %s", e
+                )
 
 
 MARKET_OPEN = dt_mod.time(9, 15)
@@ -432,8 +467,10 @@ def _get_ltp(symbol: str) -> float | None:
         px = feed.ltp(symbol)
         if px:
             return px
-    except Exception:
-        pass
+    except Exception as e:
+        logging.getLogger(__name__).warning(
+            "[_get_ltp] feed.ltp failed for %s: %s", symbol, e
+        )
     try:
         yf_sym = (
             f"{symbol}.NS"
@@ -515,38 +552,16 @@ def enter_trade(alert: dict) -> dict:
 
         # Check if F&O Stock
         fno_lots = get_fno_lot_sizes()
-        lot_size = fno_lots.get(symbol)
+        lot_size = fno_lots.get(symbol) or 1
 
-        if lot_size:
+        if lot_size > 1:
             trade_type = "FUTURE"
             instrument = f"{symbol} FUT"
             expiry_date = get_futures_expiry(_now_ist())
-            qty_cap = int(capital_per_trade / entry_price) if entry_price > 0 else 0
-            alert_qty = int(alert.get("qty") or 0)
-            if alert_qty > 0:
-                qty = min(qty_cap, alert_qty)
-            else:
-                qty = qty_cap
-            lots = qty // lot_size
-            qty = lots * lot_size
-            if qty == 0:
-                return {
-                    "error": f"Price or lot size too high for Rs {capital_per_trade:,.0f} allocation (minimum {lot_size} shares needed)"
-                }
         else:
             trade_type = alert.get("type", "STOCK")
             instrument = alert.get("instrument", f"{symbol} EQ")
             expiry_date = None
-            qty_cap = int(capital_per_trade / entry_price) if entry_price > 0 else 0
-            alert_qty = int(alert.get("qty") or 0)
-            if alert_qty > 0:
-                qty = min(qty_cap, alert_qty)
-            else:
-                qty = qty_cap
-            if qty == 0:
-                return {
-                    "error": f"Price too high for Rs {capital_per_trade:,.0f} allocation"
-                }
 
         alert_stop = alert.get("stop")
         alert_t1 = alert.get("target1")
@@ -565,6 +580,62 @@ def enter_trade(alert: dict) -> dict:
             sl_price = round(entry_price * (1 - sl_pct / 100), 2)
         else:
             sl_price = round(entry_price * (1 + sl_pct / 100), 2)
+
+        # ─────────────────────────────────────────────────────────────
+        # C1 FIX: Use risk-based position sizing (directional_size) instead
+        # of naive capital / entry_price.  This ensures position size is
+        # proportional to risk_budget / per_unit_risk, not a flat allocation.
+        #
+        # C5 FIX: directional_size validates stop placement vs direction
+        # (e.g. stop > entry for LONG raises ValueError), preventing
+        # inverted stops that cause instant stop-outs.
+        # ─────────────────────────────────────────────────────────────
+        try:
+            cfg = load_config()
+            total_capital = float(cfg.get("account", {}).get("capital", 5_000_000))
+            per_trade_pct = float(cfg.get("risk", {}).get("per_trade_pct", 0.01))
+        except Exception:
+            total_capital = float(settings.get("total_capital", 5_000_000))
+            per_trade_pct = float(settings.get("per_trade_pct", 0.01))
+
+        try:
+            size_result = directional_size(
+                total_capital,
+                per_trade_pct,
+                entry_price,
+                sl_price,
+                lot_size,
+                direction=direction,
+            )
+        except ValueError as ve:
+            # C5 FIX: Invalid stop placement (e.g. stop > entry for LONG)
+            return {"error": f"Invalid stop/direction: {ve}"}
+
+        # Cap by notional limit (capital_per_trade setting)
+        max_qty_by_cap = int(capital_per_trade / entry_price) if entry_price > 0 else 0
+        if lot_size > 1:
+            max_qty_by_cap = (max_qty_by_cap // lot_size) * lot_size
+
+        # Respect alert-specified quantity if provided and smaller
+        alert_qty = int(alert.get("qty") or 0)
+        qty = size_result.qty
+        if alert_qty > 0:
+            qty = min(qty, alert_qty)
+        qty = min(qty, max_qty_by_cap)
+
+        # Round down to lot size
+        if lot_size > 1:
+            qty = (qty // lot_size) * lot_size
+
+        if qty <= 0:
+            return {
+                "error": (
+                    f"Position size is 0 for {symbol}: risk-based qty={size_result.qty}, "
+                    f"capital cap qty={max_qty_by_cap}, lot_size={lot_size}. "
+                    f"Check capital ({total_capital:,.0f}), per_trade_pct ({per_trade_pct}), "
+                    f"and stop distance ({abs(entry_price - sl_price):.2f})."
+                )
+            }
 
         if isinstance(alert_t1, (int, float)) and alert_t1 > 0:
             tgt_price = round(float(alert_t1), 2)
@@ -975,11 +1046,17 @@ def _build_option_price_map(open_ops: list[dict]) -> dict:
                     len(found_strikes),
                     len(needed_strikes),
                 )
-            # Determine reasonable premium bounds based on underlying
-            # NIFTY options: premiums rarely exceed 2000
-            # BANKNIFTY options: premiums rarely exceed 2000
-            # Any value > 5000 is almost certainly spot/index contamination
-            MAX_REASONABLE_PREMIUM = 5000
+            # H7 FIX: Dynamic premium cap based on underlying price.
+            # Previously hardcoded to 5000, which rejects valid deep-ITM
+            # stock option premiums (e.g. MRF at ₹125,000 spot).
+            # For indices (NIFTY ~25k, BANKNIFTY ~50k), 5000 is still reasonable.
+            # For stocks, cap = max(5000, 50% of spot) to accommodate deep ITM.
+            _INDEX_SYMBOLS = {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY"}
+            if sym in _INDEX_SYMBOLS:
+                MAX_REASONABLE_PREMIUM = 5000.0
+            else:
+                spot_price = _get_ltp(sym) or 0.0
+                MAX_REASONABLE_PREMIUM = max(5000.0, spot_price * 0.50)
             for trade in [t for t in open_ops if t["symbol"] == sym]:
                 for leg in trade["legs"]:
                     key = (leg["strike"], leg["expiry"], leg["type"])
@@ -1127,6 +1204,23 @@ def _smart_exit_check(
     return None
 
 
+def _entry_premium(trade: dict) -> float:
+    """C2 FIX: Extract entry net premium with unified fallback across all field names.
+
+    Different entry paths set different field names:
+      - enter_option_structure() sets 'net_premium'
+      - _enter_option_structure() sets both 'net_credit' and 'net_premium'
+      - Some paths set 'entry_net_credit' or 'entry_net_debit'
+
+    Returns the first non-zero value found, or 0.0 if none exist.
+    """
+    for key in ("net_premium", "net_credit", "entry_net_credit", "entry_net_debit"):
+        val = trade.get(key)
+        if val is not None and val > 0:
+            return float(val)
+    return 0.0
+
+
 def check_option_exits(
     vix_current: float | None = None, current_regime: str | None = None
 ) -> list[dict]:
@@ -1228,7 +1322,9 @@ def check_option_exits(
 
             # Flat SL/TGT backup (skip during grace period to avoid bid-ask jitter exits)
             if not exit_reason and not _within_grace_period(t, now_ist):
-                pnl = (t.get("net_premium") or 0.0) - current_net
+                # C2 FIX: Use unified _entry_premium() helper for consistent field access
+                entry_prem = _entry_premium(t)
+                pnl = entry_prem - current_net
 
                 # SANITY BOUND: P&L cannot exceed theoretical max loss for defined-risk structures
                 max_loss_rupees = t.get("max_loss_rupees", 0.0)
@@ -1246,11 +1342,10 @@ def check_option_exits(
 
                 sl_limit = settings.get("options_sl_pct", 125.0) / 100.0
                 tgt_limit = settings.get("options_tgt_pct", 50.0) / 100.0
-                net_prem = t.get("net_premium")
-                if net_prem and net_prem > 0:
-                    if pnl <= -abs(net_prem) * sl_limit:
+                if entry_prem > 0:
+                    if pnl <= -abs(entry_prem) * sl_limit:
                         exit_reason = "SL_HIT"
-                    elif pnl >= abs(net_prem) * tgt_limit:
+                    elif pnl >= abs(entry_prem) * tgt_limit:
                         exit_reason = "TGT_HIT"
 
             if exit_reason:
@@ -1264,8 +1359,8 @@ def check_option_exits(
                     key = (leg["strike"], leg["expiry"], leg["type"])
                     price = price_map.get(key) if price_map else None
                     leg["exit_premium"] = price
-                # current_net guaranteed non-None here
-                final_pnl = round((t.get("net_premium") or 0.0) - current_net, 2)
+                # C2 FIX: Use unified _entry_premium() for final PnL
+                final_pnl = round(_entry_premium(t) - current_net, 2)
                 # Re-apply sanity bound on final P&L
                 max_loss_rupees = t.get("max_loss_rupees", 0.0)
                 if max_loss_rupees > 0 and abs(final_pnl) > max_loss_rupees * 1.1:
@@ -1387,7 +1482,9 @@ def _check_option_exits(
 
             # Flat SL/TGT backup (skip during grace period to avoid bid-ask jitter exits)
             if not exit_reason and not _within_grace_period(t, now_ist):
-                pnl = t.get("net_credit", 0.0) - current_net
+                # C2 FIX: Use unified _entry_premium() helper for consistent field access
+                entry_prem = _entry_premium(t)
+                pnl = entry_prem - current_net
 
                 # SANITY BOUND: P&L cannot exceed theoretical max loss for defined-risk structures
                 max_loss_rupees = t.get("max_loss_rupees", 0.0)
@@ -1405,11 +1502,10 @@ def _check_option_exits(
 
                 sl_limit = settings.get("options_sl_pct", 125.0) / 100.0
                 tgt_limit = settings.get("options_tgt_pct", 50.0) / 100.0
-                net_credit = t.get("net_credit")
-                if net_credit and net_credit > 0:
-                    if pnl >= net_credit * tgt_limit:
+                if entry_prem > 0:
+                    if pnl >= entry_prem * tgt_limit:
                         exit_reason = "PROFIT_TAKEN"
-                    elif pnl <= -net_credit * sl_limit:
+                    elif pnl <= -entry_prem * sl_limit:
                         exit_reason = "STOP_LOSS"
 
             if exit_reason:
@@ -1423,7 +1519,8 @@ def _check_option_exits(
                     key = (leg["strike"], leg["expiry"], leg["type"])
                     price = price_map.get(key) if price_map else None
                     leg["exit_premium"] = price
-                final_pnl = round(t.get("net_credit", 0.0) - current_net, 2)
+                # C2 FIX: Use unified _entry_premium() for final PnL
+                final_pnl = round(_entry_premium(t) - current_net, 2)
                 # Re-apply sanity bound on final P&L
                 max_loss_rupees = t.get("max_loss_rupees", 0.0)
                 if max_loss_rupees > 0 and abs(final_pnl) > max_loss_rupees * 1.1:
@@ -1851,8 +1948,12 @@ def check_and_close_trades() -> list[dict]:
                     trade["hold_minutes"] = int(
                         (now_ist - entry_dt).total_seconds() / 60
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    logging.getLogger(__name__).warning(
+                        "[check_and_close_trades] hold_minutes calc failed for trade %s: %s",
+                        trade.get("id"),
+                        e,
+                    )
 
                 if direction == "LONG":
                     pnl = (ltp - trade["entry_price"]) * trade["qty"]
@@ -1907,8 +2008,12 @@ def close_trade_manual(trade_id: int, reason: str = "MANUAL") -> dict | None:
                 trade["entry_time"], "%Y-%m-%d %H:%M:%S"
             ).replace(tzinfo=IST)
             trade["hold_minutes"] = int((now_ist - entry_dt).total_seconds() / 60)
-        except Exception:
-            pass
+        except Exception as e:
+            logging.getLogger(__name__).warning(
+                "[close_trade_manual] hold_minutes calc failed for trade %s: %s",
+                trade_id,
+                e,
+            )
 
         direction = trade["direction"]
         if direction == "LONG":
@@ -2184,8 +2289,10 @@ def auto_enter_from_alerts(alerts: list[dict], cfg: dict | None = None) -> list[
                             )
                             continue
                         alert["confidence"] = conf
-                except Exception:
-                    pass
+                except Exception as e:
+                    logging.getLogger(__name__).warning(
+                        "[auto_enter_from_alerts] confidence parse failed: %s", e
+                    )
 
             if sym in today_symbols:
                 journal.log_skipped_trade(
@@ -2944,6 +3051,9 @@ def cleanup_db(
     ) + sum(t.get("pnl", 0) for t in keep_options if t.get("status") == "CLOSED")
 
     # 3. Clean up daily summaries
+    # H6 FIX: Include option trades in daily summary recalculation.
+    # Previously only stock trades were counted, causing total_pnl in daily
+    # summaries to diverge from the cumulative_pnl (which includes both).
     new_summaries = []
     for s in db.get("daily_summaries", []):
         d = s.get("date")
@@ -2951,14 +3061,19 @@ def cleanup_db(
             if from_date or to_date:
                 continue
 
-        # Update trade list in summary
+        # Include BOTH stock and option trades for this date
         s_trades = [t for t in keep_trades if t.get("entry_date") == d]
+        s_options = [t for t in keep_options if t.get("entry_date") == d]
+        all_day_trades = s_trades + s_options
         s["trades"] = s_trades
-        s["total_trades"] = len(s_trades)
-        s["total_pnl"] = sum(t.get("pnl", 0) for t in s_trades)
-        winners = [t for t in s_trades if (t.get("pnl") or 0) > 0]
+        s["option_trades"] = s_options
+        s["total_trades"] = len(all_day_trades)
+        s["total_pnl"] = round(sum(t.get("pnl", 0) or 0 for t in all_day_trades), 2)
+        winners = [t for t in all_day_trades if (t.get("pnl") or 0) > 0]
         s["win_rate"] = (
-            round((len(winners) / max(len(s_trades), 1) * 100), 2) if s_trades else 0
+            round((len(winners) / max(len(all_day_trades), 1) * 100), 2)
+            if all_day_trades
+            else 0
         )
         new_summaries.append(s)
     db["daily_summaries"] = new_summaries

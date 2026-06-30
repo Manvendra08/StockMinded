@@ -899,25 +899,39 @@ def _resolve_structure(
                 spread_wing = abs(short_legs[0].strike - long_legs[0].strike)
                 max_loss = spread_wing * lot_size * min_lots - net_credit
             elif setup.strategy in ("NAKED_PUT_SELL", "NAKED_CALL_SELL"):
+                # C3 FIX: Naked short max loss uses 50% of spot (was 20%)
+                # and enforces a minimum floor to avoid underestimating risk.
                 spot_for_risk = spot if spot > 0 else 25000.0
-                max_loss = spot_for_risk * 0.20 * lot_size * min_lots
+                naked_loss_pct = float(
+                    sym_cfg.get("naked_loss_pct", 0.50)
+                )  # C3 FIX: 0.20 → 0.50
+                naked_loss_cap = float(
+                    sym_cfg.get("naked_loss_cap", 250_000.0)
+                )
+                base_estimate = spot_for_risk * naked_loss_pct * lot_size * min_lots
+                floor_total = naked_loss_cap * min_lots
+                max_loss = max(base_estimate, floor_total)
 
             # Recalc breakevens if we have short strikes
             if short_legs:
+                # C4 FIX: Sort short legs by strike to ensure correct ordering.
+                # For Iron Condor, PE short (lower strike) must come before
+                # CE short (higher strike) for correct breakeven assignment.
+                short_legs_sorted = sorted(short_legs, key=lambda l: l.strike)
                 credit_per_lot = (
-                    net_credit / (short_legs[0].lot_size * short_legs[0].lots)
-                    if short_legs[0].lot_size
+                    net_credit / (short_legs_sorted[0].lot_size * short_legs_sorted[0].lots)
+                    if short_legs_sorted[0].lot_size
                     else 0.0
                 )
                 if (
                     setup.strategy in ("IRON_CONDOR", "IRON_CONDOR_WIDE")
-                    and len(short_legs) >= 2
+                    and len(short_legs_sorted) >= 2
                 ):
                     setup.breakevens = [
-                        short_legs[0].strike - credit_per_lot,
-                        short_legs[1].strike + credit_per_lot,
+                        short_legs_sorted[0].strike - credit_per_lot,
+                        short_legs_sorted[1].strike + credit_per_lot,
                     ]
-                    setup.short_strikes = [l.strike for l in short_legs]
+                    setup.short_strikes = [l.strike for l in short_legs_sorted]
                 else:
                     leg_type = short_legs[0].type
                     s_strike = short_legs[0].strike

@@ -56,19 +56,30 @@ def _ema(s: pd.Series, n: int) -> pd.Series:
 
 
 def _adx(df: pd.DataFrame, n: int = 14) -> float:
+    """Compute Average Directional Index.
+
+    H2 FIX: Replaced np.where() with pandas .where() to preserve index
+    alignment. np.where() converts Series to numpy arrays, losing the
+    pandas index, which can cause row-shift errors when the DataFrame
+    has been filtered or sliced.
+    """
     high, low, close = df["high"], df["low"], df["close"]
     up = high.diff()
     dn = -low.diff()
-    plus_dm = np.where((up > dn) & (up > 0), up, 0.0)
-    minus_dm = np.where((dn > up) & (dn > 0), dn, 0.0)
+    # H2 FIX: Use pandas .where() to keep Series index intact
+    cond_plus = (up > dn) & (up > 0)
+    cond_minus = (dn > up) & (dn > 0)
+    plus_dm = up.where(cond_plus, 0.0)
+    minus_dm = dn.where(cond_minus, 0.0)
     tr = pd.concat([
         (high - low),
         (high - close.shift()).abs(),
         (low - close.shift()).abs(),
     ], axis=1).max(axis=1)
     atr = tr.ewm(alpha=1 / n, adjust=False).mean()
-    plus_di = 100 * pd.Series(plus_dm, index=df.index).ewm(alpha=1 / n, adjust=False).mean() / atr
-    minus_di = 100 * pd.Series(minus_dm, index=df.index).ewm(alpha=1 / n, adjust=False).mean() / atr
+    # H2 FIX: No need for pd.Series(..., index=df.index) — already a Series
+    plus_di = 100 * plus_dm.ewm(alpha=1 / n, adjust=False).mean() / atr
+    minus_di = 100 * minus_dm.ewm(alpha=1 / n, adjust=False).mean() / atr
     dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, 1e-9)
     return float(dx.ewm(alpha=1 / n, adjust=False).mean().fillna(0).iloc[-1])
 
@@ -166,7 +177,17 @@ def classify(index_symbol: str = "NIFTY", stock_universe_data: dict | None = Non
     trend = _trend_score(idx["close"])
     adx = _adx(idx)
     vix_now = float(vix["close"].iloc[-1])
-    vix_5d_ago = float(vix["close"].iloc[-6]) if len(vix) >= 6 else vix_now
+    # H3 FIX: Adaptive lookback for VIX change calculation.
+    # When VIX data has fewer than 6 rows, use whatever is available
+    # (minimum 2 rows) instead of falling back to vix_now (which zeroes
+    # the change and silently suppresses VOL_EXPANSION detection).
+    vix_len = len(vix)
+    if vix_len >= 6:
+        vix_5d_ago = float(vix["close"].iloc[-6])
+    elif vix_len >= 2:
+        vix_5d_ago = float(vix["close"].iloc[0])  # use earliest available
+    else:
+        vix_5d_ago = vix_now
     vix_chg = 100 * (vix_now - vix_5d_ago) / vix_5d_ago if vix_5d_ago else 0.0
     breadth = breadth_pct_above_50dma(stock_universe_data or {})
 

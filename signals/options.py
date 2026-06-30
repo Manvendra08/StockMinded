@@ -44,37 +44,71 @@ def _bs_price(spot, strike, t, r, sigma, kind="CE"):
         return strike * math.exp(-r * t) * _norm_cdf(-d2) - spot * _norm_cdf(-d1)
 
 
-def _is_holiday(dt_date):
+# ---------------------------------------------------------------------------
+# H8 FIX: Cache holiday set at module level to avoid re-reading CSV on every call.
+# The CSV is small (~20 rows) but _is_holiday() is called dozens of times per
+# minute during market hours from chain_snapshot(), exit checks, etc.
+# ---------------------------------------------------------------------------
+_HOLIDAY_CACHE: set[str] | None = None
+_HOLIDAY_CACHE_PATH: Path | None = None
+
+
+def _load_holiday_set() -> set[str]:
+    """Load NSE holiday dates from CSV into a cached set."""
+    global _HOLIDAY_CACHE, _HOLIDAY_CACHE_PATH
     path = Path(__file__).parent.parent / "config" / "nse_holidays_2026.csv"
-    if not path.exists():
-        return False
-    with open(path, "r") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            if row.get("date") == dt_date.strftime("%Y-%m-%d"):
-                return True
-    return False
+    if _HOLIDAY_CACHE is not None and _HOLIDAY_CACHE_PATH == path:
+        return _HOLIDAY_CACHE
+    holidays: set[str] = set()
+    if path.exists():
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    d = row.get("date", "").strip()
+                    if d:
+                        holidays.add(d)
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "Failed to load holiday CSV from %s: %s", path, exc
+            )
+    _HOLIDAY_CACHE = holidays
+    _HOLIDAY_CACHE_PATH = path
+    return holidays
 
 
-def _next_expiry(symbol="NIFTY", preference="weekly"):
+def _is_holiday(dt_date: date) -> bool:
+    """Check if a date is an NSE holiday. Uses module-level cache (H8 fix)."""
+    holidays = _load_holiday_set()
+    return dt_date.strftime("%Y-%m-%d") in holidays
+
+
+def _next_expiry(symbol: str = "NIFTY", preference: str = "weekly") -> str:
+    """Return the nearest (current or next) expiry date string for a symbol.
+
+    H1 FIX: Changed `<= 0` to `< 0` so that on expiry day itself
+    (days_ahead == 0) we return TODAY's expiry, not next week's.
+    chain_snapshot() has its own 0-DTE avoidance logic for signal generation,
+    so including today here is safe and correct for exit-check contexts.
+    """
     today = datetime.now(timezone(timedelta(hours=5, minutes=30))).date()
     if preference == "weekly":
         if symbol == "BANKNIFTY":
             # NSE weekly BANKNIFTY options expire on Wednesdays
             days_ahead = calendar.WEDNESDAY - today.weekday()
-            if days_ahead <= 0:
+            if days_ahead < 0:  # H1 FIX: < 0 instead of <= 0
                 days_ahead += 7
             exp_date = today + timedelta(days=days_ahead)
         elif symbol == "SENSEX":
             # SENSEX weekly options expire on Thursdays
             days_ahead = calendar.THURSDAY - today.weekday()
-            if days_ahead <= 0:
+            if days_ahead < 0:  # H1 FIX: < 0 instead of <= 0
                 days_ahead += 7
             exp_date = today + timedelta(days=days_ahead)
         else:
             # NIFTY and other indices: NSE changed NIFTY weekly expiry from Thursday → Tuesday (effective Apr 2025)
             days_ahead = calendar.TUESDAY - today.weekday()
-            if days_ahead <= 0:  # already Tuesday or past it this week
+            if days_ahead < 0:  # H1 FIX: < 0 instead of <= 0
                 days_ahead += 7
             exp_date = today + timedelta(days=days_ahead)
     else:
@@ -565,12 +599,22 @@ def calc_structure_max_loss(
     elif structure_type == "credit_spread":
         return max(0, (wing_width * lot_size * lots) - net_credit)
     elif structure_type == "naked_short":
+        # C3 FIX: Naked short has theoretically unlimited risk.  The previous
+        # formula (spot * 0.20) underestimated max loss by 2-3× for gap-risk
+        # scenarios.  We now:
+        #   1. Use 50% of spot as the base estimate (covers ~3σ gap moves).
+        #   2. Enforce a configurable FLOOR (naked_loss_cap) so sizing never
+        #      underestimates risk, even for low-priced underlyings.
+        #   3. Return MAX(base_estimate, floor) to be conservative.
         spot = kwargs.get("underlying_spot", 0.0)
-        pct = kwargs.get("naked_loss_pct", 0.20)
+        pct = kwargs.get("naked_loss_pct", 0.50)  # C3 FIX: 20% → 50%
+        floor_cap = kwargs.get("naked_loss_cap", 250_000.0)
         if spot > 0:
-            return round(spot * pct * lot_size * lots, 2)
-        cap = kwargs.get("naked_loss_cap", 250_000.0)
-        return cap * lot_size * lots
+            base_estimate = round(spot * pct * lot_size * lots, 2)
+        else:
+            base_estimate = 0.0
+        floor_total = floor_cap * lots
+        return max(base_estimate, floor_total)
 
     return wing_width * lot_size * lots
 
