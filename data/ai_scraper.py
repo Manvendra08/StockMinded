@@ -140,6 +140,26 @@ class TLS12Adapter(HTTPAdapter):
         return super().init_poolmanager(*args, **kwargs)
 
 
+def _create_curl_cffi_llm_session():
+    """Create an LLM session using curl_cffi for robust SSL on Windows.
+
+    curl_cffi bundles its own libcurl + cert bundle, bypassing the buggy
+    Windows OpenSSL 3.x stack that causes SSLEOFError on some providers.
+    Falls back to the TLS12Adapter approach if curl_cffi is not installed.
+
+    Returns:
+        tuple (session, backend_name) where backend_name is "curl_cffi" or "requests"
+    """
+    try:
+        from curl_cffi import requests as curl_requests
+
+        session = curl_requests.Session(impersonate="chrome120")
+        return session, "curl_cffi"
+    except ImportError:
+        logger.debug("curl_cffi not available; using TLS12Adapter for LLM session")
+        return _create_llm_retry_session(), "requests"
+
+
 def _create_llm_retry_session(
     retries=1, backoff_factor=0.5, status_forcelist=(429, 500, 502, 503, 504)
 ):
@@ -176,7 +196,7 @@ def _is_ssl_transport_error(exc: Exception) -> bool:
 
 def _call_chat_completion(
     *,
-    session: requests.Session,
+    session: requests.Session | Any,
     url: str,
     headers: dict[str, str],
     model: str,
@@ -185,6 +205,11 @@ def _call_chat_completion(
     json_mode: bool,
     timeout: int = 15,
 ) -> str:
+    """Call a chat completion endpoint.
+
+    Accepts both requests.Session and curl_cffi.requests.Session
+    (they share the same .post() signature).
+    """
     payload = {
         "model": model,
         "messages": [
@@ -216,8 +241,8 @@ def call_llm(
         logger.debug("Groq marked dead until %.0f; skipping", groq_dead_until)
     elif config.get("groq_api_key"):
         logger.info("LLM #1: llama-3.3-70b-versatile [provider=Groq]")
+        session, backend = _create_curl_cffi_llm_session()
         try:
-            session = _create_llm_retry_session()
             url = "https://api.groq.com/openai/v1/chat/completions"
             headers = {
                 "Authorization": f"Bearer {config['groq_api_key']}",
@@ -236,39 +261,52 @@ def call_llm(
             resp.raise_for_status()
             text = resp.json()["choices"][0]["message"]["content"]
             res_val = json.loads(text) if json_mode else text
-            logger.info("LLM success: llama-3.3-70b-versatile [Groq]")
+            logger.info(
+                "LLM success: llama-3.3-70b-versatile [Groq] (backend=%s)", backend
+            )
             return (
                 (res_val, "Groq (llama-3.3-70b-versatile)")
                 if return_provider
                 else res_val
             )
         except requests.exceptions.SSLError as ssl_err:
-            # SSL errors: mark provider dead, skip retries
             _dead_providers["groq"] = time.time() + _DEAD_PROVIDER_TTL
             logger.warning(
-                f"Groq SSL error: {ssl_err}. Marking dead for {_DEAD_PROVIDER_TTL}s. Trying Gemini."
+                "Groq SSL error with %s backend: %s. Marking dead for %ds. Trying Gemini.",
+                backend,
+                ssl_err,
+                _DEAD_PROVIDER_TTL,
             )
         except requests.exceptions.HTTPError as e:
-            logger.warning(
-                f"Groq LLM HTTP error ({e.response.status_code}): {e.response.text}. Trying Gemini."
-            )
+            status = e.response.status_code
+            if status == 401:
+                logger.warning(
+                    "Groq returned 401 (unauthorized). Check GROQ_API_KEY. Trying Gemini."
+                )
+            else:
+                logger.warning(
+                    "Groq HTTP error (%s): %s. Trying Gemini.",
+                    status,
+                    e.response.text[:200],
+                )
         except json.JSONDecodeError as e:
-            logger.warning(f"Groq LLM returned invalid JSON: {e}. Trying Gemini.")
+            logger.warning("Groq returned invalid JSON: %s. Trying Gemini.", e)
         except Exception as e:
-            logger.warning(f"Groq LLM call failed: {e}. Trying Gemini.")
+            logger.warning("Groq call failed: %s. Trying Gemini.", e)
 
     # 2. Gemini (First Fallback)
     if config["local"] and config["local"]["llm"].get("api_key"):
+        session, backend = _create_curl_cffi_llm_session()
         try:
-            session = _create_llm_retry_session()
             api_key = config["local"]["llm"]["api_key"]
             model_raw = config["local"]["llm"].get("model", "gemini-1.5-flash")
             model_name = model_raw.split("/")[-1] if "/" in model_raw else model_raw
-            logger.info("LLM #2: %s [provider=Gemini]", model_name)
+            logger.info(
+                "LLM #2: %s [provider=Gemini] (backend=%s)", model_name, backend
+            )
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
             generation_config = {"response_mime_type": "application/json"}
             if max_tokens is not None:
-                # Gemini supports maxOutputTokens in generationConfig
                 generation_config["maxOutputTokens"] = max_tokens
             payload = {
                 "contents": [
@@ -288,7 +326,7 @@ def call_llm(
             candidates = res.get("candidates", [])
             if not candidates:
                 logger.warning(
-                    f"Gemini returned no candidates (Safety filter?). Response: {res}"
+                    "Gemini returned no candidates (Safety filter?). Response: %s", res
                 )
                 raise ValueError("No candidates in Gemini response")
 
@@ -299,36 +337,48 @@ def call_llm(
                 raise ValueError("Empty text part in Gemini response")
 
             res_val = json.loads(text) if json_mode else text
-            logger.info("LLM success: %s [Gemini]", model_name)
+            logger.info("LLM success: %s [Gemini] (backend=%s)", model_name, backend)
             return (res_val, f"Gemini ({model_name})") if return_provider else res_val
+        except requests.exceptions.SSLError as ssl_err:
+            logger.warning(
+                "Gemini SSL error with %s backend: %s. Trying OpenRouter.",
+                backend,
+                ssl_err,
+            )
         except requests.exceptions.HTTPError as e:
-            logger.warning(
-                f"Gemini LLM HTTP error ({e.response.status_code}): {e.response.text}. Headers: {e.response.headers}. Trying OpenRouter."
-            )
+            status = e.response.status_code
+            if status == 401:
+                logger.warning(
+                    "Gemini returned 401 (unauthorized). Check GOOGLE_API_KEY or model access. Trying OpenRouter."
+                )
+            else:
+                logger.warning(
+                    "Gemini HTTP error (%s) with %s backend: %s. Trying OpenRouter.",
+                    status,
+                    backend,
+                    e.response.text[:200],
+                )
         except json.JSONDecodeError as e:
-            logger.warning(
-                f"Gemini LLM returned invalid JSON: {e}. Raw text: {text if 'text' in locals() else 'N/A'}. Trying OpenRouter."
-            )
+            logger.warning("Gemini returned invalid JSON: %s. Trying OpenRouter.", e)
         except Exception as e:
             logger.warning(
-                f"Gemini LLM call failed unexpectedly: {e}. Trying OpenRouter.",
-                exc_info=True,
+                "Gemini call failed unexpectedly: %s. Trying OpenRouter.",
+                e,
             )
 
     # 3. OpenRouter Free Models (Fallback 2+) — try multiple models
     _OPENROUTER_FALLBACK_MODELS = (
-        "meta-llama/llama-3.1-70b-instruct:free",
-        "qwen/qwen2.5-7b-instruct:free",
-        "mistralai/mistral-7b-instruct:free",
-        "nvidia/nemotron-3-super-120b-a12b:free",
-        "nvidia/nemotron-3-ultra-550b-a55b:free",
         "google/gemini-2.0-flash-exp:free",
+        "mistralai/mistral-small-24b-instruct-2501:free",
+        "cognitivecomputations/dolphin3.0-r1-mistral-24b:free",
     )
     if config.get("openrouter_api_key"):
+        session, backend = _create_curl_cffi_llm_session()
         for model_id in _OPENROUTER_FALLBACK_MODELS:
-            logger.info("LLM #3: %s [provider=OpenRouter]", model_id)
+            logger.info(
+                "LLM #3: %s [provider=OpenRouter] (backend=%s)", model_id, backend
+            )
             try:
-                session = _create_llm_retry_session()
                 url = "https://openrouter.ai/api/v1/chat/completions"
                 headers = {
                     "Authorization": f"Bearer {config['openrouter_api_key']}",
@@ -357,7 +407,9 @@ def call_llm(
                     if isinstance(err_msg, dict):
                         err_msg = err_msg.get("message", str(err_msg))
                     logger.warning(
-                        f"OpenRouter ({model_id}) upstream error: {err_msg}. Trying next."
+                        "OpenRouter (%s) upstream error: %s. Trying next.",
+                        model_id,
+                        err_msg,
                     )
                 else:
                     text = resp_data["choices"][0]["message"]["content"]
@@ -366,32 +418,70 @@ def call_llm(
                             f"OpenRouter ({model_id}) returned empty content"
                         )
                     res_val = json.loads(text) if json_mode else text
-                    logger.info("LLM success: %s [OpenRouter]", model_id)
+                    logger.info(
+                        "LLM success: %s [OpenRouter] (backend=%s)", model_id, backend
+                    )
                     return (
                         (res_val, f"OpenRouter ({model_id})")
                         if return_provider
                         else res_val
                     )
-            except requests.exceptions.HTTPError as e:
+            except requests.exceptions.SSLError as ssl_err:
                 logger.warning(
-                    f"OpenRouter ({model_id}) HTTP error ({e.response.status_code}): {e.response.text}. Trying next."
+                    "OpenRouter (%s) SSL error with %s backend: %s. Trying next.",
+                    model_id,
+                    backend,
+                    ssl_err,
                 )
+            except requests.exceptions.HTTPError as e:
+                status = e.response.status_code
+                detail = e.response.text[:200]
+                if status == 401:
+                    logger.warning(
+                        "OpenRouter returned 401 (unauthorized). Check OPENROUTER_API_KEY."
+                    )
+                    break  # No point trying more models with bad key
+                elif status in (400, 404):
+                    logger.warning(
+                        "OpenRouter (%s) not available (%s): %s. Trying next.",
+                        model_id,
+                        status,
+                        detail,
+                    )
+                elif status == 429:
+                    logger.warning(
+                        "OpenRouter (%s) rate limited (429). Trying next.",
+                        model_id,
+                    )
+                else:
+                    logger.warning(
+                        "OpenRouter (%s) HTTP error (%s): %s. Trying next.",
+                        model_id,
+                        status,
+                        detail,
+                    )
             except json.JSONDecodeError as e:
                 logger.warning(
-                    f"OpenRouter ({model_id}) empty/invalid response: {e}. Trying next."
+                    "OpenRouter (%s) empty/invalid response: %s. Trying next.",
+                    model_id,
+                    e,
                 )
             except (KeyError, IndexError) as e:
                 logger.warning(
-                    f"OpenRouter ({model_id}) response missing fields: {e}. Trying next."
+                    "OpenRouter (%s) response missing fields: %s. Trying next.",
+                    model_id,
+                    e,
                 )
             except ValueError as e:
-                logger.warning(f"OpenRouter ({model_id}) {e}. Trying next.")
+                logger.warning("OpenRouter (%s) %s. Trying next.", model_id, e)
             except Exception as e:
                 logger.warning(
-                    f"OpenRouter ({model_id}) call failed: {e}. Trying next."
+                    "OpenRouter (%s) call failed: %s. Trying next.",
+                    model_id,
+                    e,
                 )
 
-    logger.warning("LLM scan exhausted: all 8 models failed")
+    logger.warning("LLM scan exhausted: all providers failed")
     return (None, "None") if return_provider else None
 
 

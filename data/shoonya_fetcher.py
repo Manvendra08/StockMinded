@@ -900,31 +900,19 @@ class ShoonyaFetcher:
                 )
                 return None
 
-            # 4. Fetch quotes for each contract
+            # 4. Determine LTP for each contract.
+            #    PRIORITY: chain.lp (from GetOptionChain, has correct option premium)
+            #          -> GetQuotes.lp (may return underlying price instead of premium)
+            #          -> bid/ask mid-price (last resort before synthetic pricing)
             strikes = []
             for item in target_scrips:
                 token = item.get("token")
                 if not token:
                     continue
-                q = self._get_quotes(option_exch, token)
-                if not q or q.get("stat") != "Ok":
-                    continue
 
                 ot = item.get("optt")
                 if ot not in ("CE", "PE"):
                     continue
-
-                def _f(key: str, _q: dict = q) -> float:
-                    try:
-                        return float(_q.get(key) or 0.0)
-                    except (ValueError, TypeError):
-                        return 0.0
-
-                def _i(key: str, _q: dict = q) -> int:
-                    try:
-                        return int(_q.get(key) or 0)
-                    except (ValueError, TypeError):
-                        return 0
 
                 try:
                     strike = float(item.get("strprc") or 0)
@@ -934,38 +922,169 @@ class ShoonyaFetcher:
                 if strike <= 0:
                     continue
 
-                ltp_val = _f("lp")
+                # --- Helper: is this price a reasonable option premium? ---
+                def _is_reasonable_premium(
+                    candidate: float, _ot: str, _strike: float, _underlying: float
+                ) -> bool:
+                    """Return True if candidate looks like a genuine option premium (not spot leakage)."""
+                    if candidate <= 0.0 or _underlying <= 0.0:
+                        return False
+                    if _ot == "CE":
+                        intrinsic = max(0.0, _underlying - _strike)
+                    else:
+                        intrinsic = max(0.0, _strike - _underlying)
+                    # Max reasonable: intrinsic + 15% of underlying for time value
+                    max_allowed = intrinsic + 0.15 * _underlying
+                    # The premium should never reach the underlying or spot itself
+                    return candidate <= max_allowed and candidate < _underlying * 0.99
 
-                # Harden: reject spot/index leakage in option LTP
-                # If ltp > 50% of underlying price, it's almost certainly
-                # the underlying/index value, not the option premium.
-                if (
-                    ltp_val > 0.0
-                    and underlying_price > 0.0
-                    and ltp_val > underlying_price * 0.5
+                # --- Attempt 1: Use lp directly from GetOptionChain item ---
+                chain_lp = None
+                try:
+                    raw = item.get("lp") or item.get("LTP") or item.get("prc")
+                    if raw is not None:
+                        chain_lp = float(raw)
+                except (ValueError, TypeError):
+                    chain_lp = None
+
+                ltp_val = None
+                source_tag = "synthetic"
+
+                if chain_lp is not None and _is_reasonable_premium(
+                    chain_lp, ot, strike, underlying_price
                 ):
-                    logger.warning(
-                        "[shoonya] rejecting corrupt ltp=%.1f for %s %s strike=%.0f "
-                        "(underlying=%.1f) — spot leaked into option premium",
+                    ltp_val = chain_lp
+                    source_tag = "chain_lp"
+                    logger.debug(
+                        "[shoonya] using chain.lp=%.1f for %s %s strike=%.0f",
                         ltp_val,
                         base,
                         ot,
                         strike,
-                        underlying_price,
                     )
-                    ltp_val = 0.0  # Force synthetic pricing downstream
+                else:
+                    # --- Attempt 2: GetQuotes with bid/ask fallback ---
+                    q = self._get_quotes(option_exch, token)
+                    if q and q.get("stat") == "Ok":
+
+                        def _f(key: str, _q: dict = q) -> float:
+                            try:
+                                return float(_q.get(key) or 0.0)
+                            except (ValueError, TypeError):
+                                return 0.0
+
+                        q_lp = _f("lp")
+                        if _is_reasonable_premium(q_lp, ot, strike, underlying_price):
+                            ltp_val = q_lp
+                            source_tag = "quotes_lp"
+                            logger.debug(
+                                "[shoonya] using quotes.lp=%.1f for %s %s strike=%.0f",
+                                ltp_val,
+                                base,
+                                ot,
+                                strike,
+                            )
+                        else:
+                            # Corrupt GetQuotes lp (underlying leaked) — try bid/ask
+                            bid_val = _f("bp1")
+                            ask_val = _f("sp1")
+                            mid_val = (
+                                (bid_val + ask_val) / 2
+                                if bid_val > 0 and ask_val > 0
+                                else 0.0
+                            )
+
+                            for fallback, label in [
+                                (bid_val, "bid"),
+                                (ask_val, "ask"),
+                                (mid_val, "mid"),
+                            ]:
+                                if _is_reasonable_premium(
+                                    fallback, ot, strike, underlying_price
+                                ):
+                                    ltp_val = fallback
+                                    source_tag = f"quotes_{label}"
+                                    logger.info(
+                                        "[shoonya] GetQuotes lp corrupt (%.1f); using %s=%.1f for %s %s strike=%.0f",
+                                        q_lp,
+                                        label,
+                                        ltp_val,
+                                        base,
+                                        ot,
+                                        strike,
+                                    )
+                                    break
+
+                            if ltp_val is None:
+                                logger.warning(
+                                    "[shoonya] all price sources corrupt for %s %s strike=%.0f "
+                                    "(chain_lp=%.1f, quotes_lp=%.1f, bid=%.1f, ask=%.1f) "
+                                    "— will use synthetic pricing downstream",
+                                    base,
+                                    ot,
+                                    strike,
+                                    chain_lp or 0.0,
+                                    _f("lp"),
+                                    bid_val,
+                                    ask_val,
+                                )
+                                ltp_val = 0.0  # synthetic pricing downstream
+                    else:
+                        # GetQuotes failed entirely — use chain_lp even if slightly suspect
+                        if chain_lp is not None and chain_lp > 0:
+                            ltp_val = chain_lp
+                            source_tag = "chain_lp_fallback"
+                            logger.warning(
+                                "[shoonya] GetQuotes failed; using chain.lp=%.1f for %s %s strike=%.0f "
+                                "(may be stale)",
+                                ltp_val,
+                                base,
+                                ot,
+                                strike,
+                            )
+                        else:
+                            ltp_val = 0.0
+                            source_tag = "none"
+
+                oi_val = 0
+                oichg_val = 0
+                vol_val = 0
+                iv_val = 0.0
+                bid_val_final = 0.0
+                ask_val_final = 0.0
+                if q and q.get("stat") == "Ok":
+
+                    def _f2(key: str, _q: dict = q) -> float:
+                        try:
+                            return float(_q.get(key) or 0.0)
+                        except (ValueError, TypeError):
+                            return 0.0
+
+                    def _i2(key: str, _q: dict = q) -> int:
+                        try:
+                            return int(_q.get(key) or 0)
+                        except (ValueError, TypeError):
+                            return 0
+
+                    oi_val = _i2("oi")
+                    oichg_val = _i2("oichg")
+                    vol_val = _i2("v")
+                    iv_val = _f2("iv")
+                    bid_val_final = _f2("bp1")
+                    ask_val_final = _f2("sp1")
 
                 strikes.append(
                     {
                         "strike": strike,
                         "option_type": ot,
                         "ltp": ltp_val,
-                        "oi": _i("oi"),
-                        "oi_change": _i("oichg"),
-                        "volume": _i("v"),
-                        "iv": _f("iv"),
-                        "bid": _f("bp1"),
-                        "ask": _f("sp1"),
+                        "ltp_source": source_tag,
+                        "oi": oi_val,
+                        "oi_change": oichg_val,
+                        "volume": vol_val,
+                        "iv": iv_val,
+                        "bid": bid_val_final,
+                        "ask": ask_val_final,
                         "expiry": target_expiry_iso,
                     }
                 )
