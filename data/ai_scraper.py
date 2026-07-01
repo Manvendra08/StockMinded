@@ -371,6 +371,11 @@ def call_llm(
         "google/gemini-2.0-flash-exp:free",
         "mistralai/mistral-small-24b-instruct-2501:free",
         "cognitivecomputations/dolphin3.0-r1-mistral-24b:free",
+        "meta-llama/llama-4-scout:free",
+        "qwen/qwen-2.5-72b-instruct:free",
+        "deepseek/deepseek-chat:free",
+        "google/gemini-2.5-flash-preview-04-17:free",
+        "cohere/command-r-08-2024:free",
     )
     if config.get("openrouter_api_key"):
         session, backend = _create_curl_cffi_llm_session()

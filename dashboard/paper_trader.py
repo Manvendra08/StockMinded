@@ -3187,10 +3187,23 @@ def cleanup_db(
             if from_date or to_date:
                 continue
 
-        # Include BOTH stock and option trades for this date
+        # M1 FIX: Include BOTH stock and option trades for this date.
+        # Deduplicate by trade ID to prevent double-counting when the same
+        # trade exists in both JSON and SQLite stores after sync.
         s_trades = [t for t in keep_trades if t.get("entry_date") == d]
         s_options = [t for t in keep_options if t.get("entry_date") == d]
-        all_day_trades = s_trades + s_options
+
+        # Build deduplicated list: prefer option_trades entry if ID overlaps
+        seen_ids: set = set()
+        all_day_trades: list[dict] = []
+        for t in s_options + s_trades:
+            tid = t.get("id") or t.get("trade_id")
+            if tid is not None and tid in seen_ids:
+                continue
+            if tid is not None:
+                seen_ids.add(tid)
+            all_day_trades.append(t)
+
         s["trades"] = s_trades
         s["option_trades"] = s_options
         s["total_trades"] = len(all_day_trades)
