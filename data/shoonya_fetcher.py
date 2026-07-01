@@ -816,7 +816,7 @@ class ShoonyaFetcher:
             # 2. Fetch option chain via GetOptionChain
             chain_tsym = underlying_tsym
             chain = self._get_option_chain(
-                option_exch, chain_tsym, underlying_price, count=15
+                option_exch, chain_tsym, underlying_price, count=30
             )
             if not chain or chain.get("stat") != "Ok" or not chain.get("values"):
                 logger.warning("[shoonya] empty option chain for %s", chain_tsym)
@@ -934,11 +934,32 @@ class ShoonyaFetcher:
                 if strike <= 0:
                     continue
 
+                ltp_val = _f("lp")
+
+                # Harden: reject spot/index leakage in option LTP
+                # If ltp > 50% of underlying price, it's almost certainly
+                # the underlying/index value, not the option premium.
+                if (
+                    ltp_val > 0.0
+                    and underlying_price > 0.0
+                    and ltp_val > underlying_price * 0.5
+                ):
+                    logger.warning(
+                        "[shoonya] rejecting corrupt ltp=%.1f for %s %s strike=%.0f "
+                        "(underlying=%.1f) — spot leaked into option premium",
+                        ltp_val,
+                        base,
+                        ot,
+                        strike,
+                        underlying_price,
+                    )
+                    ltp_val = 0.0  # Force synthetic pricing downstream
+
                 strikes.append(
                     {
                         "strike": strike,
                         "option_type": ot,
-                        "ltp": _f("lp"),
+                        "ltp": ltp_val,
                         "oi": _i("oi"),
                         "oi_change": _i("oichg"),
                         "volume": _i("v"),

@@ -509,19 +509,23 @@ def _ensure_dict(data: Any) -> Optional[dict]:
     if hasattr(data, "model_dump"):
         try:
             return data.model_dump(mode="json")
-        except Exception:
-            pass
+        except Exception as e:
+            logging.getLogger(__name__).debug(
+                "[_ensure_dict] model_dump(json) failed: %s", e
+            )
         try:
             return data.model_dump()
-        except Exception:
-            pass
+        except Exception as e:
+            logging.getLogger(__name__).debug(
+                "[_ensure_dict] model_dump() failed: %s", e
+            )
 
     # Pydantic v1: .dict()
     if hasattr(data, "dict"):
         try:
             return data.dict()
-        except Exception:
-            pass
+        except Exception as e:
+            logging.getLogger(__name__).debug("[_ensure_dict] .dict() failed: %s", e)
 
     # Try converting via __dict__ or vars()
     if hasattr(data, "__dict__"):

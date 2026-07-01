@@ -444,28 +444,6 @@ def quote_batch(symbols: list[str]) -> dict[str, dict]:
             "[quote_batch] shoonya initialization failed: %s", e
         )
 
-    # Phase 1: Dhan fallback for symbols still empty
-    if not _dhan_enabled():
-        return out
-    grouped: dict[str, list[int]] = {}
-    reverse: dict[tuple[str, str], str] = {}
-    for sym in symbols:
-        if out.get(sym, {}).get("ltp"):
-            continue  # already populated by Shoonya
-        inst = _dhan_find_instrument(sym)
-        if not inst:
-            continue
-        seg = inst["segment"]
-        sid = int(inst["security_id"])
-        grouped.setdefault(seg, []).append(sid)
-        reverse[(seg, str(sid))] = sym
-    if not grouped:
-        return out
-    _dhan_fill_quotes(grouped, reverse, out)
-    # Track source for symbols filled by Dhan
-    for sym in symbols:
-        if out.get(sym, {}).get("ltp") and sym not in _QUOTE_SOURCE:
-            _QUOTE_SOURCE[sym] = "dhan"
     return out
 
 
@@ -1316,17 +1294,10 @@ _OHLC_CACHE_BUCKET = 0
 
 
 def ohlc(symbol: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
-    """Daily/intraday OHLC. Dhan primary, yfinance fallback."""
+    """Daily/intraday OHLC. yfinance primary."""
     import contextlib
     import io
 
-    try:
-        df = _dhan_ohlc(symbol, period=period, interval=interval)
-        if not df.empty:
-            df.attrs["source"] = "dhan_historical"
-            return df
-    except Exception as e:
-        print(f"[dhan ohlc] failed for {symbol}: {e}")
     yf = _yf()
     tkr = YF_SYMBOL.get(symbol) or (
         symbol if "." in symbol or "=" in symbol or "^" in symbol else f"{symbol}.NS"
@@ -1595,17 +1566,7 @@ def option_chain(symbol: str = "NIFTY", _skip_atm_filter: bool = False) -> dict:
             "[option_chain shoonya] failed for %s: %s", symbol, e
         )
 
-    # 1. Dhan (fallback 1: has full data including LTPs when user has API access).
-    try:
-        data = _option_chain_from_dhan(symbol)
-        if data and data.get("records", {}).get("data"):
-            return _save_chain(data)
-    except Exception as e:
-        logging.getLogger(__name__).warning(
-            "[option_chain dhan] failed for %s: %s", symbol, e
-        )
-
-    # 1.5. Public Dhan Scraper (fallback 2: bypass-safe, unauthenticated, full data).
+    # 1. Public Dhan Scraper (fallback: bypass-safe, unauthenticated, full data).
     try:
         data = _option_chain_from_public_dhan(symbol)
         if data and data.get("records", {}).get("data"):
@@ -1726,30 +1687,25 @@ def option_chain(symbol: str = "NIFTY", _skip_atm_filter: bool = False) -> dict:
 
     data = _load_cached_chain()
 
-    # Enrichment step for Research360: If LTP is 0, try to patch with Dhan LTPs
+    # Enrichment step for Research360: If LTP is 0, try to patch with Dhan Public LTPs
     if data.get("_source") == "research360":
         try:
-            # We only need LTPs for the near-ATM strikes usually.
-            # Patching the whole chain is expensive, but paper trading needs it.
-            # Try to get underlying price first.
             spot = data.get("records", {}).get("underlyingValue")
             if spot is not None and spot != 0:
-                # Use a secondary call to Dhan just for LTPs if available
-                dhan_data = _option_chain_from_dhan(symbol)
-                if dhan_data.get("records", {}).get("data"):
-                    # Create a map of strike+type -> LTP
+                # Use Dhan Public scraper for LTPs (free, no auth needed)
+                public_data = _option_chain_from_public_dhan(symbol)
+                if public_data.get("records", {}).get("data"):
                     ltp_map = {}
-                    for row in dhan_data["records"]["data"]:
+                    for row in public_data["records"]["data"]:
                         s = row["strikePrice"]
                         ltp_map[f"{s}_CE"] = row["CE"].get("lastPrice", 0)
                         ltp_map[f"{s}_PE"] = row["PE"].get("lastPrice", 0)
 
-                    # Apply to Research360 data
                     for row in data["records"]["data"]:
                         s = row["strikePrice"]
                         row["CE"]["lastPrice"] = ltp_map.get(f"{s}_CE", 0)
                         row["PE"]["lastPrice"] = ltp_map.get(f"{s}_PE", 0)
-                    data["_source"] = "research360+dhan_ltp"
+                    data["_source"] = "research360+public_dhan_ltp"
         except Exception as e:
             logging.getLogger(__name__).exception(
                 "Option chain enrichment failed for %s: %s", symbol, e

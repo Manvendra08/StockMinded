@@ -2831,7 +2831,11 @@
             <!-- Risk bar (MOVED TO PAPER TRADER) -->
 
             <!-- ═══ OPTION CHAIN ═══ -->
-            <section id="option-chain" class="option-chain-section card" style="margin-top: 24px">
+            <section
+                id="option-chain"
+                class="option-chain-section card"
+                style="margin-top: 24px"
+            >
                 <div class="card-title" style="justify-content: space-between">
                     <div style="display: flex; align-items: center; gap: 8px">
                         <span class="icon">⛓️</span> NIFTY Option Chain
@@ -3752,7 +3756,9 @@
                             margin_util_cap: Number(saved.margin_util_cap),
                         };
                     }
-                } catch (_) {}
+                } catch (_) {
+                    console.warn("[getCapitalConfig] parse failed", _);
+                }
                 return { ...baseRisk };
             }
 
@@ -3953,9 +3959,15 @@
                     if (data.error) throw new Error(data.error);
 
                     const records = data.records?.data || [];
-                    let underlyingPrice = data.records?.underlyingValue || data.underlying_price || data.filtered?.underlying_price || 0;
+                    let underlyingPrice =
+                        data.records?.underlyingValue ||
+                        data.underlying_price ||
+                        data.filtered?.underlying_price ||
+                        0;
                     if (underlyingPrice === 0 && records.length > 0) {
-                        underlyingPrice = records[Math.floor(records.length / 2)].strikePrice || 0;
+                        underlyingPrice =
+                            records[Math.floor(records.length / 2)]
+                                .strikePrice || 0;
                     }
                     const ts =
                         data.records?.timestamp || new Date().toLocaleString();
@@ -4066,9 +4078,12 @@
 
                     // Filter for strikes near the money (+/- 400 points)
                     const atm = Math.round(underlyingPrice / 50) * 50;
-                    let filtered = atm > 0 ? records.filter(
-                        (r) => Math.abs(r.strikePrice - atm) <= 400,
-                    ) : records;
+                    let filtered =
+                        atm > 0
+                            ? records.filter(
+                                  (r) => Math.abs(r.strikePrice - atm) <= 400,
+                              )
+                            : records;
                     if (filtered.length === 0 && records.length > 0) {
                         // Fallback if ATM filter excluded everything
                         const mid = Math.floor(records.length / 2);
@@ -4080,45 +4095,49 @@
                     } else {
                         tbody.innerHTML = filtered
                             .map((r) => {
-                            const ce = r.CE || {};
-                            const pe = r.PE || {};
-                            const isAtm = r.strikePrice === atm;
+                                const ce = r.CE || {};
+                                const pe = r.PE || {};
+                                const isAtm = r.strikePrice === atm;
 
-                            // Adaptive cell values
-                            const ceCol2 = hasVol
-                                ? (ce.totalTradedVolume || 0).toLocaleString()
-                                : (
-                                      ce.changeinOpenInterest || 0
-                                  ).toLocaleString();
-                            const ceCol3 = hasLTP
-                                ? fmt(ce.lastPrice)
-                                : fmt(ce.impliedVolatility);
-                            const peCol1 = hasLTP
-                                ? fmt(pe.lastPrice)
-                                : fmt(pe.impliedVolatility);
-                            const peCol2 = hasVol
-                                ? (pe.totalTradedVolume || 0).toLocaleString()
-                                : (
-                                      pe.changeinOpenInterest || 0
-                                  ).toLocaleString();
+                                // Adaptive cell values
+                                const ceCol2 = hasVol
+                                    ? (
+                                          ce.totalTradedVolume || 0
+                                      ).toLocaleString()
+                                    : (
+                                          ce.changeinOpenInterest || 0
+                                      ).toLocaleString();
+                                const ceCol3 = hasLTP
+                                    ? fmt(ce.lastPrice)
+                                    : fmt(ce.impliedVolatility);
+                                const peCol1 = hasLTP
+                                    ? fmt(pe.lastPrice)
+                                    : fmt(pe.impliedVolatility);
+                                const peCol2 = hasVol
+                                    ? (
+                                          pe.totalTradedVolume || 0
+                                      ).toLocaleString()
+                                    : (
+                                          pe.changeinOpenInterest || 0
+                                      ).toLocaleString();
 
-                            // Color OI Change: positive = green, negative = red
-                            const ceChgCls = !hasVol
-                                ? (ce.changeinOpenInterest || 0) > 0
-                                    ? "up"
-                                    : (ce.changeinOpenInterest || 0) < 0
-                                      ? "down"
-                                      : "muted"
-                                : "muted";
-                            const peChgCls = !hasVol
-                                ? (pe.changeinOpenInterest || 0) > 0
-                                    ? "up"
-                                    : (pe.changeinOpenInterest || 0) < 0
-                                      ? "down"
-                                      : "muted"
-                                : "muted";
+                                // Color OI Change: positive = green, negative = red
+                                const ceChgCls = !hasVol
+                                    ? (ce.changeinOpenInterest || 0) > 0
+                                        ? "up"
+                                        : (ce.changeinOpenInterest || 0) < 0
+                                          ? "down"
+                                          : "muted"
+                                    : "muted";
+                                const peChgCls = !hasVol
+                                    ? (pe.changeinOpenInterest || 0) > 0
+                                        ? "up"
+                                        : (pe.changeinOpenInterest || 0) < 0
+                                          ? "down"
+                                          : "muted"
+                                    : "muted";
 
-                            return `
+                                return `
             <tr style="${isAtm ? "background:rgba(59, 130, 246, 0.1); font-weight:700;" : ""}">
               <td class="muted">${(ce.openInterest || 0).toLocaleString()}</td>
               <td class="${ceChgCls}">${ceCol2}</td>
@@ -4129,8 +4148,8 @@
               <td class="muted">${(pe.openInterest || 0).toLocaleString()}</td>
             </tr>
           `;
-                        })
-                        .join("");
+                            })
+                            .join("");
                     }
                 } catch (e) {
                     tsEl.textContent = "Failed to load chain: " + e.message;
@@ -4478,7 +4497,12 @@
                             const mainData = await mainRes.json();
                             if (!mainData.error) renderAll(mainData);
                         }
-                    } catch (_) {}
+                    } catch (_) {
+                        console.warn(
+                            "[fetchIntraday] main dashboard fetch failed",
+                            _,
+                        );
+                    }
 
                     const res = await fetch(`/api/intraday?tf=${_currentTf}`);
                     if (!res.ok) return;
@@ -4487,7 +4511,9 @@
                     renderTicker(d.watchlist || []);
                     renderWatchlist(d.watchlist || []);
                     renderNiftyChart(d.nifty_candles || []);
-                } catch (_) {}
+                } catch (_) {
+                    console.warn("[fetchIntraday] render failed", _);
+                }
             }
 
             function startIntradayTimer() {

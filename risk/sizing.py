@@ -68,16 +68,61 @@ def option_structure_size(
     per_trade_pct: float,
     max_loss_per_lot: float,
     lot_size: int,
+    *,
+    margin_per_lot: float = 0.0,
+    max_notional: float = 0.0,
 ) -> SizeResult:
-    """max_loss_per_lot = ₹ max loss for 1 lot of the structure (already in rupees)."""
-    risk_budget = capital * per_trade_pct
+    """Size an option structure by risk budget / max-loss, with margin guard.
+
+    Args:
+        capital: Total account capital in rupees.
+        per_trade_pct: Fraction of capital to risk per trade (e.g. 0.01 for 1%).
+        max_loss_per_lot: ₹ max loss for 1 lot of the structure (already in rupees).
+        lot_size: Contract multiplier (e.g. 75 for NIFTY).
+        margin_per_lot: ₹ margin required per lot by the exchange/broker.
+            If provided, lots are also capped by capital / margin_per_lot to
+            prevent margin exhaustion. Pass 0 to skip the margin check.
+        max_notional: Maximum notional deployment. If provided, lots are also
+            capped by max_notional / (premium_per_lot * lot_size). Pass 0 to skip.
+
+    M8 FIX: Added margin_per_lot parameter. Previously, structures with low
+    max_loss but high margin requirements could be sized beyond the account's
+    margin capacity, causing broker rejection or margin calls.
+
+    Returns:
+        SizeResult with qty, risk_rupees, notional, and notes describing
+        which constraint was binding (risk, margin, or notional).
+    """
     if max_loss_per_lot <= 0:
         return SizeResult(0, 0.0, 0.0, "invalid max loss")
-    lots = math.floor(risk_budget / max_loss_per_lot)
+
+    risk_budget = capital * per_trade_pct
+    lots_by_risk = math.floor(risk_budget / max_loss_per_lot)
+
+    # M8 FIX: Margin guard — cap lots by available capital / margin requirement
+    lots_by_margin = lots_by_risk  # default: no margin constraint
+    if margin_per_lot > 0:
+        lots_by_margin = math.floor(capital / margin_per_lot)
+
+    # Take the most conservative of risk-based and margin-based sizing
+    lots = min(lots_by_risk, lots_by_margin)
+
+    # Determine which constraint was binding for the notes
+    constraint = "risk"
+    if lots_by_margin < lots_by_risk:
+        constraint = "margin"
+
     qty = lots * lot_size
+
+    notes_parts = [f"{lots} lots of structure"]
+    if constraint != "risk":
+        notes_parts.append(f"capped by {constraint}")
+    if margin_per_lot > 0:
+        notes_parts.append(f"margin/lot=₹{margin_per_lot:,.0f}")
+
     return SizeResult(
         qty=qty,
         risk_rupees=round(lots * max_loss_per_lot, 2),
         notional=0.0,
-        notes=f"{lots} lots of structure",
+        notes=" | ".join(notes_parts),
     )

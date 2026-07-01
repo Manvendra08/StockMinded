@@ -527,13 +527,20 @@ def is_symbol_expiry_today(symbol: str) -> bool:
 
 
 def is_within_exit_window(
-    cfg: dict = None, now: datetime = None, mode: str = "positional"
+    cfg: dict = None,
+    now: datetime = None,
+    mode: str = "positional",
+    symbol: str = "NIFTY",
 ) -> Tuple[bool, str]:
     """
     Check if trade should be exited now based on mode and rules.
 
-    Intraday: exit by 15:15
-    Positional: exit by expiry-day 15:15 ONLY; normal days remain in trade
+    M7 FIX: Added symbol parameter to use the correct config section.
+    Previously always used nifty_options config even for BANKNIFTY trades,
+    causing BANKNIFTY exits to be governed by NIFTY's timing rules.
+
+    Intraday: exit by configured time (default 15:15)
+    Positional: exit by expiry-day configured time ONLY; normal days remain in trade
     """
     from datetime import timedelta, timezone
 
@@ -542,7 +549,10 @@ def is_within_exit_window(
 
         cfg = load_config()
 
-    nifty_cfg = cfg.get("nifty_options", {})
+    # M7 FIX: Pick the right config section based on symbol
+    cfg_key = "banknifty_options" if symbol == "BANKNIFTY" else "nifty_options"
+    sym_cfg = cfg.get(cfg_key, {})
+
     now = now or datetime.now(timezone(timedelta(hours=5, minutes=30)))
 
     if now.weekday() >= 5:
@@ -555,7 +565,7 @@ def is_within_exit_window(
     current_time = now.time()
 
     if mode == "intraday":
-        exit_str = nifty_cfg.get("intraday_exit_by", "15:15")
+        exit_str = sym_cfg.get("intraday_exit_by", "15:15")
         h, m = map(int, exit_str.split(":"))
         exit_time = time(h, m)
         if current_time >= exit_time:
@@ -563,12 +573,12 @@ def is_within_exit_window(
         return False, "Not yet exit time"
 
     else:  # positional
-        exit_str = nifty_cfg.get("positional_exit_expiry_cutoff", "15:15")
+        exit_str = sym_cfg.get("positional_exit_expiry_cutoff", "15:15")
         h, m = map(int, exit_str.split(":"))
         exit_time = time(h, m)
         # Only force-exit on EXPIRY DAY; on normal days stay in the trade
-        expiry_str = nifty_cfg.get("current_expiry", "")
-        on_expiry_day = is_expiry_day(expiry_str) if expiry_str else False
+        # M7 FIX: Use symbol-specific expiry check
+        on_expiry_day = is_symbol_expiry_today(symbol)
         if on_expiry_day and current_time >= exit_time:
             return True, f"Expiry day exit by {exit_str}"
         return False, "Not expiry cutoff"
@@ -654,6 +664,13 @@ def check_naked_legs(legs: list, allow_naked: bool = False) -> Tuple[bool, str]:
     """
     Verify that no leg is a naked short option, unless allow_naked is True.
     All short positions must have corresponding protective legs in defined-risk mode.
+
+    M6 FIX: Now also validates strike ordering — protective legs must be on the
+    correct side of the short leg to actually provide protection:
+      - Bear Call Spread: long CE strike must be ABOVE short CE strike
+      - Bull Put Spread: long PE strike must be BELOW short PE strike
+    A protective leg at the wrong strike creates a debit spread, not a credit spread,
+    and does NOT cap the risk.
     """
     if not legs:
         return True, "No legs"
@@ -666,19 +683,16 @@ def check_naked_legs(legs: list, allow_naked: bool = False) -> Tuple[bool, str]:
             return leg.get(key)
         return getattr(leg, key, None)
 
-    # Count short and long positions by type
-    short_calls = sum(
-        1 for l in legs if _get(l, "side") == "SELL" and _get(l, "type") == "CE"
-    )
-    long_calls = sum(
-        1 for l in legs if _get(l, "side") == "BUY" and _get(l, "type") == "CE"
-    )
-    short_puts = sum(
-        1 for l in legs if _get(l, "side") == "SELL" and _get(l, "type") == "PE"
-    )
-    long_puts = sum(
-        1 for l in legs if _get(l, "side") == "BUY" and _get(l, "type") == "PE"
-    )
+    # Collect actual leg objects (not just counts) for strike validation
+    short_call_legs = [l for l in legs if _get(l, "side") == "SELL" and _get(l, "type") == "CE"]
+    long_call_legs = [l for l in legs if _get(l, "side") == "BUY" and _get(l, "type") == "CE"]
+    short_put_legs = [l for l in legs if _get(l, "side") == "SELL" and _get(l, "type") == "PE"]
+    long_put_legs = [l for l in legs if _get(l, "side") == "BUY" and _get(l, "type") == "PE"]
+
+    short_calls = len(short_call_legs)
+    long_calls = len(long_call_legs)
+    short_puts = len(short_put_legs)
+    long_puts = len(long_put_legs)
 
     # Naked if short without protection
     if short_calls > 0 and long_calls == 0:
@@ -686,13 +700,52 @@ def check_naked_legs(legs: list, allow_naked: bool = False) -> Tuple[bool, str]:
     if short_puts > 0 and long_puts == 0:
         return False, "Naked short put detected"
 
-    # For Iron Condor: need exactly 1 short + 1 long on each side
+    # For Iron Condor / Credit Spreads: need exactly 1 short + 1 long on each side
     if short_calls > 0 and long_calls > 0:
         if short_calls != long_calls:
             return False, "Unbalanced call legs"
+        # M6 FIX: Validate strike ordering for call spreads
+        # Bear Call Spread: short CE at lower strike, long CE at higher strike
+        # The long CE caps the upside risk. If long CE < short CE, it's NOT protective.
+        for sc in short_call_legs:
+            sc_strike = _get(sc, "strike")
+            if sc_strike is None:
+                continue
+            # Find a matching protective long call with strike > short strike
+            protective_found = False
+            for lc in long_call_legs:
+                lc_strike = _get(lc, "strike")
+                if lc_strike is not None and lc_strike > sc_strike:
+                    protective_found = True
+                    break
+            if not protective_found:
+                return False, (
+                    f"Call spread strike ordering invalid: short CE at {sc_strike} "
+                    f"has no protective long CE above it"
+                )
+
     if short_puts > 0 and long_puts > 0:
         if short_puts != long_puts:
             return False, "Unbalanced put legs"
+        # M6 FIX: Validate strike ordering for put spreads
+        # Bull Put Spread: short PE at higher strike, long PE at lower strike
+        # The long PE caps the downside risk. If long PE > short PE, it's NOT protective.
+        for sp in short_put_legs:
+            sp_strike = _get(sp, "strike")
+            if sp_strike is None:
+                continue
+            # Find a matching protective long put with strike < short strike
+            protective_found = False
+            for lp in long_put_legs:
+                lp_strike = _get(lp, "strike")
+                if lp_strike is not None and lp_strike < sp_strike:
+                    protective_found = True
+                    break
+            if not protective_found:
+                return False, (
+                    f"Put spread strike ordering invalid: short PE at {sp_strike} "
+                    f"has no protective long PE below it"
+                )
 
     return True, "No naked legs"
 

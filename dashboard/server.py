@@ -57,6 +57,91 @@ _cache_ts: datetime | None = None
 _cache_lock = __import__("threading").Lock()
 _engine_busy = False
 
+# -- data pipeline health tracking -----------------------------------
+_HEALTH: dict = {
+    "shoonya": {
+        "status": "unknown",
+        "last_ok": None,
+        "last_error": None,
+        "error_count": 0,
+    },
+    "dhan": {
+        "status": "unknown",
+        "last_ok": None,
+        "last_error": None,
+        "error_count": 0,
+    },
+    "yfinance": {
+        "status": "unknown",
+        "last_ok": None,
+        "last_error": None,
+        "error_count": 0,
+    },
+    "news_icicidirect": {
+        "status": "unknown",
+        "last_ok": None,
+        "last_error": None,
+        "error_count": 0,
+    },
+    "news_livemint": {
+        "status": "unknown",
+        "last_ok": None,
+        "last_error": None,
+        "error_count": 0,
+    },
+    "news_moneycontrol": {
+        "status": "unknown",
+        "last_ok": None,
+        "last_error": None,
+        "error_count": 0,
+    },
+    "sentiment_llm": {
+        "status": "unknown",
+        "last_ok": None,
+        "last_error": None,
+        "error_count": 0,
+    },
+    "option_chain": {
+        "status": "unknown",
+        "last_ok": None,
+        "last_error": None,
+        "error_count": 0,
+    },
+    "journal_db": {
+        "status": "unknown",
+        "last_ok": None,
+        "last_error": None,
+        "error_count": 0,
+    },
+}
+_HEALTH_LOCK = __import__("threading").Lock()
+
+
+def _health_event(source: str, success: bool, detail: str = "") -> None:
+    """Record a health event for a data pipeline source."""
+    now_ts = datetime.now(timezone.utc).isoformat()
+    with _HEALTH_LOCK:
+        if source not in _HEALTH:
+            _HEALTH[source] = {
+                "status": "unknown",
+                "last_ok": None,
+                "last_error": None,
+                "error_count": 0,
+            }
+        if success:
+            _HEALTH[source]["status"] = "ok"
+            _HEALTH[source]["last_ok"] = now_ts
+        else:
+            _HEALTH[source]["status"] = "error"
+            _HEALTH[source]["last_error"] = f"{now_ts}: {detail}"
+            _HEALTH[source]["error_count"] += 1
+            logging.getLogger(__name__).warning(
+                "[health] %s FAILED: %s (total errors: %s)",
+                source,
+                detail,
+                _HEALTH[source]["error_count"],
+            )
+
 
 def _load_journal_trade_rows() -> list[dict]:
     """Load stock trades from the SQLite journal."""
@@ -839,8 +924,10 @@ def _generate_trade_alerts(data: dict) -> list[dict]:
             if (now_ist.hour, now_ist.minute) >= (12, 0):
                 allow_longs = False
                 allow_shorts = False
-    except Exception:
-        pass  # fail-open if expiry check unavailable
+    except Exception as e:
+        logging.getLogger(__name__).warning(
+            "[_generate_trade_alerts] expiry check failed, fail-open: %s", e
+        )  # fail-open if expiry check unavailable
 
     # 2. VIX Filter
     if vix > 24:
@@ -1940,10 +2027,16 @@ def api_paper_open():
                                     quotes[sym]["change_pct"] = round(
                                         100 * (ltp - prev) / prev, 2
                                     )
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
+                        except Exception as e:
+                            logging.getLogger(__name__).warning(
+                                "[api_paper_open] prev_close enrich failed for %s: %s",
+                                sym,
+                                e,
+                            )
+                except Exception as e:
+                    logging.getLogger(__name__).warning(
+                        "[api_paper_open] info fetch failed for %s: %s", sym, e
+                    )
 
             # Enrich each trade
             for t in trades:
@@ -3155,8 +3248,14 @@ def api_news_headlines():
                                     "source": src,
                                 }
                             )
-                except Exception:
-                    pass
+                        _health_event(f"news_{src}", True, f"{len(result)} headlines")
+                    else:
+                        _health_event(f"news_{src}", False, "empty result")
+                except Exception as e:
+                    _health_event(f"news_{src}", False, str(e))
+                    logging.getLogger(__name__).warning(
+                        "[api_news_headlines] source '%s' result failed: %s", src, e
+                    )
 
         # Deduplicate by title
         seen: set = set()
@@ -3175,6 +3274,9 @@ def api_news_headlines():
         try:
             sentiment = get_market_news_sentiment()
             if sentiment:
+                _health_event(
+                    "sentiment_llm", True, sentiment.get("model_used", "unknown")
+                )
                 verdict = {
                     "overall_market_sentiment": sentiment.get(
                         "overall_market_sentiment"
@@ -3190,6 +3292,7 @@ def api_news_headlines():
                     "model_used": sentiment.get("model_used"),
                 }
         except Exception as sent_err:
+            _health_event("sentiment_llm", False, str(sent_err))
             logging.getLogger(__name__).warning(
                 "Sentiment verdict fetch failed: %s", sent_err
             )
@@ -3206,6 +3309,23 @@ def api_news_headlines():
     except Exception as e:
         logging.getLogger(__name__).exception("News headlines failed: %s", e)
         return jsonify({"error": str(e), "headlines": []}), 500
+
+
+@app.route("/api/health")
+def api_health():
+    """Return data pipeline health status for all sources."""
+    with _HEALTH_LOCK:
+        return jsonify(
+            {
+                "sources": dict(_HEALTH),
+                "error_sources": [
+                    k for k, v in _HEALTH.items() if v.get("status") == "error"
+                ],
+                "status": "degraded"
+                if any(v.get("status") == "error" for v in _HEALTH.values())
+                else "ok",
+            }
+        )
 
 
 if __name__ == "__main__":

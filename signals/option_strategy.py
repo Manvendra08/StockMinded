@@ -949,6 +949,12 @@ def _resolve_structure(
 
 
 def _nearest(target: float, strikes: list, prefer_higher: bool = True) -> float:
+    """Return the nearest strike to target.
+    
+    M4 FIX: When equidistant, respect prefer_higher parameter instead of
+    always biasing toward higher strike. This prevents systematic placement
+    bias in Iron Condors and spreads.
+    """
     if not strikes:
         return target
     below = [s for s in strikes if s <= target]
@@ -958,9 +964,15 @@ def _nearest(target: float, strikes: list, prefer_higher: bool = True) -> float:
     if not above:
         return max(below)
     lower, upper = max(below), min(above)
-    if prefer_higher:
-        return upper if abs(upper - target) <= abs(lower - target) else lower
-    return lower if abs(lower - target) <= abs(upper - target) else upper
+    dist_lower = abs(lower - target)
+    dist_upper = abs(upper - target)
+    # M4 FIX: Strict < comparison — when equidistant, defer to prefer_higher
+    if dist_upper < dist_lower:
+        return upper
+    elif dist_lower < dist_upper:
+        return lower
+    # Equidistant: use the preference flag to break the tie
+    return upper if prefer_higher else lower
 
 
 # Legacy compatibility

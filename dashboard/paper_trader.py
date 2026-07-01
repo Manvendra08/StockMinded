@@ -734,6 +734,80 @@ def enter_option_structure(
             }
         # Smart exit metadata
         short_strikes = [l.strike for l in resolved_legs if l.side == "SELL"]
+
+        # M3 FIX: Calculate wing_width from resolved legs instead of hardcoding 0.0.
+        # For spreads: wing_width = |short_strike - long_strike| on either side.
+        # For Iron Condors: wing_width = max(call_spread_width, put_spread_width).
+        # This is critical for STRIKE_BREACH smart exit which checks spot vs short_strikes ± wing_width.
+        from signals.options import calc_structure_max_loss
+
+        short_calls = sorted(
+            [l for l in resolved_legs if l.side == "SELL" and l.type == "CE"],
+            key=lambda l: l.strike,
+        )
+        long_calls = sorted(
+            [l for l in resolved_legs if l.side == "BUY" and l.type == "CE"],
+            key=lambda l: l.strike,
+        )
+        short_puts = sorted(
+            [l for l in resolved_legs if l.side == "SELL" and l.type == "PE"],
+            key=lambda l: l.strike,
+        )
+        long_puts = sorted(
+            [l for l in resolved_legs if l.side == "BUY" and l.type == "PE"],
+            key=lambda l: l.strike,
+        )
+
+        call_spread_width = 0.0
+        if short_calls and long_calls:
+            # For credit spreads, the protective long is typically above the short for bear call
+            # and below for bull put. Use the closest long to the short.
+            call_spread_width = abs(short_calls[0].strike - long_calls[0].strike)
+
+        put_spread_width = 0.0
+        if short_puts and long_puts:
+            put_spread_width = abs(short_puts[0].strike - long_puts[0].strike)
+
+        # Iron Condor: use the wider of the two spread widths
+        # Credit spread: use the single spread width
+        # Naked: wing_width stays 0 (no protective leg)
+        computed_wing_width = max(call_spread_width, put_spread_width)
+
+        # Determine structure type for max_loss calculation
+        struct_type = "unknown"
+        if short_calls and long_calls and short_puts and long_puts:
+            struct_type = "iron_condor"
+        elif short_calls and long_calls:
+            struct_type = "bear_call_spread"
+        elif short_puts and long_puts:
+            struct_type = "bull_put_spread"
+        elif short_calls or short_puts:
+            struct_type = "naked_short"
+
+        lot_size = resolved_legs[0].lot_size if resolved_legs else 1
+        num_lots = max(l.lots for l in resolved_legs) if resolved_legs else 1
+        is_defined_risk = struct_type != "naked_short"
+
+        # Get underlying spot for naked_short max_loss calculation
+        underlying_spot = None
+        try:
+            from data import feed
+
+            spot_data = feed.ohlc_cached(underlying, period="5d")
+            if spot_data is not None and not spot_data.empty:
+                underlying_spot = float(spot_data["close"].iloc[-1])
+        except Exception:
+            underlying_spot = None
+
+        max_loss = calc_structure_max_loss(
+            struct_type,
+            net_premium,
+            computed_wing_width,
+            lot_size,
+            lots=num_lots,
+            underlying_spot=underlying_spot,
+        )
+
         try:
             from data import feed
 
@@ -749,6 +823,7 @@ def enter_option_structure(
             "id": _next_id(db),
             "symbol": underlying,
             "structure": structure_name,
+            "structure_type": struct_type,
             "legs": [
                 {
                     "side": l.side,
@@ -762,7 +837,10 @@ def enter_option_structure(
                 for l in resolved_legs
             ],
             "net_premium": round(net_premium, 2),
+            "net_credit": round(net_premium, 2),
             "entry_net_credit": round(net_premium, 2),
+            "max_loss_rupees": round(max_loss, 2),
+            "is_defined_risk": is_defined_risk,
             "entry_time": _now_ist().strftime("%Y-%m-%d %H:%M:%S"),
             "entry_date": today_str,
             "exit_time": None,
@@ -772,7 +850,7 @@ def enter_option_structure(
             # Smart exit tracking
             "entry_vix": round(entry_vix, 2),
             "short_strikes": short_strikes,
-            "wing_width": 0.0,
+            "wing_width": computed_wing_width,
             "peak_pnl": 0.0,
             "trailing_lock": False,
             "reentry_eligible": False,
@@ -1028,6 +1106,14 @@ def _build_option_price_map(open_ops: list[dict]) -> dict:
                 target_expiries=needed_expiries or None,
                 target_strikes=needed_strikes,
             )
+            # Get the data source name for diagnostics
+            _chain_source = "unknown"
+            try:
+                from data.feed import option_chain_source
+
+                _chain_source = option_chain_source(sym) or "unknown"
+            except Exception:
+                pass
             if chain.empty:
                 logging.getLogger(__name__).warning(
                     "%s: chain_snapshot returned empty DataFrame for need_strikes=%s expiries=%s",
@@ -1071,7 +1157,8 @@ def _build_option_price_map(open_ops: list[dict]) -> dict:
                             # SANITY CHECK: reject spot/index contamination
                             if raw_price > MAX_REASONABLE_PREMIUM:
                                 logging.getLogger(__name__).error(
-                                    "%s: REJECTED corrupt premium %s for %s (strike=%s, expiry=%s, type=%s) - exceeds max reasonable %s. "
+                                    "%s: REJECTED corrupt premium %s for %s (strike=%s, expiry=%s, type=%s) "
+                                    "- exceeds max reasonable %s (source=%s). "
                                     "This indicates spot/index value leaked into option chain.",
                                     sym,
                                     raw_price,
@@ -1080,6 +1167,7 @@ def _build_option_price_map(open_ops: list[dict]) -> dict:
                                     leg["expiry"],
                                     leg["type"],
                                     MAX_REASONABLE_PREMIUM,
+                                    _chain_source,
                                 )
                                 continue  # Skip this leg - treat as missing price
                             price_map[key] = raw_price
@@ -1326,12 +1414,20 @@ def check_option_exits(
                 entry_prem = _entry_premium(t)
                 pnl = entry_prem - current_net
 
-                # SANITY BOUND: P&L cannot exceed theoretical max loss for defined-risk structures
+                # M2 FIX: SANITY BOUND - Changed multiplier from 1.1 to 1.0.
+                # For defined-risk structures (Iron Condor, credit spreads), P&L should
+                # NEVER exceed max_loss by definition. The old 1.1x buffer tolerated 10%
+                # data corruption silently — now we enforce the theoretical boundary exactly.
                 max_loss_rupees = t.get("max_loss_rupees", 0.0)
-                if max_loss_rupees > 0 and abs(pnl) > max_loss_rupees * 1.1:
+                is_defined_risk = t.get("is_defined_risk", True)
+                if (
+                    is_defined_risk
+                    and max_loss_rupees > 0
+                    and abs(pnl) > max_loss_rupees
+                ):
                     logging.getLogger(__name__).error(
-                        "Trade %s %s: P&L %s exceeds theoretical max loss %s by %.0fx - CORRUPT DATA. "
-                        "Capping P&L to max_loss for safety.",
+                        "Trade %s %s: P&L %s exceeds theoretical max loss %s by %.1fx - CORRUPT DATA. "
+                        "Capping P&L to max_loss for defined-risk structure.",
                         t.get("id"),
                         t.get("symbol"),
                         pnl,
@@ -1361,11 +1457,17 @@ def check_option_exits(
                     leg["exit_premium"] = price
                 # C2 FIX: Use unified _entry_premium() for final PnL
                 final_pnl = round(_entry_premium(t) - current_net, 2)
-                # Re-apply sanity bound on final P&L
+                # M2 FIX: Re-apply sanity bound on final P&L — now using strict 1.0x
+                # instead of 1.1x. Defined-risk structures cannot exceed max_loss.
                 max_loss_rupees = t.get("max_loss_rupees", 0.0)
-                if max_loss_rupees > 0 and abs(final_pnl) > max_loss_rupees * 1.1:
+                is_defined_risk = t.get("is_defined_risk", True)
+                if (
+                    is_defined_risk
+                    and max_loss_rupees > 0
+                    and abs(final_pnl) > max_loss_rupees
+                ):
                     logging.getLogger(__name__).error(
-                        "Trade %s %s: FINAL P&L %s exceeds max_loss %s - clamping.",
+                        "Trade %s %s: FINAL P&L %s exceeds max_loss %s - clamping to theoretical boundary.",
                         t.get("id"),
                         t.get("symbol"),
                         final_pnl,
@@ -1486,12 +1588,20 @@ def _check_option_exits(
                 entry_prem = _entry_premium(t)
                 pnl = entry_prem - current_net
 
-                # SANITY BOUND: P&L cannot exceed theoretical max loss for defined-risk structures
+                # M2 FIX: SANITY BOUND - Changed multiplier from 1.1 to 1.0.
+                # For defined-risk structures (Iron Condor, credit spreads), P&L should
+                # NEVER exceed max_loss by definition. The old 1.1x buffer tolerated 10%
+                # data corruption silently — now we enforce the theoretical boundary exactly.
                 max_loss_rupees = t.get("max_loss_rupees", 0.0)
-                if max_loss_rupees > 0 and abs(pnl) > max_loss_rupees * 1.1:
+                is_defined_risk = t.get("is_defined_risk", True)
+                if (
+                    is_defined_risk
+                    and max_loss_rupees > 0
+                    and abs(pnl) > max_loss_rupees
+                ):
                     logging.getLogger(__name__).error(
-                        "Trade %s %s: P&L %s exceeds theoretical max loss %s by %.0fx - CORRUPT DATA. "
-                        "Capping P&L to max_loss for safety.",
+                        "Trade %s %s: P&L %s exceeds theoretical max loss %s by %.1fx - CORRUPT DATA. "
+                        "Capping P&L to max_loss for defined-risk structure.",
                         t.get("id"),
                         t.get("symbol"),
                         pnl,
@@ -1521,11 +1631,17 @@ def _check_option_exits(
                     leg["exit_premium"] = price
                 # C2 FIX: Use unified _entry_premium() for final PnL
                 final_pnl = round(_entry_premium(t) - current_net, 2)
-                # Re-apply sanity bound on final P&L
+                # M2 FIX: Re-apply sanity bound on final P&L — now using strict 1.0x
+                # instead of 1.1x. Defined-risk structures cannot exceed max_loss.
                 max_loss_rupees = t.get("max_loss_rupees", 0.0)
-                if max_loss_rupees > 0 and abs(final_pnl) > max_loss_rupees * 1.1:
+                is_defined_risk = t.get("is_defined_risk", True)
+                if (
+                    is_defined_risk
+                    and max_loss_rupees > 0
+                    and abs(final_pnl) > max_loss_rupees
+                ):
                     logging.getLogger(__name__).error(
-                        "Trade %s %s: FINAL P&L %s exceeds max_loss %s - clamping.",
+                        "Trade %s %s: FINAL P&L %s exceeds max_loss %s - clamping to theoretical boundary.",
                         t.get("id"),
                         t.get("symbol"),
                         final_pnl,
@@ -1882,20 +1998,30 @@ def check_and_close_trades() -> list[dict]:
             if any(k not in trade for k in ["sl_price", "tgt_price", "direction"]):
                 continue
 
-            # Trailing stop logic (Standard trailing stop maintaining sl_pct buffer behind peak)
+            # M5 FIX: Trailing stop logic with direction-aware variable naming.
+            # The stored field "peak_price" tracks the best price seen:
+            #   - LONG: highest price (true "peak") — trailing stop ratchets UP
+            #   - SHORT: lowest price ("trough") — trailing stop ratchets DOWN
+            # We use local variable `best_price` to avoid the misleading "peak" name
+            # for SHORT trades. The stored field name is kept for backward compatibility.
             if settings.get("trail_sl", True):
                 if "peak_price" not in trade:
                     trade["peak_price"] = trade["entry_price"]
+                best_price = trade["peak_price"]
                 sl_pct = trade.get("sl_pct", settings.get("sl_pct", 2.0))
                 if direction == "LONG":
-                    if ltp > trade["peak_price"]:
-                        trade["peak_price"] = ltp
+                    # For LONG: track highest price, trail stop upward
+                    if ltp > best_price:
+                        best_price = ltp
+                        trade["peak_price"] = best_price
                         new_sl = ltp * (1 - sl_pct / 100)
                         if new_sl > trade["sl_price"]:
                             trade["sl_price"] = round(new_sl, 2)
                 else:
-                    if ltp < trade["peak_price"]:
-                        trade["peak_price"] = ltp
+                    # For SHORT: track lowest price (trough), trail stop downward
+                    if ltp < best_price:
+                        best_price = ltp
+                        trade["peak_price"] = best_price
                         new_sl = ltp * (1 + sl_pct / 100)
                         if new_sl < trade["sl_price"]:
                             trade["sl_price"] = round(new_sl, 2)

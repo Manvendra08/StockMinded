@@ -2,6 +2,7 @@ import os
 import re
 from pathlib import Path
 from typing import Optional
+
 import yaml
 from dotenv import load_dotenv
 
@@ -22,7 +23,7 @@ def _expand(value, _missing: list | None = None):
     returning empty string.  Caller decides whether to raise.
     """
     if isinstance(value, str):
-        pattern = re.compile(r'\$(?:(\w+)|{(\w+)})')
+        pattern = re.compile(r"\$(?:(\w+)|{(\w+)})")
 
         def replace(match):
             var_name = match.group(1) or match.group(2)
@@ -65,9 +66,10 @@ def load_config(path: str | None = None) -> dict:
 
 
 def fetch_dhan_public_universe() -> list[str]:
-    import requests
     import json
     import re
+
+    import requests
 
     symbols = set()
     headers = {
@@ -76,36 +78,50 @@ def fetch_dhan_public_universe() -> list[str]:
 
     # Fetch page 1 from raw HTML
     try:
-        r = requests.get("https://dhan.co/futures-stocks-list/", headers=headers, timeout=5)
+        r = requests.get(
+            "https://dhan.co/futures-stocks-list/", headers=headers, timeout=5
+        )
         if r.status_code == 200:
-            match = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', r.text, re.DOTALL)
+            match = re.search(
+                r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', r.text, re.DOTALL
+            )
             if match:
                 js = json.loads(match.group(1))
-                data = js.get("props", {}).get("pageProps", {}).get("listData", {}).get("data", [])
+                data = (
+                    js.get("props", {})
+                    .get("pageProps", {})
+                    .get("listData", {})
+                    .get("data", [])
+                )
                 for item in data:
                     sym = item.get("Sym")
                     if sym:
                         symbols.add(sym.strip())
-    except Exception:
-        pass
+    except Exception as e:
+        logging.getLogger(__name__).warning(
+            "[universe] Dhan HTML page 1 fetch failed: %s", e
+        )
 
     # Query remaining pages of Nifty 200 from public customscan API
     post_url = "https://ow-scanx-analytics.dhan.co/customscan/fetchdt"
     post_headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Content-Type": "application/json; charset=UTF-8",
-        "Referer": "https://dhan.co/"
+        "Referer": "https://dhan.co/",
     }
     for page in range(1, 5):
         payload = {
             "data": {
-                "sort": "Mcap", "sorder": "desc", "count": 50,
+                "sort": "Mcap",
+                "sorder": "desc",
+                "count": 50,
                 "params": [
                     {"field": "idxlist.Indexid", "op": "", "val": "18"},
                     {"field": "Exch", "op": "", "val": "NSE"},
-                    {"field": "OgInst", "op": "", "val": "ES"}
+                    {"field": "OgInst", "op": "", "val": "ES"},
                 ],
-                "fields": ["Sym"], "pgno": page
+                "fields": ["Sym"],
+                "pgno": page,
             }
         }
         try:
@@ -115,8 +131,10 @@ def fetch_dhan_public_universe() -> list[str]:
                     sym = item.get("Sym")
                     if sym:
                         symbols.add(sym.strip())
-        except Exception:
-            pass
+        except Exception as e:
+            logging.getLogger(__name__).warning(
+                "[universe] Dhan customscan page %s failed: %s", page, e
+            )
 
     return sorted(list(symbols))
 
@@ -136,6 +154,7 @@ def load_universe(cfg: dict) -> list[str]:
         csv_path = Path(__file__).parent / "fno200.csv"
         try:
             import csv
+
             with open(csv_path, "r", encoding="utf-8") as f:
                 reader = csv.DictReader(f)
                 symbols = []
@@ -170,6 +189,7 @@ def load_sector_map(cfg: dict | None = None) -> dict[str, str]:
     csv_path = Path(__file__).parent / "fno200.csv"
     try:
         import csv
+
         with open(csv_path, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             return {
