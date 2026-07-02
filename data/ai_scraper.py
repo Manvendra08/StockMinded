@@ -230,7 +230,7 @@ def call_llm(
     max_tokens: int | None = None,
     return_provider: bool = False,
 ) -> Any:
-    """Universal LLM call with fallback: Groq -> Gemini -> OpenRouter (6 models)."""
+    """Universal LLM call with fallback: Groq -> Gemini -> OpenRouter (8 models)."""
     config = _get_ai_config()
     if not config:
         return (None, "None") if return_provider else None
@@ -368,14 +368,14 @@ def call_llm(
 
     # 3. OpenRouter Free Models (Fallback 2+) — try multiple models
     _OPENROUTER_FALLBACK_MODELS = (
-        "google/gemini-2.0-flash-exp:free",
-        "mistralai/mistral-small-24b-instruct-2501:free",
-        "cognitivecomputations/dolphin3.0-r1-mistral-24b:free",
-        "meta-llama/llama-4-scout:free",
-        "qwen/qwen-2.5-72b-instruct:free",
-        "deepseek/deepseek-chat:free",
-        "google/gemini-2.5-flash-preview-04-17:free",
-        "cohere/command-r-08-2024:free",
+        "google/gemma-4-26b-a4b-it:free",
+        "google/gemma-4-31b-it:free",
+        "nvidia/nemotron-3-super-120b-a12b:free",
+        "meta-llama/llama-3.3-70b-instruct:free",
+        "qwen/qwen3-next-80b-a3b-instruct:free",
+        "openai/gpt-oss-20b:free",
+        "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
+        "nvidia/nemotron-3-nano-30b-a3b:free",
     )
     if config.get("openrouter_api_key"):
         session, backend = _create_curl_cffi_llm_session()

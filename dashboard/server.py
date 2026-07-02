@@ -2503,6 +2503,16 @@ def _dict_legs_to_resolved(legs: list[dict]):
             else:
                 lot_size = exchange_lot_size
                 lots = max(1, qty // lot_size)
+        premium_val = leg.get("premium", 0.0) or 0.0
+        if premium_val <= 0:
+            logging.getLogger(__name__).error(
+                "REJECTED leg with zero/corrupt premium: %s %s strike=%s expiry=%s premium=%s",
+                leg.get("side", ""),
+                leg.get("type", ""),
+                leg.get("strike", 0),
+                leg.get("expiry", ""),
+                premium_val,
+            )
         out.append(
             ResolvedLeg(
                 side=leg.get("side", ""),
@@ -2511,7 +2521,7 @@ def _dict_legs_to_resolved(legs: list[dict]):
                 expiry=leg.get("expiry", ""),
                 lots=lots,
                 lot_size=lot_size,
-                premium=leg.get("premium", 0.0),
+                premium=premium_val,
             )
         )
     return out

@@ -724,6 +724,26 @@ def enter_option_structure(
         if todays_trades:
             return {"error": f"Already traded {structure_name} for {underlying} today"}
 
+        # Validate each leg has a genuine positive premium (reject corrupted 0.0 data)
+        zero_prem_legs = [
+            (leg.side, leg.type, leg.strike, leg.premium)
+            for leg in resolved_legs
+            if leg.premium <= 0
+        ]
+        if zero_prem_legs:
+            details = "; ".join(
+                f"{s} {t} @ {strike} prem={p}" for s, t, st, p in zero_prem_legs
+            )
+            logging.getLogger(__name__).error(
+                "%s: rejecting custom entry — %d leg(s) with zero/corrupt premium: %s",
+                underlying,
+                len(zero_prem_legs),
+                details,
+            )
+            return {
+                "error": f"{underlying} blocked: {len(zero_prem_legs)} leg(s) with zero/corrupt premium"
+            }
+
         net_premium = sum(
             (leg.premium * leg.lots * leg.lot_size) * (1 if leg.side == "SELL" else -1)
             for leg in resolved_legs
@@ -935,6 +955,36 @@ def _enter_option_structure(
         ]
         if todays_trades:
             return {"error": f"Already traded {setup.strategy} for {symbol} today"}
+
+        # Validate each leg has a genuine positive premium (reject corrupted 0.0 data)
+        zero_prem_legs = [
+            (l.side, l.type, l.strike, l.premium)
+            for l in resolved_legs
+            if l.premium <= 0
+        ]
+        if zero_prem_legs:
+            details = "; ".join(
+                f"{s} {t} @ {strike} prem={p}" for s, t, st, p in zero_prem_legs
+            )
+            logging.getLogger(__name__).warning(
+                "%s: rejecting entry — %d leg(s) with zero/corrupt premium: %s",
+                symbol,
+                len(zero_prem_legs),
+                details,
+            )
+            journal.log_skipped_trade(
+                symbol,
+                "NEUTRAL",
+                "MED",
+                "CORRUPT_PREMIUM",
+                "UNKNOWN",
+                "NEUTRAL",
+                "options_gate",
+                f"Zero premium legs: {details}",
+            )
+            return {
+                "error": f"{symbol} blocked: {len(zero_prem_legs)} leg(s) with zero/corrupt premium"
+            }
 
         net_credit = sum(
             (l.premium * l.lots * l.lot_size) * (1 if l.side == "SELL" else -1)
