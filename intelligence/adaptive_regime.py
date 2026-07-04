@@ -473,7 +473,7 @@ class AdaptiveRegimeClassifier:
             if breadth >= 60: return 1.0
             if breadth >= 50: return 0.5
             if breadth >= 40: return 0.0
-            return -0.7  # Weak breadth contradupt trend up
+            return -0.7  # Weak breadth contradicts trend up
         elif regime == Regime.TREND_DOWN:
             if breadth <= 40: return 1.0
             if breadth <= 50: return 0.5

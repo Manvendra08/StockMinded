@@ -300,13 +300,18 @@ class ShoonyaFetcher:
                 time.sleep(0.05)
 
     def _verify_token(self) -> bool:
-        """Quick lightweight check: does the cached token still work?"""
+        """Quick lightweight check: does the cached token still work?
+
+        BUG-03 FIX: Use NSE exchange with a known equity symbol (RELIANCE)
+        instead of NFO/NIFTY. NIFTY is an index and doesn't exist as a scrip
+        on NFO, so SearchScrip always returned empty → token always 'failed'.
+        """
         import urllib.parse
 
         payload = {
             "uid": self.user_id,
-            "exch": "NFO",
-            "stext": urllib.parse.quote_plus("NIFTY"),
+            "exch": "NSE",
+            "stext": urllib.parse.quote_plus("RELIANCE"),
         }
         res = _post_jdata(
             f"{_API_BASE}/SearchScrip",
@@ -463,7 +468,9 @@ class ShoonyaFetcher:
                 )
                 return False
 
-            # Pre-set failure timestamp so cooldown applies even if thread hangs
+            # BUG-32 NOTE: Intentionally set BEFORE the auth attempt so that if
+            # the Playwright thread hangs or deadlocks, the cooldown still activates.
+            # On success, _SHOONYA_LOGIN_FAILURE_TS is reset to 0.0 below.
             _SHOONYA_LOGIN_FAILURE_TS = time.time()
 
             try:
@@ -649,11 +656,21 @@ class ShoonyaFetcher:
                     continue
                 tsym = v.get("tsym", "")
                 # Extract expiry from tsym pattern (e.g. RELIANCE26JUNFUT)
-                m = re.search(rf"^{base}(\d{{2}}[A-Z]{{3}}\d{{2}})", tsym)
+                # BUG-02 FIX: FUTSTK tsym format is e.g. RELIANCE26JUNFUT
+                # (suffix is 'FUT', not 2-digit year). Match both formats.
+                m = re.search(rf"^{base}(\d{{2}}[A-Z]{{3}})(\d{{2}}|FUT)", tsym)
                 if not m:
                     continue
                 try:
-                    exp_dt = datetime.strptime(m.group(1), "%d%b%y")
+                    date_part = m.group(1)  # e.g. "26JUN"
+                    suffix = m.group(2)     # e.g. "25" or "FUT"
+                    if suffix == "FUT":
+                        # For FUT suffix, parse month/day and assume current year
+                        exp_dt = datetime.strptime(date_part, "%d%b").replace(year=now.year)
+                        if exp_dt < now:
+                            exp_dt = exp_dt.replace(year=now.year + 1)
+                    else:
+                        exp_dt = datetime.strptime(date_part + suffix, "%d%b%y")
                 except ValueError:
                     continue
                 diff = abs((exp_dt - now).days)
@@ -679,16 +696,12 @@ class ShoonyaFetcher:
                     return None
 
             ltp = _f("lp")
-            prev_close = _f("pp")
-            chg = _f("chg")
+            close_price = _f("c")
+            prev_close = close_price
             change_pct = (
-                chg
-                if chg is not None
-                else (
-                    round(100 * (ltp - prev_close) / prev_close, 2)
-                    if ltp is not None and prev_close and prev_close != 0
-                    else None
-                )
+                round(100 * (ltp - prev_close) / prev_close, 2)
+                if ltp is not None and prev_close and prev_close != 0
+                else None
             )
 
             return {
@@ -696,7 +709,7 @@ class ShoonyaFetcher:
                 "open": _f("o"),
                 "high": _f("h"),
                 "low": _f("l"),
-                "close": _f("c"),
+                "close": close_price,
                 "volume": _f("v"),
                 "oi": _f("oi"),
                 "prev_close": prev_close,
@@ -1016,7 +1029,7 @@ class ShoonyaFetcher:
                                     break
 
                             if ltp_val is None:
-                                logger.warning(
+                                logger.debug(
                                     "[shoonya] all price sources corrupt for %s %s strike=%.0f "
                                     "(chain_lp=%.1f, quotes_lp=%.1f, bid=%.1f, ask=%.1f) "
                                     "— will use synthetic pricing downstream",
@@ -1152,7 +1165,10 @@ class ShoonyaFetcher:
                 if not values:
                     return None
 
-                # Find exact match by tsym (e.g., PNB-EQ for PNB, not PNBHOUSING-EQ)
+                # BUG-13 FIX: Find exact match by tsym (e.g., PNB-EQ for PNB).
+                # Previously fell back to values[0] which could be a different stock
+                # (e.g., PNBHOUSING-EQ when searching for PNB). Now returns None
+                # if no exact match is found, letting the caller use Dhan/yfinance.
                 target_tsym = f"{base}-EQ"
                 item = None
                 for v in values:
@@ -1160,7 +1176,7 @@ class ShoonyaFetcher:
                         item = v
                         break
                 if item is None:
-                    item = values[0]  # fallback to first
+                    return None  # No exact match; don't risk returning wrong stock
                 token = item.get("token") or item.get("tok")
                 if not token:
                     return None
@@ -1192,115 +1208,96 @@ class ShoonyaFetcher:
             return None
 
 
-def get_market_quote(self, exchange: str, token: str) -> dict | None:
-    """
-    Fetch full snap-quote details including LTP, OHLCV, and Best 5 Bid/Ask Market Depth.
+    # BUG-04 FIX: These were module-level functions with `self` parameter,
+    # causing AttributeError when called as methods. Moved inside the class.
+    def get_market_quote(self, exchange: str, token: str) -> dict | None:
+        """
+        Fetch full snap-quote details including LTP, OHLCV, and Best 5 Bid/Ask Market Depth.
 
-    Parameters:
-        exchange (str): Exchange identifier (e.g., "NSE", "NFO", "BFO", "MCX")
-        token (str): Instrument numeric token ID (e.g., "2885" for Reliance)
+        Parameters:
+            exchange (str): Exchange identifier (e.g., "NSE", "NFO", "BFO", "MCX")
+            token (str): Instrument numeric token ID (e.g., "2885" for Reliance)
 
-    Returns:
-        dict | None: The parsed market data JSON package from Shoonya, or None if failed.
-        Key fields in response:
-            - stat: "Ok" or "Not_Ok"
-            - lp: Last Traded Price (LTP)
-            - o, h, l, c: Open, High, Low, Previous Close
-            - v: Volume
-            - oi, poi: Open Interest / Previous OI (F&O/Commodity only)
-            - bp1..bp5, bq1..bq5, bo1..bo5: Best 5 Bid prices, quantities, order counts
-            - sp1..sp5, sq1..sq5, so1..so5: Best 5 Ask prices, quantities, order counts
-    """
-    if not exchange or not token:
-        logger.error("[shoonya] Cannot fetch market quote. Missing exchange or token.")
-        return None
+        Returns:
+            dict | None: The parsed market data JSON package from Shoonya, or None if failed.
+        """
+        if not exchange or not token:
+            logger.error("[shoonya] Cannot fetch market quote. Missing exchange or token.")
+            return None
 
-    payload = {"uid": self.user_id, "exch": exchange.upper(), "token": str(token)}
+        payload = {"uid": self.user_id, "exch": exchange.upper(), "token": str(token)}
 
-    logger.debug("[shoonya] Fetching market quote for %s:%s", exchange, token)
-    return self._api_call("GetQuotes", payload)
+        logger.debug("[shoonya] Fetching market quote for %s:%s", exchange, token)
+        return self._api_call("GetQuotes", payload)
 
+    def get_security_info(self, exchange: str, token: str) -> dict | None:
+        """
+        Fetch contract specifications, including lot size, tick size, freeze limits.
 
-def get_security_info(self, exchange: str, token: str) -> dict | None:
-    """
-    Fetch contract specifications, including lot size, tick size, freeze limits, and circuit boundaries.
+        Parameters:
+            exchange (str): Exchange identifier (e.g., "NSE", "NFO", "BFO", "MCX")
+            token (str): Instrument numeric token ID
 
-    Parameters:
-        exchange (str): Exchange identifier (e.g., "NSE", "NFO", "BFO", "MCX")
-        token (str): Instrument numeric token ID (e.g., "14366" for an option contract)
+        Returns:
+            dict | None: The parsed security specifications dictionary, or None if failed.
+        """
+        if not exchange or not token:
+            logger.error("[shoonya] Cannot fetch security info. Missing exchange or token.")
+            return None
 
-    Returns:
-        dict | None: The parsed security specifications dictionary, or None if failed.
-        Key fields in response:
-            - stat: "Ok" or "Not_Ok"
-            - tsym / dnm: Trading Symbol / Display Name
-            - ls: Lot Size (minimum contract multiplier for F&O/commodities)
-            - ti: Tick Size (minimum price movement, e.g., 0.05, 0.01)
-            - frzqty: Freeze Quantity (max shares/contracts per single order)
-            - lct / uct: Lower / Upper Circuit Limits (intraday price floors/ceilings)
-            - exd: Expiry Date (DD-MMM-YYYY for derivatives)
-    """
-    if not exchange or not token:
-        logger.error("[shoonya] Cannot fetch security info. Missing exchange or token.")
-        return None
+        payload = {"uid": self.user_id, "exch": exchange.upper(), "token": str(token)}
 
-    payload = {"uid": self.user_id, "exch": exchange.upper(), "token": str(token)}
+        logger.debug("[shoonya] Fetching security info for %s:%s", exchange, token)
+        return self._api_call("GetSecurityInfo", payload)
 
-    logger.debug("[shoonya] Fetching security info for %s:%s", exchange, token)
-    return self._api_call("GetSecurityInfo", payload)
+    def get_index_list(self) -> dict | None:
+        """
+        Fetch the list of available indices and their tokens.
 
+        Returns:
+            dict | None: Response with index list, or None if failed.
+        """
+        if not self.login():
+            return None
 
-def get_index_list(self) -> dict | None:
-    """
-    Fetch the list of available indices (NIFTY, BANKNIFTY, SENSEX, etc.) and their tokens.
+        payload = {"uid": self.user_id}
 
-    Returns:
-        dict | None: Response with index list, or None if failed.
-        Expected keys: stat, values (list of index objects with symname, token, exch)
-    """
-    if not self.login():
-        return None
+        logger.debug("[shoonya] Fetching index list")
+        return self._api_call("GetIndexList", payload)
 
-    payload = {"uid": self.user_id}
+    def get_historical_candles(
+        self, exchange: str, token: str, interval: int, start_time: str, end_time: str
+    ) -> dict | None:
+        """
+        Fetch intraday/historical OHLCV candles (TPSeries / Time Price Series).
 
-    logger.debug("[shoonya] Fetching index list")
-    return self._api_call("GetIndexList", payload)
+        Parameters:
+            exchange (str): Exchange identifier
+            token (str): Instrument numeric token ID
+            interval (int): Candle interval in minutes
+            start_time (str): Start timestamp "DD-MM-YYYY HH:MM:SS"
+            end_time (str): End timestamp "DD-MM-YYYY HH:MM:SS"
 
+        Returns:
+            dict | None: Response with candle data, or None if failed.
+        """
+        if not exchange or not token:
+            logger.error("[shoonya] Cannot fetch TPSeries. Missing exchange or token.")
+            return None
 
-def get_historical_candles(
-    self, exchange: str, token: str, interval: int, start_time: str, end_time: str
-) -> dict | None:
-    """
-    Fetch intraday/historical OHLCV candles (TPSeries / Time Price Series).
+        payload = {
+            "uid": self.user_id,
+            "exch": exchange.upper(),
+            "token": str(token),
+            "interval": str(interval),
+            "start_time": start_time,
+            "end_time": end_time,
+        }
 
-    Parameters:
-        exchange (str): Exchange identifier (e.g., "NSE", "NFO", "BFO", "MCX")
-        token (str): Instrument numeric token ID
-        interval (int): Candle interval in minutes (1, 5, 15, 30, 60, etc.)
-        start_time (str): Start timestamp in format "DD-MM-YYYY HH:MM:SS"
-        end_time (str): End timestamp in format "DD-MM-YYYY HH:MM:SS"
-
-    Returns:
-        dict | None: Response with candle data (stat, values list of OHLCV arrays),
-        or None if failed.
-    """
-    if not exchange or not token:
-        logger.error("[shoonya] Cannot fetch TPSeries. Missing exchange or token.")
-        return None
-
-    payload = {
-        "uid": self.user_id,
-        "exch": exchange.upper(),
-        "token": str(token),
-        "interval": str(interval),
-        "start_time": start_time,
-        "end_time": end_time,
-    }
-
-    logger.debug(
-        "[shoonya] Fetching TPSeries for %s:%s interval=%s", exchange, token, interval
-    )
-    return self._api_call("TPSeries", payload)
+        logger.debug(
+            "[shoonya] Fetching TPSeries for %s:%s interval=%s", exchange, token, interval
+        )
+        return self._api_call("TPSeries", payload)
 
 
 # ---------------------------------------------------------------------------
@@ -1330,7 +1327,8 @@ def _safe_int(val) -> int | None:
 # Singleton instance (lazy init)
 # ---------------------------------------------------------------------------
 
-_SHONYAA_INSTANCE: ShoonyaFetcher | None = None
+# BUG-07 FIX: Renamed from _SHONYAA_INSTANCE (typo) to _SHOONYA_INSTANCE
+_SHOONYA_INSTANCE: ShoonyaFetcher | None = None
 
 # Login failure cooldown: skip re-authentication for N seconds after failure
 # to avoid repeatedly running the slow Playwright OAuth flow on every request.
@@ -1344,7 +1342,7 @@ def get_shoonya() -> ShoonyaFetcher | None:
     Returns None if credentials missing, cooldown is active, or the cached
     token is expired (handled transparently by login()).
     """
-    global _SHONYAA_INSTANCE
+    global _SHOONYA_INSTANCE
 
     # If login recently failed, skip Shoonya entirely for the cooldown period
     if (
@@ -1357,7 +1355,7 @@ def get_shoonya() -> ShoonyaFetcher | None:
         )
         return None
 
-    if _SHONYAA_INSTANCE is None:
+    if _SHOONYA_INSTANCE is None:
         # Check if credentials exist before attempting instantiation
         if not all(
             [
@@ -1371,5 +1369,5 @@ def get_shoonya() -> ShoonyaFetcher | None:
                 "[shoonya] credentials not configured in .env — Shoonya unavailable"
             )
             return None
-        _SHONYAA_INSTANCE = ShoonyaFetcher()
-    return _SHONYAA_INSTANCE
+        _SHOONYA_INSTANCE = ShoonyaFetcher()
+    return _SHOONYA_INSTANCE

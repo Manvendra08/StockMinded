@@ -121,7 +121,7 @@ class TestAutoEntryRiskGates:
         # Set up database with losing trades that hit daily stop
         mock_db_empty["trades"] = [
             {
-                "id": 1, "symbol": "TEST", "status": "CLOSED", "entry_date": datetime.now().date().isoformat(),
+                "id": 1, "symbol": "TEST", "status": "CLOSED", "entry_date": "2026-04-28",
                 "pnl": -140000,  # -2% of 7M capital
             }
         ]
@@ -164,7 +164,7 @@ class TestAutoEntryRiskGates:
         mock_db_empty["trades"] = [
             {
                 "id": 1, "symbol": "RELIANCE", "status": "CLOSED",
-                "entry_date": datetime.now().date().isoformat(),
+                "entry_date": "2026-04-28",
             }
         ]
         
@@ -288,7 +288,7 @@ class TestSkippedTradeLogging:
         # Set up to trigger daily stop
         mock_db_empty["trades"] = [
             {
-                "id": 1, "symbol": "TEST", "status": "CLOSED", "entry_date": datetime.now().date().isoformat(),
+                "id": 1, "symbol": "TEST", "status": "CLOSED", "entry_date": "2026-04-28",
                 "pnl": -140000,
             }
         ]

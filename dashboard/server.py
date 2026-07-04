@@ -1976,67 +1976,124 @@ def api_paper_open():
                         # yfinance doesn't provide prev_close/change_pct reliably
                         # so leave those as-is
 
-            # 3. Fallback prev_close/change_pct: Dhan API for symbols still missing those
+            def _needs_prev_close_refresh(q: dict) -> bool:
+                """True when prev_close is missing or clearly inconsistent with LTP."""
+                ltp = q.get("ltp")
+                if ltp is None:
+                    return False
+                prev_close = q.get("prev_close")
+                try:
+                    ltp_f = float(ltp)
+                    prev_f = float(prev_close) if prev_close is not None else None
+                except (TypeError, ValueError):
+                    return True
+                if prev_f is None or prev_f <= 0:
+                    return True
+                # For NSE cash/F&O equities, >30% day move is almost always bad metadata.
+                implied_move = abs(100 * (ltp_f - prev_f) / prev_f)
+                return implied_move > 30
+
+            def _get_robust_prev_close(sym: str, ltp: float) -> float | None:
+                """Fetch previous close robustly from local EOD cache or yfinance history."""
+                # 1. Try local time-bucketed EOD cache
+                try:
+                    from data.feed import ohlc_cached
+                    df = ohlc_cached(sym, period="5d")
+                    if df is not None and not df.empty:
+                        import datetime as dt
+                        today_str = dt.datetime.now().strftime("%Y-%m-%d")
+                        last_date = df.index[-1]
+                        last_date_str = (
+                            last_date.strftime("%Y-%m-%d")
+                            if hasattr(last_date, "strftime")
+                            else str(last_date)[:10]
+                        )
+                        if last_date_str == today_str and len(df) >= 2:
+                            p = float(df["close"].iloc[-2])
+                        else:
+                            p = float(df["close"].iloc[-1])
+                        
+                        if p > 0 and abs(100 * (ltp - p) / p) <= 40:
+                            return round(p, 2)
+                except Exception:
+                    pass
+
+                # 2. Try yfinance individually (avoiding batch failures)
+                try:
+                    import yfinance as yf
+                    yf_s = f"{sym}.NS" if not sym.startswith("^") and "." not in sym else sym
+                    t_obj = yf.Ticker(yf_s)
+                    # Try fast_info
+                    try:
+                        p = float(t_obj.fast_info.previous_close)
+                        if p > 0 and abs(100 * (ltp - p) / p) <= 40:
+                            return round(p, 2)
+                    except Exception:
+                        pass
+                    # Try history 5d
+                    df = t_obj.history(period="5d")
+                    if df is not None and not df.empty:
+                        import datetime as dt
+                        today_str = dt.datetime.now().strftime("%Y-%m-%d")
+                        last_date = df.index[-1]
+                        last_date_str = (
+                            last_date.strftime("%Y-%m-%d")
+                            if hasattr(last_date, "strftime")
+                            else str(last_date)[:10]
+                        )
+                        if last_date_str == today_str and len(df) >= 2:
+                            p = float(df["Close"].iloc[-2])
+                        else:
+                            p = float(df["Close"].iloc[-1])
+                        if p > 0 and abs(100 * (ltp - p) / p) <= 40:
+                            return round(p, 2)
+                except Exception:
+                    pass
+                return None
+
+            # 3. Fallback prev_close/change_pct: Dhan API/Shoonya for symbols
+            # with missing or suspicious prev_close.
             missing_meta = [
                 s
                 for s in symbols
-                if quotes.get(s, {}).get("ltp") is not None
-                and quotes[s].get("prev_close") is None
+                if _needs_prev_close_refresh(quotes.get(s, {}))
             ]
             if missing_meta:
                 dhan_q = quote_batch(missing_meta)
                 for s in missing_meta:
                     dq = dhan_q.get(s, {})
-                    if dq.get("prev_close") is not None:
-                        if s not in quotes or not quotes[s]:
-                            quotes[s] = {}
-                        quotes[s]["prev_close"] = dq["prev_close"]
-                        quotes[s]["change_pct"] = dq.get("change_pct")
+                    prev = dq.get("prev_close")
+                    ltp = quotes.get(s, {}).get("ltp")
+                    # Sanity check incoming Shoonya/Dhan fallback close
+                    if prev is not None and ltp is not None:
+                        try:
+                            prev_f = float(prev)
+                            ltp_f = float(ltp)
+                            if prev_f > 0 and abs(100 * (ltp_f - prev_f) / prev_f) <= 40:
+                                if s not in quotes or not quotes[s]:
+                                    quotes[s] = {}
+                                quotes[s]["prev_close"] = prev_f
+                                quotes[s]["change_pct"] = dq.get("change_pct")
+                        except (TypeError, ValueError):
+                            pass
 
-            # 4. Final fallback: yfinance previous_close for symbols still missing prev_close
+            # 4. Final robust fallback: yfinance / local EOD cache
             still_missing = [
                 s
                 for s in symbols
-                if quotes.get(s, {}).get("ltp") is not None
-                and quotes[s].get("prev_close") is None
+                if _needs_prev_close_refresh(quotes.get(s, {}))
             ]
-            if still_missing:
-                import yfinance as yf
-
-                yf_syms = [
-                    f"{s}.NS" if not s.startswith("^") and "." not in s else s
-                    for s in still_missing
-                ]
-                try:
-                    tickers = yf.Tickers(" ".join(yf_syms))
-                    for sym, yf_s in zip(still_missing, yf_syms):
-                        try:
-                            info = tickers.tickers[yf_s].fast_info
-                            prev = (
-                                round(float(info.previous_close), 2)
-                                if hasattr(info, "previous_close")
-                                and info.previous_close
-                                else None
-                            )
-                            if prev is not None:
-                                if sym not in quotes or not quotes[sym]:
-                                    quotes[sym] = {}
-                                quotes[sym]["prev_close"] = prev
-                                ltp = quotes[sym].get("ltp")
-                                if ltp is not None:
-                                    quotes[sym]["change_pct"] = round(
-                                        100 * (ltp - prev) / prev, 2
-                                    )
-                        except Exception as e:
-                            logging.getLogger(__name__).warning(
-                                "[api_paper_open] prev_close enrich failed for %s: %s",
-                                sym,
-                                e,
-                            )
-                except Exception as e:
-                    logging.getLogger(__name__).warning(
-                        "[api_paper_open] info fetch failed for %s: %s", sym, e
-                    )
+            for sym in still_missing:
+                ltp = quotes.get(sym, {}).get("ltp")
+                if ltp is not None:
+                    prev = _get_robust_prev_close(sym, ltp)
+                    if prev is not None:
+                        if sym not in quotes or not quotes[sym]:
+                            quotes[sym] = {}
+                        quotes[sym]["prev_close"] = prev
+                        quotes[sym]["change_pct"] = round(
+                            100 * (ltp - prev) / prev, 2
+                        )
 
             # Enrich each trade
             for t in trades:
@@ -2061,10 +2118,30 @@ def api_paper_open():
                         )
                     t["current_price"] = ltp
                 prev_close = q.get("prev_close")
-                chg_pct = q.get("change_pct")
-                # Compute change_pct from ltp + prev_close if not provided by source
-                if chg_pct is None and ltp and prev_close:
-                    chg_pct = round(100 * (ltp - prev_close) / prev_close, 2)
+                chg_pct = None
+                # Derive the day change from ltp + prev_close whenever possible.
+                if ltp is not None and prev_close not in (None, 0):
+                    try:
+                        ltp_f = float(ltp)
+                        prev_f = float(prev_close)
+                        implied_move = abs(100 * (ltp_f - prev_f) / prev_f)
+                        if prev_f > 0 and implied_move <= 40:
+                            chg_pct = round(100 * (ltp_f - prev_f) / prev_f, 2)
+                        else:
+                            prev_close = None
+                    except (TypeError, ValueError, ZeroDivisionError):
+                        chg_pct = None
+                if chg_pct is None:
+                    raw_chg = q.get("change_pct")
+                    if raw_chg is not None:
+                        try:
+                            raw_chg_f = float(raw_chg)
+                            if abs(raw_chg_f) <= 40:
+                                chg_pct = round(raw_chg_f, 2)
+                        except (TypeError, ValueError):
+                            chg_pct = None
+                if chg_pct is not None and abs(chg_pct) > 40:
+                    chg_pct = None
                 t["prev_close"] = prev_close
                 t["chg_pct"] = chg_pct
 
@@ -2398,11 +2475,116 @@ def api_paper_skipped_clear():
         return jsonify({"error": str(e)}), 500
 
 
+def calculate_option_trade_margin(trade: dict) -> float:
+    """Calculate SPAN + Exposure margin requirement for an option trade structure."""
+    legs = trade.get("legs", [])
+    if not legs:
+        return 0.0
+
+    symbol = trade.get("symbol", "NIFTY")
+    
+    # Standard lot sizes: NIFTY = 50 (or 75, or 25), BANKNIFTY = 15.
+    # Let's dynamically infer lot size if possible or default to standard.
+    lot_size = 50
+    if symbol == "BANKNIFTY":
+        lot_size = 15
+    elif symbol == "NIFTY":
+        qty_0 = legs[0].get("qty", 50) if legs else 50
+        if qty_0 % 75 == 0:
+            lot_size = 75
+        elif qty_0 % 25 == 0:
+            lot_size = 25
+        else:
+            lot_size = 50
+
+    sell_ce = []
+    buy_ce = []
+    sell_pe = []
+    buy_pe = []
+
+    for leg in legs:
+        side = leg.get("side", "BUY")
+        ltype = leg.get("type", "CE")
+        qty = leg.get("qty", lot_size)
+        strike = leg.get("strike", 0.0)
+        prem = leg.get("entry_premium") or leg.get("premium") or 0.0
+        
+        num_lots = max(1, qty // lot_size)
+        for _ in range(num_lots):
+            item = {"strike": strike, "premium": prem}
+            if side == "SELL":
+                if ltype == "CE":
+                    sell_ce.append(item)
+                else:
+                    sell_pe.append(item)
+            else:
+                if ltype == "CE":
+                    buy_ce.append(item)
+                else:
+                    buy_pe.append(item)
+
+    sell_ce.sort(key=lambda x: x["strike"])
+    buy_ce.sort(key=lambda x: x["strike"])
+    sell_pe.sort(key=lambda x: x["strike"], reverse=True)
+    buy_pe.sort(key=lambda x: x["strike"], reverse=True)
+
+    margin = 0.0
+    
+    # Match Call Spreads
+    hedged_ce_count = 0
+    naked_sell_ce_count = 0
+    while sell_ce:
+        sell_ce.pop()
+        if buy_ce:
+            buy_ce.pop()
+            hedged_ce_count += 1
+        else:
+            naked_sell_ce_count += 1
+
+    # Match Put Spreads
+    hedged_pe_count = 0
+    naked_sell_pe_count = 0
+    while sell_pe:
+        sell_pe.pop()
+        if buy_pe:
+            buy_pe.pop()
+            hedged_pe_count += 1
+        else:
+            naked_sell_pe_count += 1
+
+    # Net debit for remaining buy legs (buyer paid premium)
+    net_debit = 0.0
+    for b in buy_ce + buy_pe:
+        net_debit += b["premium"]
+
+    # Exchange SPAN + Exposure estimate per lot
+    naked_margin_per_lot = 120000.0
+    spread_margin_per_lot = 30000.0
+
+    call_spreads_margin = hedged_ce_count * spread_margin_per_lot
+    put_spreads_margin = hedged_pe_count * spread_margin_per_lot
+    
+    if call_spreads_margin > 0 and put_spreads_margin > 0:
+        hedged_margin = max(call_spreads_margin, put_spreads_margin) + min(call_spreads_margin, put_spreads_margin) * 0.15
+    else:
+        hedged_margin = call_spreads_margin + put_spreads_margin
+        
+    naked_margin = (naked_sell_ce_count + naked_sell_pe_count) * naked_margin_per_lot
+    
+    margin += hedged_margin + naked_margin + (net_debit * lot_size)
+    
+    return round(margin, 2)
+
+
 @app.route("/api/options/structures")
 def api_options_structures():
     try:
         db = pt._load_db()
         ops = db.get("option_trades", [])
+
+        # Calculate margin requirement for each trade structure
+        for t in ops:
+            t["margin_req"] = calculate_option_trade_margin(t)
 
         # Enrich open option trades with live premiums and P&L
         open_ops = [t for t in ops if t.get("status") == "OPEN"]

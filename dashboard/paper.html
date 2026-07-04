@@ -1554,7 +1554,7 @@
                                 <tr>
                                     <th>Symbol</th>
                                     <th>Entry</th>
-                                    <th>CMP</th>
+                                    <th id="open-cmp-header">CMP</th>
                                     <th>SL</th>
                                     <th>Target</th>
                                     <th>Qty</th>
@@ -1611,6 +1611,7 @@
                                     <th style="text-align: right">
                                         Net Premium
                                     </th>
+                                    <th style="text-align: right">Margin Req</th>
                                     <th style="text-align: right">CMP</th>
                                     <th style="text-align: right">P&L</th>
                                     <th>Time</th>
@@ -2024,11 +2025,22 @@
                         <div class="settings-group">
                             <div class="field-row">
                                 <span class="field-label"
-                                    >Capital per Trade (₹)</span
+                                    >Capital per Trade (Stocks) (₹)</span
                                 >
                                 <input
                                     type="number"
-                                    id="set-capital"
+                                    id="set-capital-stocks"
+                                    class="input-sm"
+                                    step="50000"
+                                />
+                            </div>
+                            <div class="field-row">
+                                <span class="field-label"
+                                    >Capital per Trade (Options) (₹)</span
+                                >
+                                <input
+                                    type="number"
+                                    id="set-capital-options"
                                     class="input-sm"
                                     step="50000"
                                 />
@@ -3057,8 +3069,10 @@
                 try {
                     const r = await fetch("/api/paper/settings");
                     const s = await r.json();
-                    document.getElementById("set-capital").value =
-                        s.capital_per_trade;
+                    document.getElementById("set-capital-stocks").value =
+                        s.capital_per_trade_stocks !== undefined ? s.capital_per_trade_stocks : s.capital_per_trade;
+                    document.getElementById("set-capital-options").value =
+                        s.capital_per_trade_options !== undefined ? s.capital_per_trade_options : s.capital_per_trade;
                     document.getElementById("set-sl").value = s.sl_pct;
                     document.getElementById("set-tgt").value = s.tgt_pct;
                     document.getElementById("set-options-sl").value =
@@ -3145,8 +3159,11 @@
                         document.getElementById("rg-corr").value,
                     );
                     const body = {
-                        capital_per_trade: parseFloat(
-                            document.getElementById("set-capital").value,
+                        capital_per_trade_stocks: parseFloat(
+                            document.getElementById("set-capital-stocks").value,
+                        ),
+                        capital_per_trade_options: parseFloat(
+                            document.getElementById("set-capital-options").value,
                         ),
                         sl_pct: parseFloat(
                             document.getElementById("set-sl").value,
@@ -3287,6 +3304,12 @@
                         toast("Error: " + d.error, "err");
                         return;
                     }
+                    const cmpHeader = document.getElementById("open-cmp-header");
+                    if (cmpHeader) {
+                        cmpHeader.textContent = d.fetched_at
+                            ? `CMP (${d.fetched_at})`
+                            : "CMP";
+                    }
                     const trades = d.trades || [];
                     const tbody = document.getElementById("open-tbody");
                     const empty = document.getElementById("open-empty");
@@ -3303,6 +3326,13 @@
                             const upnl = t.unrealized_pnl;
                             const upct = t.unrealized_pct;
                             const cmp = t.current_price;
+                            const rawChgPct = t.chg_pct !== null && t.chg_pct !== undefined ? Number(t.chg_pct) : null;
+                            const chgPct =
+                                rawChgPct !== null &&
+                                Number.isFinite(rawChgPct) &&
+                                Math.abs(rawChgPct) <= 30
+                                    ? rawChgPct
+                                    : null;
                             const ts =
                                 (t.entry_time || "").slice(8, 10) +
                                 "/" +
@@ -3315,7 +3345,15 @@
           <span class="dir-badge dir-${(t.direction || "NEUTRAL").toLowerCase()}">${t.direction || "NEUTRAL"}</span>
         </div></td>
         <td>${fmt(t.entry_price)}</td>
-        <td class="${cls(upnl)}">${cmp ? fmt(cmp) : "—"}</td>
+        <td class="${cls(chgPct != null ? chgPct : upnl)}">${
+                                cmp != null
+                                    ? `${fmt(cmp)} ${
+                                          chgPct != null
+                                              ? `<span class="${cls(chgPct)}">(${sign(chgPct)}${fmt(chgPct)}%)</span>`
+                                              : ""
+                                      }`
+                                    : "—"
+                            }</td>
         <td class="down">${fmt(t.sl_price)}</td>
         <td class="up">${fmt(t.tgt_price)}</td>
         <td>${t.qty}</td>
@@ -3673,16 +3711,25 @@
                         if (tbody) {
                             tbody.innerHTML = rows
                                 .map(
-                                    (r) => `
+                                    (r) => {
+                                        const reason = (r.skip_reason || "").replace(/_/g, " ");
+                                        const hasGateDetail = r.risk_gate && 
+                                            !["options_gate", "equity_worker", "paper_equity_only", "daily_dedup", "timing_gate", "ai_review_gate", "sentiment_flip_gate"].includes(r.risk_gate) && 
+                                            !r.risk_gate.startsWith("min_conf=");
+                                        return `
           <tr>
             <td class="muted" style="font-size:0.72rem">${fmtIstDate(r.ts)}</td>
             <td><div class="sym-cell">${r.symbol || "—"}</div></td>
             <td><span class="dir-badge dir-${(r.direction || "").toLowerCase()}">${r.direction || "—"}</span></td>
             <td><span class="conf-badge conf-${r.alert_confidence}">${r.alert_confidence || "—"}</span></td>
-            <td>${(r.skip_reason || "").replace(/_/g, " ")}</td>
+            <td>
+              <div style="font-weight:600;">${reason}</div>
+              ${hasGateDetail ? `<div style="font-size:0.7rem; color:var(--accent-red); margin-top:2px; line-height:1.2;">${r.risk_gate}</div>` : ""}
+            </td>
             <td class="muted" style="text-align:left; font-family:var(--font); font-size:0.75rem;">${r.notes || ""}</td>
           </tr>
-        `,
+        `;
+                                    }
                                 )
                                 .join("");
                         }
@@ -4125,6 +4172,7 @@
         <td><span class="badge ${t.structure.includes("BULL") ? "badge-green" : t.structure.includes("BEAR") ? "badge-red" : "badge-blue"}">${t.structure}</span></td>
         <td><div style="display:flex; flex-direction:column; gap:4px;">${legsHtml}</div></td>
         <td style="text-align: right; font-family:var(--mono);">${displayPremium}</td>
+        <td style="text-align: right; font-family:var(--mono);">${fmtInr(t.margin_req || 0)}</td>
         <td style="text-align: right; font-family:var(--mono);">${displayCmp}</td>
         <td style="text-align: right; font-family:var(--mono);" class="pnl-cell">${displayPnl}</td>
         <td class="muted" style="font-size:0.72rem;">${entryTime}</td>

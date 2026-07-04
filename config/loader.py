@@ -1,5 +1,6 @@
 import os
 import re
+import logging
 from pathlib import Path
 from typing import Optional
 
@@ -42,10 +43,31 @@ def _expand(value, _missing: list | None = None):
     return value
 
 
+# BUG-28 FIX: Default config used when config.yaml is missing.
+# Provides sensible defaults so the application can start in
+# alerts-only / paper-trade mode without a config file.
+_DEFAULT_CONFIG: dict = {
+    "universe_source": "fo_sample",
+    "universe_fo_sample": [],
+    "data_sources": {},
+    "broker": {},
+    "paths": {"journal_db": "data/trades.db"},
+}
+
+
 def load_config(path: str | None = None) -> dict:
     p = Path(path) if path else Path(__file__).parent / "config.yaml"
+    # BUG-28 FIX: Fall back to default config if config.yaml doesn't exist
+    # instead of crashing with FileNotFoundError.
+    if not p.exists():
+        logging.getLogger(__name__).warning(
+            "Config file not found at %s; using built-in defaults", p
+        )
+        return dict(_DEFAULT_CONFIG)
     with open(p, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
+    if cfg is None:
+        cfg = {}
 
     missing: list[str] = []
     cfg = _expand(cfg, missing)
@@ -78,8 +100,10 @@ def fetch_dhan_public_universe() -> list[str]:
 
     # Fetch page 1 from raw HTML
     try:
+        # BUG-37 FIX: Increased timeout from 5s to 15s. Dhan can be slow
+        # under load; 5s caused frequent timeouts and unnecessary CSV fallback.
         r = requests.get(
-            "https://dhan.co/futures-stocks-list/", headers=headers, timeout=5
+            "https://dhan.co/futures-stocks-list/", headers=headers, timeout=15
         )
         if r.status_code == 200:
             match = re.search(
@@ -125,7 +149,8 @@ def fetch_dhan_public_universe() -> list[str]:
             }
         }
         try:
-            r = requests.post(post_url, headers=post_headers, json=payload, timeout=5)
+            # BUG-37 FIX: Increased timeout from 5s to 15s (see above).
+            r = requests.post(post_url, headers=post_headers, json=payload, timeout=15)
             if r.status_code == 200:
                 for item in r.json().get("data", []):
                     sym = item.get("Sym")

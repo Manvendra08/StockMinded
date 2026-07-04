@@ -37,7 +37,7 @@ def mock_atomic_db_update(tmp_path):
 @pytest.fixture
 def mock_db_with_trade(tmp_path):
     """Mock database with an existing trade today."""
-    today = datetime.now().date().isoformat()
+    today = "2026-04-28"
     mock_data = {
         "trades": [
             {
@@ -91,7 +91,7 @@ class TestDuplicateTradeBlocking:
 
     @patch("dashboard.paper_trader._get_ltp")
     @patch("dashboard.paper_trader.is_market_open", return_value=True)
-    def test_same_symbol_today_blocked(self, mock_ltp, mock_market_open, mock_db_with_trade, mock_config, alert_reliance):
+    def test_same_symbol_today_blocked(self, mock_market_open, mock_ltp, mock_db_with_trade, mock_config, alert_reliance):
         """Should block trade if symbol already traded today."""
         mock_ltp.return_value = 2500.0
         
@@ -107,7 +107,7 @@ class TestDuplicateTradeBlocking:
 
     @patch("dashboard.paper_trader._get_ltp")
     @patch("dashboard.paper_trader.is_market_open", return_value=True)
-    def test_different_symbol_allowed(self, mock_ltp, mock_market_open, mock_db_with_trade, mock_config, alert_reliance):
+    def test_different_symbol_allowed(self, mock_market_open, mock_ltp, mock_db_with_trade, mock_config, alert_reliance):
         """Should allow trade for different symbol."""
         mock_ltp.return_value = 2600.0
         alert_reliance["symbol"] = "INFY"  # Different symbol
@@ -125,10 +125,10 @@ class TestDuplicateTradeBlocking:
 
     @patch("dashboard.paper_trader._get_ltp")
     @patch("dashboard.paper_trader.is_market_open", return_value=True)
-    def test_closed_trade_today_still_blocks(self, mock_ltp, mock_market_open, mock_config, alert_reliance):
+    def test_closed_trade_today_still_blocks(self, mock_market_open, mock_ltp, mock_config, alert_reliance):
         """Should block even if earlier trade was closed today."""
         mock_ltp.return_value = 2500.0
-        today = datetime.now().date().isoformat()
+        today = "2026-04-28"
         
         mock_db = {
             "trades": [
@@ -161,7 +161,7 @@ class TestLateEntryBlocking:
 
     @patch("dashboard.paper_trader._get_ltp")
     @patch("dashboard.paper_trader.is_market_open", return_value=True)
-    def test_entry_within_window_allowed(self, mock_ltp, mock_market_open, mock_db_with_trade, mock_config, alert_reliance):
+    def test_entry_within_window_allowed(self, mock_market_open, mock_ltp, mock_db_with_trade, mock_config, alert_reliance):
         """Entries within 10:00-14:15 should be allowed."""
         mock_ltp.return_value = 2500.0
         alert_reliance["symbol"] = "INFY"  # Different symbol to avoid dup check
@@ -178,7 +178,7 @@ class TestLateEntryBlocking:
 
     @patch("dashboard.paper_trader._get_ltp")
     @patch("dashboard.paper_trader.is_market_open", return_value=True)
-    def test_entry_after_window_blocked(self, mock_ltp, mock_market_open, mock_db_with_trade, mock_config, alert_reliance):
+    def test_entry_after_window_blocked(self, mock_market_open, mock_ltp, mock_db_with_trade, mock_config, alert_reliance):
         """Entries after 14:15 should be blocked."""
         mock_ltp.return_value = 2500.0
         
@@ -194,7 +194,7 @@ class TestLateEntryBlocking:
 
     @patch("dashboard.paper_trader._get_ltp")
     @patch("dashboard.paper_trader.is_market_open", return_value=True)
-    def test_entry_before_window_blocked(self, mock_ltp, mock_market_open, mock_db_with_trade, mock_config, alert_reliance):
+    def test_entry_before_window_blocked(self, mock_market_open, mock_ltp, mock_db_with_trade, mock_config, alert_reliance):
         """Entries before 10:00 should be blocked."""
         mock_ltp.return_value = 2500.0
         
@@ -210,7 +210,7 @@ class TestLateEntryBlocking:
 
     @patch("dashboard.paper_trader._get_ltp")
     @patch("dashboard.paper_trader.is_market_open", return_value=False)
-    def test_outside_market_hours_blocked(self, mock_ltp, mock_market_open, mock_db_with_trade, mock_config, alert_reliance):
+    def test_outside_market_hours_blocked(self, mock_market_open, mock_ltp, mock_db_with_trade, mock_config, alert_reliance):
         """Entries outside market hours should be blocked."""
         mock_ltp.return_value = 2500.0
         

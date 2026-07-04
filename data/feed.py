@@ -216,8 +216,10 @@ def _dhan_period_dates(period: str) -> tuple[str, str]:
     qty = int("".join(ch for ch in period if ch.isdigit()) or "1")
     unit = "".join(ch for ch in period if ch.isalpha()).lower()
     days = qty
+    # BUG-23 FIX: Use 30 days/month instead of 31 to avoid overestimating
+    # date ranges by 1-2 days per month (e.g., 6mo was 186 days instead of ~182).
     if unit in ("mo", "m"):
-        days = qty * 31
+        days = qty * 30
     elif unit == "y":
         days = qty * 366
     elif unit in ("wk", "w"):
@@ -239,6 +241,11 @@ def _dhan_interval(interval: str) -> str:
 
 
 def _dhan_col(df: pd.DataFrame, *names: str) -> str | None:
+    # BUG-33 NOTE: Normalizes column names by stripping underscores/spaces
+    # to match Dhan's inconsistent naming (e.g. "SEM_SMST_SECURITY_ID" vs
+    # "security_id"). Returns the ORIGINAL column name for DataFrame access.
+    # Collision risk (two columns normalizing to same key) is negligible in
+    # practice since Dhan master CSV has unique semantic column names.
     lookup = {str(c).lower().replace("_", "").replace(" ", ""): c for c in df.columns}
     for name in names:
         key = name.lower().replace("_", "").replace(" ", "")
@@ -311,7 +318,9 @@ def _dhan_find_instrument(symbol: str) -> dict | None:
     candidates = []
     for col in [sym_col, disp_col, trad_col]:
         if col:
-            hit = work[work[col].astype(str).str.upper().eq(symbol)]
+            # BUG-22 FIX: Use == instead of .eq() for readability.
+            # Both are functionally equivalent on pandas Series.
+            hit = work[work[col].astype(str).str.upper() == symbol]
             if not hit.empty:
                 candidates.append(hit)
     if not candidates:
@@ -334,11 +343,28 @@ def _dhan_find_instrument(symbol: str) -> dict | None:
     }
 
 
+# BUG-12 FIX: Module-level retry session for Dhan API calls.
+# Previously _dhan_post() used raw requests.post with no retry,
+# causing failures on transient 500/502/503/504 errors.
+_DHAN_SESSION: requests.Session | None = None
+
+
+def _get_dhan_session() -> requests.Session:
+    global _DHAN_SESSION
+    if _DHAN_SESSION is None:
+        _DHAN_SESSION = _create_retry_session(
+            retries=5, backoff_factor=1, status_forcelist=(500, 502, 503, 504)
+        )
+    return _DHAN_SESSION
+
+
 def _dhan_post(path: str, payload: dict) -> dict:
     headers = _dhan_headers()
     if not headers:
         return {}
-    response = requests.post(
+    # BUG-12 FIX: Use retry session instead of raw requests.post
+    session = _get_dhan_session()
+    response = session.post(
         f"https://api.dhan.co/v2/{path}", headers=headers, json=payload, timeout=15
     )
     response.raise_for_status()
@@ -420,7 +446,8 @@ def quote_batch(symbols: list[str]) -> dict[str, dict]:
                     if q and q.get("ltp"):
                         out[sym] = q
                         out[sym]["source"] = "shoonya_fno"
-                        _QUOTE_SOURCE[sym] = "shoonya"
+                        with _SOURCE_LOCK:
+                            _QUOTE_SOURCE[sym] = "shoonya"
                         continue
                 except Exception as e:
                     logging.getLogger(__name__).warning(
@@ -434,7 +461,8 @@ def quote_batch(symbols: list[str]) -> dict[str, dict]:
                     if q and q.get("ltp"):
                         out[sym] = q
                         out[sym]["source"] = "shoonya_quote"
-                        _QUOTE_SOURCE[sym] = "shoonya"
+                        with _SOURCE_LOCK:
+                            _QUOTE_SOURCE[sym] = "shoonya"
                 except Exception as e:
                     logging.getLogger(__name__).warning(
                         "[quote_batch] shoonya fetch_quote failed for %s: %s", sym, e
@@ -442,6 +470,28 @@ def quote_batch(symbols: list[str]) -> dict[str, dict]:
     except Exception as e:
         logging.getLogger(__name__).warning(
             "[quote_batch] shoonya initialization failed: %s", e
+        )
+
+    # BUG-05 FIX: Fall back to Dhan for symbols that Shoonya didn't populate.
+    # Previously _dhan_fill_quotes existed but was never called from quote_batch(),
+    # causing ALL quotes to be empty when Shoonya was unavailable.
+    try:
+        if _dhan_enabled():
+            grouped: dict[str, list[int]] = {}
+            reverse: dict[tuple[str, str], str] = {}
+            for sym in out:
+                if out[sym].get("ltp"):
+                    continue  # already populated by Shoonya
+                inst = _dhan_find_instrument(sym)
+                if inst:
+                    seg = inst["segment"]
+                    grouped.setdefault(seg, []).append(int(inst["security_id"]))
+                    reverse[(seg, str(inst["security_id"]))] = sym
+            if grouped:
+                _dhan_fill_quotes(grouped, reverse, out)
+    except Exception as e:
+        logging.getLogger(__name__).warning(
+            "[quote_batch] dhan fallback failed: %s", e
         )
 
     return out
@@ -1279,18 +1329,30 @@ def _yf():
 
 
 def _flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Flatten MultiIndex columns from newer yfinance (e.g. ('Close', '^NSEI') -> 'close')."""
+    """Flatten MultiIndex columns from newer yfinance (e.g. ('Close', '^NSEI') -> 'close').
+
+    BUG-20 FIX: Also normalize spaces to underscores so 'Adj Close' becomes
+    'adj_close' instead of 'adj close'. This prevents downstream code that
+    checks for 'close' from failing when only 'adj close' exists.
+    """
+    def _normalize(col) -> str:
+        if isinstance(col, tuple):
+            return str(col[0]).lower().replace(" ", "_")
+        return str(col).lower().replace(" ", "_")
+
     if isinstance(df.columns, pd.MultiIndex):
-        df.columns = [
-            c[0].lower() if isinstance(c, tuple) else str(c).lower() for c in df.columns
-        ]
+        df.columns = [_normalize(c) for c in df.columns]
     else:
-        df.columns = [str(c).lower() for c in df.columns]
+        df.columns = [_normalize(c) for c in df.columns]
     return df
 
 
-_OHLC_CACHE = {}
-_OHLC_CACHE_BUCKET = 0
+# BUG-11 FIX: Thread-safe locks for global mutable state.
+# Prevents race conditions when run_dashboard() and run_schedule() execute concurrently.
+_OHLC_CACHE_LOCK = threading.Lock()
+_SOURCE_LOCK = threading.Lock()
+
+_OHLC_CACHE: dict[str, tuple[pd.DataFrame, float]] = {}  # key -> (df, timestamp)
 
 
 def ohlc(symbol: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
@@ -1427,8 +1489,13 @@ def option_chain(symbol: str = "NIFTY", _skip_atm_filter: bool = False) -> dict:
     cache_file = CACHE_DIR / f"option_chain_{symbol}.json"
 
     def _save_chain(data: dict) -> dict:
+        # BUG-25 FIX: Deep copy before filtering to avoid modifying the
+        # caller's data dict in-place. _filter_atm_strikes mutates
+        # data["records"]["data"] which could affect callers that reuse
+        # the original data after saving.
+        import copy
         if not _skip_atm_filter:
-            data = _filter_atm_strikes(data)
+            data = _filter_atm_strikes(copy.deepcopy(data))
         try:
             CACHE_DIR.mkdir(parents=True, exist_ok=True)
             cache_file.write_text(
@@ -1439,7 +1506,8 @@ def option_chain(symbol: str = "NIFTY", _skip_atm_filter: bool = False) -> dict:
             logging.getLogger(__name__).exception(
                 "Failed to save option chain cache for %s: %s", symbol, e
             )
-        _OPTION_CHAIN_SOURCE[symbol] = data.get("_source") or "unknown"
+        with _SOURCE_LOCK:
+            _OPTION_CHAIN_SOURCE[symbol] = data.get("_source") or "unknown"
         return data
 
     def _load_cached_chain() -> dict:
@@ -1448,13 +1516,16 @@ def option_chain(symbol: str = "NIFTY", _skip_atm_filter: bool = False) -> dict:
                 cached = json.loads(cache_file.read_text(encoding="utf-8"))
                 data = cached.get("data") or {}
                 if data.get("records", {}).get("data"):
-                    if not _skip_atm_filter:
-                        data = _filter_atm_strikes(data)
+                    # BUG-06 FIX: Removed duplicate _filter_atm_strikes call.
+                    # _save_chain() already filters before writing to disk.
+                    # Filtering again on load with a potentially different spot
+                    # price could produce a narrower/different strike range.
                     data.setdefault("_cache", {})
                     data["_cache"].update({"stale": True, "ts": cached.get("ts")})
-                    _OPTION_CHAIN_SOURCE[symbol] = (
-                        f"cache:{data.get('_source') or 'unknown'}"
-                    )
+                    with _SOURCE_LOCK:
+                        _OPTION_CHAIN_SOURCE[symbol] = (
+                            f"cache:{data.get('_source') or 'unknown'}"
+                        )
                     return data
         except Exception as e:
             logging.getLogger(__name__).exception(
@@ -1566,28 +1637,8 @@ def option_chain(symbol: str = "NIFTY", _skip_atm_filter: bool = False) -> dict:
             "[option_chain shoonya] failed for %s: %s", symbol, e
         )
 
-    # 1. Public Dhan Scraper (fallback: bypass-safe, unauthenticated, full data).
-    try:
-        data = _option_chain_from_public_dhan(symbol)
-        if data and data.get("records", {}).get("data"):
-            return _save_chain(data)
-    except Exception as e:
-        logging.getLogger(__name__).warning(
-            "[option_chain public dhan] failed for %s: %s", symbol, e
-        )
-
-    # 2. Research360 — no auth required, provides OI for all strikes + LTP
-    #    for ~10 near-ATM strikes via graphprice/graphc/graphp arrays.
-    try:
-        data = _option_chain_from_research360(symbol)
-        if data and data.get("records", {}).get("data"):
-            return _save_chain(data)
-    except Exception as e:
-        logging.getLogger(__name__).warning(
-            "[option_chain research360] failed for %s: %s", symbol, e
-        )
-
-    # 3. Try robust direct fetch (NSE) as third option
+    # 1. Direct NSE/nsepython (fallback 1: direct API + nsepython library).
+    # Try robust direct fetch (NSE) first
     session = _get_nse_session()
     if session:
         for attempt in range(2):
@@ -1645,7 +1696,7 @@ def option_chain(symbol: str = "NIFTY", _skip_atm_filter: bool = False) -> dict:
                 "[option_chain robust fetch] failed for %s: %s", symbol, e
             )
 
-    # 3. Fallback to nsepython (might work if our session logic failed but theirs somehow succeeds)
+    # Fallback to nsepython (might work if our session logic failed but theirs somehow succeeds)
     try:
         from nsepython import nse_optionchain_scrapper
 
@@ -1668,11 +1719,34 @@ def option_chain(symbol: str = "NIFTY", _skip_atm_filter: bool = False) -> dict:
             "nsepython.option_chain failed for %s: %s", symbol, e
         )
 
+    # 2. Other datasources (fallback 2: Public Dhan, Research360, local files, AI scraper).
+    # 2a. Public Dhan Scraper (bypass-safe, unauthenticated, full data).
+    try:
+        data = _option_chain_from_public_dhan(symbol)
+        if data and data.get("records", {}).get("data"):
+            return _save_chain(data)
+    except Exception as e:
+        logging.getLogger(__name__).warning(
+            "[option_chain public dhan] failed for %s: %s", symbol, e
+        )
+
+    # 2b. Research360 — no auth required, provides OI for all strikes + LTP
+    #     for ~10 near-ATM strikes via graphprice/graphc/graphp arrays.
+    try:
+        data = _option_chain_from_research360(symbol)
+        if data and data.get("records", {}).get("data"):
+            return _save_chain(data)
+    except Exception as e:
+        logging.getLogger(__name__).warning(
+            "[option_chain research360] failed for %s: %s", symbol, e
+        )
+
+    # 2c. External fallbacks (local files)
     fallback = _try_external_fallbacks()
     if fallback.get("records", {}).get("data"):
         return fallback
 
-    # AI Fallback (Resilient but slower)
+    # 2d. AI Fallback (Resilient but slower)
     try:
         from data import ai_scraper
 
@@ -1685,6 +1759,7 @@ def option_chain(symbol: str = "NIFTY", _skip_atm_filter: bool = False) -> dict:
             "AI option_chain fallback failed for %s: %s", symbol, e
         )
 
+    # 3. Last resort: cached data
     data = _load_cached_chain()
 
     # Enrichment step for Research360: If LTP is 0, try to patch with Dhan Public LTPs
@@ -1806,9 +1881,10 @@ def get_pcr_max_pain_cached(
             with open(cache_file, "r", encoding="utf-8") as f:
                 cache_data = json.load(f)
             if cache_data.get("source"):
-                _OPTION_CHAIN_SOURCE[symbol.upper()] = (
-                    f"cache:{cache_data.get('source')}"
-                )
+                with _SOURCE_LOCK:
+                    _OPTION_CHAIN_SOURCE[symbol.upper()] = (
+                        f"cache:{cache_data.get('source')}"
+                    )
             age = time.time() - cache_data.get("ts", 0)
             is_stale = age > 900  # 15 mins
             return (
@@ -1886,7 +1962,10 @@ def fii_dii_cash(days: int = 10) -> pd.DataFrame:
         cached_stockedge = []
 
     # Check if we need to fetch live (only if cache is stale > 1 hour)
-    need_fetch = (now - cached_ts) >= 3600 or not cached_stockedge
+    # BUG-24 FIX: Check `is None` instead of `not cached_stockedge`.
+    # An empty list [] is falsy, which would trigger unnecessary fetches
+    # even when cache is fresh and intentionally empty.
+    need_fetch = (now - cached_ts) >= 3600 or cached_stockedge is None
 
     raw_stockedge = None
     if need_fetch:
@@ -2058,16 +2137,59 @@ def fii_dii_cash(days: int = 10) -> pd.DataFrame:
     return df
 
 
+def _fetch_stockedge_fii_data() -> list[dict] | None:
+    """Fetch FII/DII data from StockEdge API (extracted for reuse).
+
+    BUG-14 FIX: Previously fii_dii_derivatives() called fii_dii_cash(days=20)
+    just to trigger a fetch, discarding the return value. This extracted helper
+    allows both functions to share the same fetch logic without unnecessary work.
+    """
+    url = "https://api.stockedge.com/Api/FIIDashboardApi/GetLatestFIIActivities?lang=en"
+    for attempt in range(3):
+        try:
+            try:
+                from curl_cffi import requests as curl_requests
+                session = curl_requests.Session(impersonate="chrome120")
+                response = session.get(url, timeout=15)
+            except ImportError:
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                    "Accept": "application/json, text/plain, */*",
+                    "Origin": "https://web.stockedge.com",
+                    "Referer": "https://web.stockedge.com/",
+                }
+                response = requests.get(url, headers=headers, timeout=15)
+            if response.status_code == 200:
+                raw = response.json()
+                if raw:
+                    return raw
+        except Exception as e:
+            logging.getLogger(__name__).warning(
+                "[stockedge fetch] attempt %d failed: %s", attempt + 1, e
+            )
+            time.sleep(1)
+    return None
+
+
 def fii_dii_derivatives(days: int = 5) -> tuple[dict[str, float], bool]:
     """Return the cumulative sum of FII derivatives activity over the last N sessions.
 
     Returns (derivatives_dict, stale).
     """
     _, cached_stockedge, _ = _get_persistent_fii_dii_cache()
+    # BUG-14 FIX: Use extracted _fetch_stockedge_fii_data() instead of calling
+    # fii_dii_cash(days=20) which fetches and processes 20 days of cash data
+    # just to populate the cache as a side effect.
     if not cached_stockedge:
         try:
-            fii_dii_cash(days=20)
-            _, cached_stockedge, _ = _get_persistent_fii_dii_cache()
+            fresh = _fetch_stockedge_fii_data()
+            if fresh:
+                cached_stockedge = fresh
+                # Update persistent cache with the fresh data
+                existing_data, _, _ = _get_persistent_fii_dii_cache()
+                _set_persistent_fii_dii_cache(
+                    existing_data or [], cached_stockedge, time.time()
+                )
         except Exception as e:
             print(f"[feed.fii_dii_derivatives] Failed to trigger fetch: {e}")
 
@@ -2114,9 +2236,10 @@ def fii_dii_derivatives(days: int = 5) -> tuple[dict[str, float], bool]:
 def _cached_ohlc(
     symbol: str, period: str, interval: str, cache_key: str
 ) -> pd.DataFrame:
-    key = f"{symbol}_{period}_{interval}_{cache_key}"
-    if key in _OHLC_CACHE and not _OHLC_CACHE[key].empty:
-        return _OHLC_CACHE[key].copy()
+    # BUG-10/11 FIX: Cache is now managed by ohlc_cached() with per-symbol TTL.
+    # This function only handles the actual fetch logic (Shoonya TPSeries + yfinance).
+    # The cache_key parameter is kept for API compatibility but no longer used
+    # for cache lookup here — ohlc_cached() handles that.
 
     # Try Shoonya TPSeries for intraday intervals (1m, 5m, 15m, 30m, 60m)
     if interval in ("1m", "5m", "15m", "30m", "60m", "1h", "1H"):
@@ -2144,7 +2267,6 @@ def _cached_ohlc(
                         if resp and resp.get("stat") == "Ok" and resp.get("values"):
                             df = _shoonya_candles_to_df(resp["values"])
                             if not df.empty:
-                                _OHLC_CACHE[key] = df.copy()
                                 return df
         except Exception as e:
             import logging
@@ -2154,8 +2276,6 @@ def _cached_ohlc(
             )
 
     df = ohlc(symbol, period=period, interval=interval)
-    if not df.empty:
-        _OHLC_CACHE[key] = df.copy()
     return df
 
 
@@ -2237,15 +2357,31 @@ from datetime import datetime, timedelta, timezone
 
 
 def ohlc_cached(symbol: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
-    """Time-bucketed cache to ensure fresh data every 2 minutes without spamming yfinance."""
-    global _OHLC_CACHE, _OHLC_CACHE_BUCKET
-    current_bucket = int(time.time() / 120)
+    """Per-symbol TTL cache (120s) to avoid both stale data and full-cache invalidation.
 
-    if current_bucket != _OHLC_CACHE_BUCKET:
-        _OHLC_CACHE.clear()
-        _OHLC_CACHE_BUCKET = current_bucket
+    BUG-10 FIX: Replaced global bucket that cleared ALL cache every 2 minutes
+    with per-symbol TTL. Each symbol is independently expired after 120 seconds,
+    eliminating the latency spike where 200+ symbols were re-fetched simultaneously.
 
-    return _cached_ohlc(symbol, period, interval, str(current_bucket))
+    BUG-11 FIX: All cache access is protected by _OHLC_CACHE_LOCK.
+    """
+    key = f"{symbol}_{period}_{interval}"
+    now = time.time()
+
+    with _OHLC_CACHE_LOCK:
+        if key in _OHLC_CACHE:
+            cached_df, cached_ts = _OHLC_CACHE[key]
+            if not cached_df.empty and (now - cached_ts) < 120:
+                return cached_df.copy()
+
+    # Cache miss or expired — fetch fresh data
+    df = _cached_ohlc(symbol, period, interval, key)
+
+    if not df.empty:
+        with _OHLC_CACHE_LOCK:
+            _OHLC_CACHE[key] = (df.copy(), now)
+
+    return df
 
 
 def sector_ohlc(sectors: list[str], period: str = "6mo") -> dict[str, pd.DataFrame]:
@@ -2300,7 +2436,8 @@ def universe_ohlc(tickers: list[str], period: str = "6mo") -> dict[str, pd.DataF
                 continue
             try:
                 results[t] = pd.read_pickle(cache_file)
-                _OHLC_SOURCE[t] = results[t].attrs.get("source", "cache")
+                with _SOURCE_LOCK:
+                    _OHLC_SOURCE[t] = results[t].attrs.get("source", "cache")
             except Exception:
                 missing_tickers.append(t)
         else:
@@ -2320,7 +2457,8 @@ def universe_ohlc(tickers: list[str], period: str = "6mo") -> dict[str, pd.DataF
             try:
                 sym_df = _dhan_ohlc(t, period=period, interval="1d")
                 if not sym_df.empty:
-                    _OHLC_SOURCE[t] = "dhan_historical"
+                    with _SOURCE_LOCK:
+                        _OHLC_SOURCE[t] = "dhan_historical"
                     sym_df.attrs["source"] = "dhan_historical"
                     sym_df.to_pickle(cache_dir / f"{t}_{today_str}.pkl")
                     results[t] = sym_df
@@ -2353,7 +2491,8 @@ def universe_ohlc(tickers: list[str], period: str = "6mo") -> dict[str, pd.DataF
         if "close" not in sym_df.columns:
             return False
         sym_df.index.name = "date"
-        _OHLC_SOURCE[sym] = "yfinance"
+        with _SOURCE_LOCK:
+            _OHLC_SOURCE[sym] = "yfinance"
         sym_df.attrs["source"] = "yfinance"
         sym_df.to_pickle(cache_dir / f"{sym}_{today_str}.pkl")
         results[sym] = sym_df
@@ -2516,9 +2655,18 @@ def fetch_trendlyne_options_kpis(symbol: str = "NIFTY") -> dict:
     }
 
     try:
-        from curl_cffi import requests as curl_requests
+        # BUG-21 FIX: Separate ImportError handling for clearer diagnostics.
+        # Previously ImportError from missing curl_cffi was caught by the
+        # outer `except Exception` which logged a misleading generic failure.
+        try:
+            from curl_cffi import requests as curl_requests
+            session = curl_requests.Session(impersonate="chrome120")
+        except ImportError:
+            logging.getLogger(__name__).debug(
+                "Trendlyne: curl_cffi not installed; falling back to requests"
+            )
+            session = _create_retry_session(retries=3, backoff_factor=0.5)
 
-        session = curl_requests.Session(impersonate="chrome120")
         resp = session.get(url, headers=headers, timeout=12)
         resp.raise_for_status()
 

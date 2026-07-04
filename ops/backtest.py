@@ -68,12 +68,15 @@ class TimingBacktester:
         WHERE entry_quality IS NOT NULL
         """
 
+        # BUG-08 FIX: Use parameterized query to prevent SQL injection.
+        params: list = []
         if since_date:
-            query += f" AND opened_at >= '{since_date}'"
+            query += " AND opened_at >= ?"
+            params.append(since_date)
 
         query += " ORDER BY opened_at DESC"
 
-        df = pd.read_sql_query(query, conn)
+        df = pd.read_sql_query(query, conn, params=params)
         conn.close()
 
         # Parse timing_snapshot JSON
@@ -135,8 +138,11 @@ class TimingBacktester:
         quality_map = {"GOOD": 1.0, "MID": 0.5, "LATE": 0.0, "EXHAUSTED": -1.0}
         df["quality_score"] = df["entry_quality"].map(quality_map)
 
+        # BUG-30 FIX: Require minimum 10 data points before computing
+        # correlation. Correlation with 3-9 points is statistically
+        # meaningless and produces misleading r/r² values.
         valid_idx = df["quality_score"].notna() & df["pnl_rupees"].notna()
-        if valid_idx.sum() > 2:
+        if valid_idx.sum() >= 10:
             correlation = df.loc[valid_idx, "quality_score"].corr(
                 df.loc[valid_idx, "pnl_rupees"]
             )

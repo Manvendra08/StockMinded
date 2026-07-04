@@ -301,6 +301,14 @@ def chain_snapshot(symbol, target_expiries=None, target_strikes=None) -> pd.Data
     vix_annual = 0.15
 
     for rec in records:
+        if rec.get('strikePrice') is None:
+            continue
+        # BUG-01 FIX: lastPrice is nested inside CE/PE dicts, not at top level.
+        # Check that at least one side has a valid premium before processing.
+        ce_lp = rec.get("CE", {}).get("lastPrice")
+        pe_lp = rec.get("PE", {}).get("lastPrice")
+        if (ce_lp is None or ce_lp <= 0) and (pe_lp is None or pe_lp <= 0):
+            continue
         exp_date_str = rec.get("expiryDate")
         if not exp_date_str:
             continue
@@ -421,10 +429,19 @@ def is_within_entry_window(
     entry_start_str = sym_cfg.get("intraday_entry_start", "09:45")
     entry_end_str = sym_cfg.get("intraday_entry_end", "14:30")
 
-    h1, m1 = map(int, entry_start_str.split(":"))
-    h2, m2 = map(int, entry_end_str.split(":"))
-    entry_start = time(h1, m1)
-    entry_end = time(h2, m2)
+    # BUG-15 FIX: Wrap time parsing in try/except to handle invalid config formats
+    # like "945" instead of "09:45". Fall back to sensible defaults on error.
+    try:
+        h1, m1 = map(int, entry_start_str.split(":"))
+        entry_start = time(h1, m1)
+    except (ValueError, TypeError):
+        entry_start = time(9, 45)
+
+    try:
+        h2, m2 = map(int, entry_end_str.split(":"))
+        entry_end = time(h2, m2)
+    except (ValueError, TypeError):
+        entry_end = time(14, 30)
 
     if not (entry_start <= current_time <= entry_end):
         return False, f"Outside entry window ({entry_start_str}-{entry_end_str})"
@@ -599,8 +616,10 @@ def calc_structure_max_loss(
     Credit Spread: max_loss = (spread_width * lot_size * lots) - net_credit
     naked_short kwargs: underlying_spot, naked_loss_pct (default 0.20), naked_loss_cap (default 250_000)
     """
+    # BUG-19 FIX: For debit spreads (net_credit <= 0), max loss is the debit paid,
+    # not the wing width. Wing width applies only to credit spreads.
     if net_credit <= 0:
-        return max(0, wing_width * lot_size * lots)
+        return max(0, abs(net_credit) * lot_size * lots)
 
     if structure_type == "iron_condor":
         return max(0, (wing_width * lot_size * lots) - net_credit)

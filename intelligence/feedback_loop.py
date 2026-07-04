@@ -128,7 +128,8 @@ class FeedbackLoop:
         avg_loss = sum(t.get("pnl", 0) for t in losses) / len(losses) if losses else 0
         total_wins = sum(t.get("pnl", 0) for t in wins) if wins else 0
         total_losses = abs(sum(t.get("pnl", 0) for t in losses)) if losses else 0
-        profit_factor = total_wins / total_losses if total_losses > 0 else float('inf')
+        # BUG-17 FIX: Use 999.0 instead of float('inf') to avoid JSON serialization failure.
+        profit_factor = total_wins / total_losses if total_losses > 0 else 999.0
 
         # Regime accuracy
         regime_accuracy = self._analyze_regime_accuracy(trades)

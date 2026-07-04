@@ -50,8 +50,12 @@ def compute_rsi_from_df(df: pd.DataFrame, period: int = 14) -> float:
     gains = deltas.where(deltas > 0, 0.0)
     losses = -deltas.where(deltas < 0, 0.0)
 
-    avg_gain = gains.rolling(window=period, min_periods=1).mean()
-    avg_loss = losses.rolling(window=period, min_periods=1).mean()
+    # BUG-29 FIX: Use min_periods=period instead of min_periods=1.
+    # With min_periods=1, RSI could be computed from a single bar,
+    # producing wildly unreliable values for small datasets.
+    # The early-return above already handles len < period+1.
+    avg_gain = gains.rolling(window=period, min_periods=period).mean()
+    avg_loss = losses.rolling(window=period, min_periods=period).mean()
 
     rs = avg_gain / avg_loss.replace(0, 1e-10)
     rsi = 100 - (100 / (1 + rs))

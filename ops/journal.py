@@ -99,6 +99,14 @@ class Journal:
         self.conn.commit()
 
     def open_trade(self, **kw) -> int:
+        # BUG-27 FIX: Validate required kwargs upfront instead of letting
+        # KeyError propagate from deep inside the execute call.
+        _required = ("symbol", "structure", "side", "qty")
+        missing = [k for k in _required if k not in kw]
+        if missing:
+            raise ValueError(
+                f"open_trade() missing required kwargs: {', '.join(missing)}"
+            )
         cur = self.conn.execute(
             """INSERT INTO trades(opened_at, symbol, structure, side, qty, entry, stop, target, risk_rupees, regime, notes)
                VALUES (?,?,?,?,?,?,?,?,?,?,?)""",

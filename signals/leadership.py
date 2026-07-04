@@ -39,8 +39,10 @@ def _projected_volume_multiplier() -> float:
         
     total_minutes = 375.0
     elapsed_fraction = elapsed_minutes / total_minutes
-    # Clamp elapsed fraction between 0.05 and 1.0 to avoid extremely large multipliers
-    elapsed_fraction = max(0.05, min(1.0, elapsed_fraction))
+    # BUG-18 FIX: Increased minimum clamp from 0.05 to 0.15.
+    # At 0.05 (≈2 min after open), multiplier was 20x causing false Q5 signals.
+    # At 0.15 (≈56 min after open), max multiplier is ~6.7x which is reasonable.
+    elapsed_fraction = max(0.15, min(1.0, elapsed_fraction))
     return 1.0 / elapsed_fraction
 
 

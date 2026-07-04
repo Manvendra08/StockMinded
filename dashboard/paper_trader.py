@@ -63,6 +63,8 @@ TMP_FILE = DATA_FILE.with_suffix(".json.tmp")
 
 DEFAULT_SETTINGS = {
     "capital_per_trade": 500000.0,
+    "capital_per_trade_stocks": 500000.0,
+    "capital_per_trade_options": 500000.0,
     "sl_pct": 2.0,
     "tgt_pct": 4.0,
     "trail_sl": True,
@@ -87,10 +89,10 @@ DEFAULT_SETTINGS = {
     "smart_reentry_enabled": True,  # Re-entry (off by default)
     "options_lots_per_trade": 10,  # Number of lots to trade per options order
     # ── Risk Gate (Guardrails) overrides ──────────────────────────
-    "rg_daily_stop_pct": 0.05,  # 2% of capital = daily loss limit
-    "rg_monthly_stop_pct": 0.08,  # 6% of capital = monthly loss limit
-    "rg_concurrent_open_pct": 0.05,  # 3% of capital = max simultaneous open risk
-    "rg_margin_util_cap": 0.80,  # 60% margin utilisation ceiling
+    "rg_daily_stop_pct": 0.02,  # 2% of capital = daily loss limit
+    "rg_monthly_stop_pct": 0.06,  # 6% of capital = monthly loss limit
+    "rg_concurrent_open_pct": 0.03,  # 3% of capital = max simultaneous open risk
+    "rg_margin_util_cap": 0.60,  # 60% margin utilisation ceiling
     "rg_correlation_max": 0.70,  # max RS correlation with existing position
 }
 
@@ -407,6 +409,8 @@ def save_settings(new_settings: dict) -> dict:
             if k in DEFAULT_SETTINGS:
                 if k in (
                     "capital_per_trade",
+                    "capital_per_trade_stocks",
+                    "capital_per_trade_options",
                     "sl_pct",
                     "tgt_pct",
                     "rg_daily_stop_pct",
@@ -546,7 +550,7 @@ def enter_trade(alert: dict) -> dict:
             return {"error": f"Could not fetch LTP for {symbol}"}
 
         settings = db.get("settings", DEFAULT_SETTINGS.copy())
-        capital_per_trade = settings["capital_per_trade"]
+        capital_per_trade = settings.get("capital_per_trade_stocks", settings.get("capital_per_trade", 500000.0))
         sl_pct = settings["sl_pct"]
         tgt_pct = settings["tgt_pct"]
 
@@ -732,7 +736,7 @@ def enter_option_structure(
         ]
         if zero_prem_legs:
             details = "; ".join(
-                f"{s} {t} @ {strike} prem={p}" for s, t, st, p in zero_prem_legs
+                f"{s} {t} @ {strike} prem={p}" for s, t, strike, p in zero_prem_legs
             )
             logging.getLogger(__name__).error(
                 "%s: rejecting custom entry — %d leg(s) with zero/corrupt premium: %s",
@@ -964,7 +968,7 @@ def _enter_option_structure(
         ]
         if zero_prem_legs:
             details = "; ".join(
-                f"{s} {t} @ {strike} prem={p}" for s, t, st, p in zero_prem_legs
+                f"{s} {t} @ {strike} prem={p}" for s, t, strike, p in zero_prem_legs
             )
             logging.getLogger(__name__).warning(
                 "%s: rejecting entry — %d leg(s) with zero/corrupt premium: %s",
@@ -2309,7 +2313,7 @@ def auto_enter_from_alerts(alerts: list[dict], cfg: dict | None = None) -> list[
     _cfg_override = {**cfg, "risk": _risk_override}
     guardrails = Guardrails(_cfg_override)
     journal = Journal(cfg["paths"]["journal_db"])
-    today_str = date.today().isoformat()
+    today_str = now_ist.date().isoformat()
     entered = []
 
     # Pre-fetch LTP for any alerts that lack entry_price/stop OUTSIDE the lock
@@ -2604,7 +2608,7 @@ def auto_enter_from_alerts(alerts: list[dict], cfg: dict | None = None) -> list[
                     continue
 
                 # Cap quantity by Capital per Trade setting (Notional cap)
-                capital_cap = settings.get("capital_per_trade", 500000.0)
+                capital_cap = settings.get("capital_per_trade_stocks", settings.get("capital_per_trade", 500000.0))
                 max_qty_by_cap = int(capital_cap / entry_price)
                 if lot_size > 1:
                     max_qty_by_cap = (max_qty_by_cap // lot_size) * lot_size

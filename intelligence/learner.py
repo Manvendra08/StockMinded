@@ -80,7 +80,8 @@ def analyze_history(closed_trades: list[dict], lookback_days: int = 30) -> dict:
             if n < 5:
                 continue
                 
-            distinct_dates = group["entry_date"].nunique()
+            # BUG-16 FIX: dropna() before nunique() so None isn't counted as a distinct date.
+            distinct_dates = group["entry_date"].dropna().nunique()
             if distinct_dates < 3:
                 continue
                 

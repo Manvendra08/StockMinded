@@ -128,10 +128,10 @@ def breadth_pct_above_50dma(stock_data: dict[str, pd.DataFrame]) -> float | None
             continue
         try:
             col_name = None
+            # BUG-09 FIX: Columns are always lowercased by _flatten_columns(),
+            # so checking "Close" (capital C) is dead code. Only check "close".
             if "close" in df.columns:
                 col_name = "close"
-            elif "Close" in df.columns:
-                col_name = "Close"
             elif isinstance(df.columns, pd.MultiIndex):
                 flat_cols = [c[0].lower() if isinstance(c, tuple) else str(c).lower() for c in df.columns]
                 if "close" in flat_cols:

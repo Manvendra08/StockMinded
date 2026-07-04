@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random as _random
 import re
 import sys
 import time
@@ -89,6 +90,16 @@ def _get_ai_config() -> Optional[dict]:
         if openrouter_api_key:
             openrouter_api_key = openrouter_api_key.strip().strip("'").strip('"')
 
+        sambanova_api_key = cfg.get("sambanova_api_key")
+        if (
+            isinstance(sambanova_api_key, str)
+            and sambanova_api_key.startswith("${")
+            and sambanova_api_key.endswith("}")
+        ):
+            sambanova_api_key = os.getenv(sambanova_api_key[2:-1])
+        if sambanova_api_key:
+            sambanova_api_key = sambanova_api_key.strip().strip("'").strip('"')
+
         # Self-healing Fallback:
         # If the user accidentally set GOOGLE_API_KEY to their ScrapeGraphAI key (starts with 'sgai-')
         # we route it to saas_api_key and clear api_key so the local Gemini LLM doesn't get initialized with it.
@@ -116,15 +127,61 @@ def _get_ai_config() -> Optional[dict]:
             "saas_api_key": saas_api_key,
             "groq_api_key": groq_api_key,
             "openrouter_api_key": openrouter_api_key,
+            "sambanova_api_key": sambanova_api_key,
         }
     except Exception as e:
         logger.error(f"Failed to load ScrapeGraphAI config: {e}")
         return None
 
 
-# In-memory cache: skip dead providers for 300s after failure
+# In-memory cache: skip dead providers for 600s after failure
 _dead_providers: dict[str, float] = {}
-_DEAD_PROVIDER_TTL = 300.0  # Re-try dead provider after 5 minutes
+_DEAD_PROVIDER_TTL = 600.0  # Re-try dead provider after 10 minutes
+
+# Global rate limiter for SambaNova: max 1 call per 30 seconds to avoid 429
+_sambanova_last_call_ts: float = 0.0
+_SAMBANOVA_MIN_INTERVAL = 30.0  # seconds between SambaNova calls
+
+# Global rate limiter for OpenRouter: max 1 call per 15 seconds to avoid 429
+_openrouter_last_call_ts: float = 0.0
+_OPENROUTER_MIN_INTERVAL = 15.0  # seconds between OpenRouter calls
+
+def _sambanova_rate_limit_wait() -> None:
+    """Enforce minimum interval between SambaNova API calls to prevent 429 rate limits.
+    
+    SambaNova free tier allows ~1 request per minute. We enforce a 30s minimum
+    interval with random jitter to avoid thundering herd.
+    """
+    global _sambanova_last_call_ts
+    now = time.time()
+    elapsed = now - _sambanova_last_call_ts
+    if elapsed < _SAMBANOVA_MIN_INTERVAL:
+        wait_time = (_SAMBANOVA_MIN_INTERVAL - elapsed) + _random.uniform(0.5, 2.0)
+        logger.debug(
+            "SambaNova rate limiter: waiting %.1fs (elapsed=%.1fs)",
+            wait_time, elapsed,
+        )
+        time.sleep(wait_time)
+    _sambanova_last_call_ts = time.time()
+
+
+def _openrouter_rate_limit_wait() -> None:
+    """Enforce minimum interval between OpenRouter API calls to prevent 429 rate limits.
+    
+    OpenRouter free tier has rate limits. We enforce a 15s minimum
+    interval with random jitter to avoid thundering herd.
+    """
+    global _openrouter_last_call_ts
+    now = time.time()
+    elapsed = now - _openrouter_last_call_ts
+    if elapsed < _OPENROUTER_MIN_INTERVAL:
+        wait_time = (_OPENROUTER_MIN_INTERVAL - elapsed) + _random.uniform(0.5, 2.0)
+        logger.debug(
+            "OpenRouter rate limiter: waiting %.1fs (elapsed=%.1fs)",
+            wait_time, elapsed,
+        )
+        time.sleep(wait_time)
+    _openrouter_last_call_ts = time.time()
 
 
 class TLS12Adapter(HTTPAdapter):
@@ -194,6 +251,38 @@ def _is_ssl_transport_error(exc: Exception) -> bool:
     )
 
 
+def _is_http_error(exc: Exception) -> bool:
+    """Check if exception is an HTTP error from requests or curl_cffi.
+
+    curl_cffi.requests has its own HTTPError class that is NOT a subclass of
+    requests.exceptions.HTTPError, so we check by class name.
+    """
+    cls_name = type(exc).__name__
+    return cls_name == "HTTPError" or "HTTPError" in str(type(exc))
+
+
+def _get_http_status(exc: Exception) -> int | None:
+    """Extract HTTP status code from requests or curl_cffi HTTPError."""
+    if hasattr(exc, "response") and exc.response is not None:
+        try:
+            return exc.response.status_code
+        except Exception:
+            pass
+    return None
+
+
+def _get_http_detail(exc: Exception, max_len: int = 200) -> str:
+    """Extract response body from requests or curl_cffi HTTPError."""
+    if hasattr(exc, "response") and exc.response is not None:
+        try:
+            text = exc.response.text
+            if text:
+                return text[:max_len]
+        except Exception:
+            pass
+    return str(exc)[:max_len]
+
+
 def _call_chat_completion(
     *,
     session: requests.Session | Any,
@@ -230,17 +319,170 @@ def call_llm(
     max_tokens: int | None = None,
     return_provider: bool = False,
 ) -> Any:
-    """Universal LLM call with fallback: Groq -> Gemini -> OpenRouter (8 models)."""
+    """Universal LLM call with fallback: SambaNova -> Groq -> Gemini -> OpenRouter (8 models)."""
     config = _get_ai_config()
     if not config:
         return (None, "None") if return_provider else None
 
-    # 1. Groq (Primary) — skip if recently dead
+    # 1. SambaNova (Primary) — OpenAI-compatible, fast inference, free $5 credit
+    # NOTE: Only use models that are actually available on SambaNova's free tier.
+    # DeepSeek-V3.1 and Meta-Llama-3.3-70B-Instruct are confirmed available.
+    # Meta-Llama-3.1-405B-Instruct has limited availability on free tier.
+    # gpt-oss-120b is NOT available on SambaNova (returns 400).
+    SAMBANOVA_MODELS = (
+        "DeepSeek-V3.1",
+        "Meta-Llama-3.3-70B-Instruct",
+        "Meta-Llama-3.1-8B-Instruct",  # Smaller model, more reliable on free tier
+    )
+    if config.get("sambanova_api_key"):
+        session, backend = _create_curl_cffi_llm_session()
+        for model_id in SAMBANOVA_MODELS:
+            # Check per-model cooldown (skip if recently rate-limited)
+            model_dead_until = _dead_providers.get(f"sambanova:{model_id}")
+            if model_dead_until and time.time() < model_dead_until:
+                logger.debug(
+                    "SambaNova (%s) marked dead until %.0f; skipping",
+                    model_id,
+                    model_dead_until,
+                )
+                continue
+
+            # Enforce rate limiting before each SambaNova call
+            _sambanova_rate_limit_wait()
+
+            logger.info(
+                "LLM #1: %s [provider=SambaNova] (backend=%s)", model_id, backend
+            )
+            try:
+                url = "https://api.sambanova.ai/v1/chat/completions"
+                headers = {
+                    "Authorization": f"Bearer {config['sambanova_api_key']}",
+                    "Content-Type": "application/json",
+                }
+                payload = {
+                    "model": model_id,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "response_format": {"type": "json_object"} if json_mode else None,
+                    "max_tokens": max_tokens,
+                }
+                resp = session.post(url, headers=headers, json=payload, timeout=20)
+                resp.raise_for_status()
+
+                if not resp.content or not resp.content.strip():
+                    raise ValueError("empty response body (likely rate-limited)")
+                resp_data = resp.json()
+
+                if "error" in resp_data:
+                    err_msg = resp_data["error"]
+                    if isinstance(err_msg, dict):
+                        err_msg = err_msg.get("message", str(err_msg))
+                    logger.warning(
+                        "SambaNova (%s) upstream error: %s. Trying next model.",
+                        model_id,
+                        err_msg,
+                    )
+                else:
+                    text = resp_data["choices"][0]["message"]["content"]
+                    if not text or not text.strip():
+                        raise ValueError(
+                            f"SambaNova ({model_id}) returned empty content"
+                        )
+                    res_val = json.loads(text) if json_mode else text
+                    logger.info(
+                        "LLM success: %s [SambaNova] (backend=%s)", model_id, backend
+                    )
+                    return (
+                        (res_val, f"SambaNova ({model_id})")
+                        if return_provider
+                        else res_val
+                    )
+            except Exception as e:
+                # Handle SSL errors (immediate failover, mark backend dead)
+                if _is_ssl_transport_error(e):
+                    logger.warning(
+                        "SambaNova (%s) SSL error with %s backend: %s. Trying next model.",
+                        model_id,
+                        backend,
+                        e,
+                    )
+                    continue
+
+                # Handle HTTP errors (works for both requests and curl_cffi)
+                if _is_http_error(e):
+                    status = _get_http_status(e)
+                    detail = _get_http_detail(e)
+                    if status == 401:
+                        logger.warning(
+                            "SambaNova returned 401 (unauthorized). Check SAMBANOVA_API_KEY. Trying Groq."
+                        )
+                        break  # No point trying more models with bad key
+                    elif status in (400, 404):
+                        logger.warning(
+                            "SambaNova (%s) not available (%s): %s. Trying next model.",
+                            model_id,
+                            status,
+                            detail,
+                        )
+                    elif status == 429:
+                        # Exponential backoff: 5s, 10s, 20s based on model index
+                        backoff_secs = min(5 * (2 ** list(SAMBANOVA_MODELS).index(model_id)), 30)
+                        logger.warning(
+                            "SambaNova (%s) rate limited (429). Marking dead for %ds. "
+                            "Backing off %.0fs before next model.",
+                            model_id,
+                            _DEAD_PROVIDER_TTL,
+                            backoff_secs,
+                        )
+                        _mark_provider_dead(f"sambanova:{model_id}", _DEAD_PROVIDER_TTL)
+                        time.sleep(backoff_secs)
+                    else:
+                        logger.warning(
+                            "SambaNova (%s) HTTP error (%s): %s. Trying next model.",
+                            model_id,
+                            status,
+                            detail,
+                        )
+                    continue
+
+                # Handle JSON/parse errors
+                if isinstance(e, json.JSONDecodeError):
+                    logger.warning(
+                        "SambaNova (%s) empty/invalid response: %s. Trying next model.",
+                        model_id,
+                        e,
+                    )
+                    continue
+
+                # Handle missing fields
+                if isinstance(e, (KeyError, IndexError)):
+                    logger.warning(
+                        "SambaNova (%s) response missing fields: %s. Trying next model.",
+                        model_id,
+                        e,
+                    )
+                    continue
+
+                # Handle value errors (empty content, etc.)
+                if isinstance(e, ValueError):
+                    logger.warning("SambaNova (%s) %s. Trying next model.", model_id, e)
+                    continue
+
+                # Catch-all for unexpected errors
+                logger.warning(
+                    "SambaNova (%s) call failed: %s. Trying next model.",
+                    model_id,
+                    e,
+                )
+
+    # 2. Groq (Fallback 1) — skip if recently dead
     groq_dead_until = _dead_providers.get("groq")
     if groq_dead_until and time.time() < groq_dead_until:
         logger.debug("Groq marked dead until %.0f; skipping", groq_dead_until)
     elif config.get("groq_api_key"):
-        logger.info("LLM #1: llama-3.3-70b-versatile [provider=Groq]")
+        logger.info("LLM #2: llama-3.3-70b-versatile [provider=Groq]")
         session, backend = _create_curl_cffi_llm_session()
         try:
             url = "https://api.groq.com/openai/v1/chat/completions"
@@ -269,32 +511,40 @@ def call_llm(
                 if return_provider
                 else res_val
             )
-        except requests.exceptions.SSLError as ssl_err:
-            _dead_providers["groq"] = time.time() + _DEAD_PROVIDER_TTL
-            logger.warning(
-                "Groq SSL error with %s backend: %s. Marking dead for %ds. Trying Gemini.",
-                backend,
-                ssl_err,
-                _DEAD_PROVIDER_TTL,
-            )
-        except requests.exceptions.HTTPError as e:
-            status = e.response.status_code
-            if status == 401:
-                logger.warning(
-                    "Groq returned 401 (unauthorized). Check GROQ_API_KEY. Trying Gemini."
-                )
-            else:
-                logger.warning(
-                    "Groq HTTP error (%s): %s. Trying Gemini.",
-                    status,
-                    e.response.text[:200],
-                )
-        except json.JSONDecodeError as e:
-            logger.warning("Groq returned invalid JSON: %s. Trying Gemini.", e)
         except Exception as e:
-            logger.warning("Groq call failed: %s. Trying Gemini.", e)
+            # Handle SSL errors (mark Groq dead for a while)
+            if _is_ssl_transport_error(e):
+                _dead_providers["groq"] = time.time() + _DEAD_PROVIDER_TTL
+                logger.warning(
+                    "Groq SSL error with %s backend: %s. Marking dead for %ds. Trying Gemini.",
+                    backend,
+                    e,
+                    _DEAD_PROVIDER_TTL,
+                )
 
-    # 2. Gemini (First Fallback)
+            # Handle HTTP errors (works for both requests and curl_cffi)
+            elif _is_http_error(e):
+                status = _get_http_status(e)
+                if status == 401:
+                    logger.warning(
+                        "Groq returned 401 (unauthorized). Check GROQ_API_KEY. Trying Gemini."
+                    )
+                else:
+                    logger.warning(
+                        "Groq HTTP error (%s): %s. Trying Gemini.",
+                        status,
+                        _get_http_detail(e),
+                    )
+
+            # Handle JSON/parse errors
+            elif isinstance(e, json.JSONDecodeError):
+                logger.warning("Groq returned invalid JSON: %s. Trying Gemini.", e)
+
+            # Catch-all
+            else:
+                logger.warning("Groq call failed: %s. Trying Gemini.", e)
+
+    # 3. Gemini (Fallback 2)
     if config["local"] and config["local"]["llm"].get("api_key"):
         session, backend = _create_curl_cffi_llm_session()
         try:
@@ -302,7 +552,7 @@ def call_llm(
             model_raw = config["local"]["llm"].get("model", "gemini-1.5-flash")
             model_name = model_raw.split("/")[-1] if "/" in model_raw else model_raw
             logger.info(
-                "LLM #2: %s [provider=Gemini] (backend=%s)", model_name, backend
+                "LLM #3: %s [provider=Gemini] (backend=%s)", model_name, backend
             )
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
             generation_config = {"response_mime_type": "application/json"}
@@ -339,34 +589,42 @@ def call_llm(
             res_val = json.loads(text) if json_mode else text
             logger.info("LLM success: %s [Gemini] (backend=%s)", model_name, backend)
             return (res_val, f"Gemini ({model_name})") if return_provider else res_val
-        except requests.exceptions.SSLError as ssl_err:
-            logger.warning(
-                "Gemini SSL error with %s backend: %s. Trying OpenRouter.",
-                backend,
-                ssl_err,
-            )
-        except requests.exceptions.HTTPError as e:
-            status = e.response.status_code
-            if status == 401:
+        except Exception as e:
+            # Handle SSL errors
+            if _is_ssl_transport_error(e):
                 logger.warning(
-                    "Gemini returned 401 (unauthorized). Check GOOGLE_API_KEY or model access. Trying OpenRouter."
+                    "Gemini SSL error with %s backend: %s. Trying OpenRouter.",
+                    backend,
+                    e,
                 )
+
+            # Handle HTTP errors (works for both requests and curl_cffi)
+            elif _is_http_error(e):
+                status = _get_http_status(e)
+                if status == 401:
+                    logger.warning(
+                        "Gemini returned 401 (unauthorized). Check GOOGLE_API_KEY or model access. Trying OpenRouter."
+                    )
+                else:
+                    logger.warning(
+                        "Gemini HTTP error (%s) with %s backend: %s. Trying OpenRouter.",
+                        status,
+                        backend,
+                        _get_http_detail(e),
+                    )
+
+            # Handle JSON/parse errors
+            elif isinstance(e, json.JSONDecodeError):
+                logger.warning("Gemini returned invalid JSON: %s. Trying OpenRouter.", e)
+
+            # Catch-all
             else:
                 logger.warning(
-                    "Gemini HTTP error (%s) with %s backend: %s. Trying OpenRouter.",
-                    status,
-                    backend,
-                    e.response.text[:200],
+                    "Gemini call failed unexpectedly: %s. Trying OpenRouter.",
+                    e,
                 )
-        except json.JSONDecodeError as e:
-            logger.warning("Gemini returned invalid JSON: %s. Trying OpenRouter.", e)
-        except Exception as e:
-            logger.warning(
-                "Gemini call failed unexpectedly: %s. Trying OpenRouter.",
-                e,
-            )
 
-    # 3. OpenRouter Free Models (Fallback 2+) — try multiple models
+    # 4. OpenRouter Free Models (Fallback 3+) — try multiple models
     _OPENROUTER_FALLBACK_MODELS = (
         "google/gemma-4-26b-a4b-it:free",
         "google/gemma-4-31b-it:free",
@@ -380,8 +638,21 @@ def call_llm(
     if config.get("openrouter_api_key"):
         session, backend = _create_curl_cffi_llm_session()
         for model_id in _OPENROUTER_FALLBACK_MODELS:
+            # Check per-model cooldown (skip if recently rate-limited)
+            model_dead_until = _dead_providers.get(f"openrouter:{model_id}")
+            if model_dead_until and time.time() < model_dead_until:
+                logger.debug(
+                    "OpenRouter (%s) marked dead until %.0f; skipping",
+                    model_id,
+                    model_dead_until,
+                )
+                continue
+
+            # Enforce rate limiting before each OpenRouter call
+            _openrouter_rate_limit_wait()
+
             logger.info(
-                "LLM #3: %s [provider=OpenRouter] (backend=%s)", model_id, backend
+                "LLM #4: %s [provider=OpenRouter] (backend=%s)", model_id, backend
             )
             try:
                 url = "https://openrouter.ai/api/v1/chat/completions"
@@ -431,55 +702,78 @@ def call_llm(
                         if return_provider
                         else res_val
                     )
-            except requests.exceptions.SSLError as ssl_err:
-                logger.warning(
-                    "OpenRouter (%s) SSL error with %s backend: %s. Trying next.",
-                    model_id,
-                    backend,
-                    ssl_err,
-                )
-            except requests.exceptions.HTTPError as e:
-                status = e.response.status_code
-                detail = e.response.text[:200]
-                if status == 401:
-                    logger.warning(
-                        "OpenRouter returned 401 (unauthorized). Check OPENROUTER_API_KEY."
-                    )
-                    break  # No point trying more models with bad key
-                elif status in (400, 404):
-                    logger.warning(
-                        "OpenRouter (%s) not available (%s): %s. Trying next.",
-                        model_id,
-                        status,
-                        detail,
-                    )
-                elif status == 429:
-                    logger.warning(
-                        "OpenRouter (%s) rate limited (429). Trying next.",
-                        model_id,
-                    )
-                else:
-                    logger.warning(
-                        "OpenRouter (%s) HTTP error (%s): %s. Trying next.",
-                        model_id,
-                        status,
-                        detail,
-                    )
-            except json.JSONDecodeError as e:
-                logger.warning(
-                    "OpenRouter (%s) empty/invalid response: %s. Trying next.",
-                    model_id,
-                    e,
-                )
-            except (KeyError, IndexError) as e:
-                logger.warning(
-                    "OpenRouter (%s) response missing fields: %s. Trying next.",
-                    model_id,
-                    e,
-                )
-            except ValueError as e:
-                logger.warning("OpenRouter (%s) %s. Trying next.", model_id, e)
             except Exception as e:
+                # Handle SSL errors (immediate failover)
+                if _is_ssl_transport_error(e):
+                    logger.warning(
+                        "OpenRouter (%s) SSL error with %s backend: %s. Trying next.",
+                        model_id,
+                        backend,
+                        e,
+                    )
+                    continue
+
+                # Handle HTTP errors (works for both requests and curl_cffi)
+                if _is_http_error(e):
+                    status = _get_http_status(e)
+                    detail = _get_http_detail(e)
+                    if status == 401:
+                        logger.warning(
+                            "OpenRouter returned 401 (unauthorized). Check OPENROUTER_API_KEY."
+                        )
+                        break  # No point trying more models with bad key
+                    elif status in (400, 404):
+                        logger.warning(
+                            "OpenRouter (%s) not available (%s): %s. Trying next.",
+                            model_id,
+                            status,
+                            detail,
+                        )
+                    elif status == 429:
+                        # Exponential backoff: 5s, 10s, 20s based on model index
+                        backoff_secs = min(5 * (2 ** list(_OPENROUTER_FALLBACK_MODELS).index(model_id)), 30)
+                        logger.warning(
+                            "OpenRouter (%s) rate limited (429). Marking dead for %ds. "
+                            "Backing off %.0fs before next model.",
+                            model_id,
+                            _DEAD_PROVIDER_TTL,
+                            backoff_secs,
+                        )
+                        _mark_provider_dead(f"openrouter:{model_id}", _DEAD_PROVIDER_TTL)
+                        time.sleep(backoff_secs)
+                    else:
+                        logger.warning(
+                            "OpenRouter (%s) HTTP error (%s): %s. Trying next.",
+                            model_id,
+                            status,
+                            detail,
+                        )
+                    continue
+
+                # Handle JSON/parse errors
+                if isinstance(e, json.JSONDecodeError):
+                    logger.warning(
+                        "OpenRouter (%s) empty/invalid response: %s. Trying next.",
+                        model_id,
+                        e,
+                    )
+                    continue
+
+                # Handle missing fields
+                if isinstance(e, (KeyError, IndexError)):
+                    logger.warning(
+                        "OpenRouter (%s) response missing fields: %s. Trying next.",
+                        model_id,
+                        e,
+                    )
+                    continue
+
+                # Handle value errors (empty content, etc.)
+                if isinstance(e, ValueError):
+                    logger.warning("OpenRouter (%s) %s. Trying next.", model_id, e)
+                    continue
+
+                # Catch-all for unexpected errors
                 logger.warning(
                     "OpenRouter (%s) call failed: %s. Trying next.",
                     model_id,
@@ -491,12 +785,13 @@ def call_llm(
 
 
 def test_llm_providers():
-    """Diagnostic tool to verify LLM connectivity for Gemini, Groq, and OpenRouter."""
+    """Diagnostic tool to verify LLM connectivity for SambaNova, Groq, Gemini, and OpenRouter."""
     config = _get_ai_config()
     if not config:
         print("❌ Configuration not found. Check your config.yaml and enabled state.")
         return
 
+    print("DEBUG CONFIG SAMBANOVA KEY:", repr(config.get("sambanova_api_key")))
     print("DEBUG CONFIG GROQ KEY:", repr(config.get("groq_api_key")))
     print("DEBUG CONFIG OPENROUTER KEY:", repr(config.get("openrouter_api_key")))
 
@@ -510,7 +805,33 @@ def test_llm_providers():
             return "***"
         return f"{k[:4]}...{k[-4:]}"
 
-    # 1. Test Groq
+    # 1. Test SambaNova
+    if config.get("sambanova_api_key"):
+        try:
+            print(
+                f"Testing SambaNova (Key: {mask_key(config['sambanova_api_key'])})..."
+            )
+            url = "https://api.sambanova.ai/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {config['sambanova_api_key']}",
+                "Content-Type": "application/json",
+            }
+            payload = {
+                "model": "Meta-Llama-3.3-70B-Instruct",
+                "messages": [{"role": "user", "content": test_prompt}],
+                "max_tokens": 10,
+            }
+            resp = requests.post(url, headers=headers, json=payload, timeout=15)
+            print("SambaNova Raw Status:", resp.status_code)
+            print("SambaNova Raw Text:", resp.text)
+            resp.raise_for_status()
+            results["SambaNova"] = "OK"
+        except Exception as e:
+            results["SambaNova"] = f"Error: {type(e).__name__}: {str(e)}"
+    else:
+        results["SambaNova"] = "Not Configured"
+
+    # 2. Test Groq
     if config.get("groq_api_key"):
         try:
             print(f"Testing Groq (Key: {mask_key(config['groq_api_key'])})...")
@@ -535,7 +856,7 @@ def test_llm_providers():
     else:
         results["Groq"] = "Not Configured"
 
-    # 2. Test Gemini
+    # 3. Test Gemini
     gemini_key = config["local"]["llm"].get("api_key") if config["local"] else None
     if gemini_key:
         try:
@@ -550,7 +871,73 @@ def test_llm_providers():
     else:
         results["Gemini"] = "Not Configured"
 
-    # 3. Test OpenRouter
+    # 3. Test SambaNova
+    if config.get("sambanova_api_key"):
+        try:
+            print(
+                f"Testing SambaNova (Key: {mask_key(config['sambanova_api_key'])})..."
+            )
+            url = "https://api.sambanova.ai/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {config['sambanova_api_key']}",
+                "Content-Type": "application/json",
+            }
+            payload = {
+                "model": "Meta-Llama-3.3-70B-Instruct",
+                "messages": [{"role": "user", "content": test_prompt}],
+                "max_tokens": 10,
+            }
+            resp = requests.post(url, headers=headers, json=payload, timeout=15)
+            print("SambaNova Raw Status:", resp.status_code)
+            print("SambaNova Raw Text:", resp.text)
+            resp.raise_for_status()
+            results["SambaNova"] = "OK"
+        except Exception as e:
+            results["SambaNova"] = f"Error: {type(e).__name__}: {str(e)}"
+    else:
+        results["SambaNova"] = "Not Configured"
+
+    # 2. Test Groq
+    if config.get("groq_api_key"):
+        try:
+            print(f"Testing Groq (Key: {mask_key(config['groq_api_key'])})...")
+            url = "https://api.groq.com/openai/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {config['groq_api_key']}",
+                "Content-Type": "application/json",
+            }
+            print("SENDING GROQ HEADER:", repr(headers))
+            payload = {
+                "model": "llama-3.3-70b-versatile",
+                "messages": [{"role": "user", "content": test_prompt}],
+                "max_tokens": 10,
+            }
+            resp = requests.post(url, headers=headers, json=payload, timeout=10)
+            print("Groq Raw Status:", resp.status_code)
+            print("Groq Raw Text:", resp.text)
+            resp.raise_for_status()
+            results["Groq"] = "OK"
+        except Exception as e:
+            results["Groq"] = f"Error: {type(e).__name__}: {str(e)}"
+    else:
+        results["Groq"] = "Not Configured"
+
+    # 3. Test Gemini
+    gemini_key = config["local"]["llm"].get("api_key") if config["local"] else None
+    if gemini_key:
+        try:
+            print(f"Testing Gemini (Key: {mask_key(gemini_key)})...")
+            res = call_llm(test_prompt, json_mode=False)
+            results["Gemini"] = "OK" if res else "Empty Response"
+        except Exception as e:
+            err_msg = str(e)
+            if "401" in err_msg:
+                err_msg = "401 Unauthorized (Check your GOOGLE_API_KEY)"
+            results["Gemini"] = f"Error: {err_msg}"
+    else:
+        results["Gemini"] = "Not Configured"
+
+    # 4. Test OpenRouter
     if config.get("openrouter_api_key"):
         try:
             print(

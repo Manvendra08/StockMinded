@@ -98,6 +98,7 @@ data_sources:
     api_key: "${GOOGLE_API_KEY}"
     groq_api_key: "${GROQ_API_KEY}"
     openrouter_api_key: "${OPENROUTER_API_KEY}"
+    sambanova_api_key: "${SAMBANOVA_API_KEY}"
     saas_api_key: "${SCRAPEGRAPHAI_API_KEY}"
 
 options:
