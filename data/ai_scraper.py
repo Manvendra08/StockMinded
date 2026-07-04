@@ -100,6 +100,16 @@ def _get_ai_config() -> Optional[dict]:
         if sambanova_api_key:
             sambanova_api_key = sambanova_api_key.strip().strip("'").strip('"')
 
+        opencode_api_key = cfg.get("opencode_api_key")
+        if (
+            isinstance(opencode_api_key, str)
+            and opencode_api_key.startswith("${")
+            and opencode_api_key.endswith("}")
+        ):
+            opencode_api_key = os.getenv(opencode_api_key[2:-1])
+        if opencode_api_key:
+            opencode_api_key = opencode_api_key.strip().strip("'").strip('"')
+
         # Self-healing Fallback:
         # If the user accidentally set GOOGLE_API_KEY to their ScrapeGraphAI key (starts with 'sgai-')
         # we route it to saas_api_key and clear api_key so the local Gemini LLM doesn't get initialized with it.
@@ -128,6 +138,7 @@ def _get_ai_config() -> Optional[dict]:
             "groq_api_key": groq_api_key,
             "openrouter_api_key": openrouter_api_key,
             "sambanova_api_key": sambanova_api_key,
+            "opencode_api_key": opencode_api_key,
         }
     except Exception as e:
         logger.error(f"Failed to load ScrapeGraphAI config: {e}")
@@ -146,6 +157,10 @@ _SAMBANOVA_MIN_INTERVAL = 30.0  # seconds between SambaNova calls
 _openrouter_last_call_ts: float = 0.0
 _OPENROUTER_MIN_INTERVAL = 15.0  # seconds between OpenRouter calls
 
+# Global rate limiter for OpenCode Zen: max 1 call per 5 seconds (generous free tier)
+_opencode_zen_last_call_ts: float = 0.0
+_OPENCODE_ZEN_MIN_INTERVAL = 5.0  # seconds between OpenCode Zen calls
+
 def _sambanova_rate_limit_wait() -> None:
     """Enforce minimum interval between SambaNova API calls to prevent 429 rate limits.
     
@@ -163,6 +178,21 @@ def _sambanova_rate_limit_wait() -> None:
         )
         time.sleep(wait_time)
     _sambanova_last_call_ts = time.time()
+
+
+def _opencode_zen_rate_limit_wait() -> None:
+    """Enforce minimum interval between OpenCode Zen API calls."""
+    global _opencode_zen_last_call_ts
+    now = time.time()
+    elapsed = now - _opencode_zen_last_call_ts
+    if elapsed < _OPENCODE_ZEN_MIN_INTERVAL:
+        wait_time = (_OPENCODE_ZEN_MIN_INTERVAL - elapsed) + _random.uniform(0.3, 1.0)
+        logger.debug(
+            "OpenCode Zen rate limiter: waiting %.1fs (elapsed=%.1fs)",
+            wait_time, elapsed,
+        )
+        time.sleep(wait_time)
+    _opencode_zen_last_call_ts = time.time()
 
 
 def _openrouter_rate_limit_wait() -> None:
@@ -319,39 +349,155 @@ def call_llm(
     max_tokens: int | None = None,
     return_provider: bool = False,
 ) -> Any:
-    """Universal LLM call with fallback: SambaNova -> Groq -> Gemini -> OpenRouter (8 models)."""
+    """Universal LLM call with fallback: OpenCode Zen -> SambaNova -> Groq -> Gemini -> OpenRouter (8 models)."""
     config = _get_ai_config()
     if not config:
         return (None, "None") if return_provider else None
 
-    # 1. SambaNova (Primary) — OpenAI-compatible, fast inference, free $5 credit
-    # NOTE: Only use models that are actually available on SambaNova's free tier.
-    # DeepSeek-V3.1 and Meta-Llama-3.3-70B-Instruct are confirmed available.
-    # Meta-Llama-3.1-405B-Instruct has limited availability on free tier.
-    # gpt-oss-120b is NOT available on SambaNova (returns 400).
-    SAMBANOVA_MODELS = (
-        "DeepSeek-V3.1",
-        "Meta-Llama-3.3-70B-Instruct",
-        "Meta-Llama-3.1-8B-Instruct",  # Smaller model, more reliable on free tier
+    # 1. OpenCode Zen (Primary) — OpenAI-compatible, free tier, generous rate limits.
+    # Models: big-pickle (general), mimo-v2-pro-free (logic), nemotron-3-super-free (coding)
+    OPENCODE_ZEN_MODELS = (
+        "big-pickle",
+        "mimo-v2-pro-free",
+        "nemotron-3-super-free",
+        "minimax-m2.5-free",
     )
-    if config.get("sambanova_api_key"):
+    if config.get("opencode_api_key"):
         session, backend = _create_curl_cffi_llm_session()
-        for model_id in SAMBANOVA_MODELS:
-            # Check per-model cooldown (skip if recently rate-limited)
-            model_dead_until = _dead_providers.get(f"sambanova:{model_id}")
+        for model_id in OPENCODE_ZEN_MODELS:
+            model_dead_until = _dead_providers.get(f"opencode_zen:{model_id}")
             if model_dead_until and time.time() < model_dead_until:
                 logger.debug(
-                    "SambaNova (%s) marked dead until %.0f; skipping",
+                    "OpenCode Zen (%s) marked dead until %.0f; skipping",
                     model_id,
                     model_dead_until,
                 )
                 continue
 
-            # Enforce rate limiting before each SambaNova call
-            _sambanova_rate_limit_wait()
+            _opencode_zen_rate_limit_wait()
 
             logger.info(
-                "LLM #1: %s [provider=SambaNova] (backend=%s)", model_id, backend
+                "LLM #1: %s [provider=OpenCode Zen] (backend=%s)", model_id, backend
+            )
+            try:
+                url = "https://opencode.ai/zen/v1"
+                headers = {
+                    "Authorization": f"Bearer {config['opencode_api_key']}",
+                    "Content-Type": "application/json",
+                }
+                payload = {
+                    "model": model_id,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "response_format": {"type": "json_object"} if json_mode else None,
+                    "max_tokens": max_tokens,
+                }
+                resp = session.post(url, headers=headers, json=payload, timeout=20)
+                resp.raise_for_status()
+
+                if not resp.content or not resp.content.strip():
+                    raise ValueError("empty response body")
+                resp_data = resp.json()
+
+                if "error" in resp_data:
+                    err_msg = resp_data["error"]
+                    if isinstance(err_msg, dict):
+                        err_msg = err_msg.get("message", str(err_msg))
+                    logger.warning(
+                        "OpenCode Zen (%s) upstream error: %s. Trying next model.",
+                        model_id,
+                        err_msg,
+                    )
+                else:
+                    text = resp_data["choices"][0]["message"]["content"]
+                    if not text or not text.strip():
+                        raise ValueError(
+                            f"OpenCode Zen ({model_id}) returned empty content"
+                        )
+                    res_val = json.loads(text) if json_mode else text
+                    logger.info(
+                        "LLM success: %s [OpenCode Zen] (backend=%s)", model_id, backend
+                    )
+                    return (
+                        (res_val, f"OpenCode Zen ({model_id})")
+                        if return_provider
+                        else res_val
+                    )
+            except Exception as e:
+                if _is_ssl_transport_error(e):
+                    logger.warning(
+                        "OpenCode Zen (%s) SSL error with %s backend: %s. Trying next model.",
+                        model_id,
+                        backend,
+                        e,
+                    )
+                    continue
+
+                if _is_http_error(e):
+                    status = _get_http_status(e)
+                    detail = _get_http_detail(e)
+                    if status == 401:
+                        logger.warning(
+                            "OpenCode Zen returned 401 (unauthorized). Check OPENCODE_API_KEY. Trying SambaNova."
+                        )
+                        break
+                    elif status == 429:
+                        logger.warning(
+                            "OpenCode Zen (%s) rate limited (429). Marking dead for %ds. "
+                            "Trying next model.",
+                            model_id,
+                            _DEAD_PROVIDER_TTL,
+                        )
+                        _mark_provider_dead(f"opencode_zen:{model_id}", _DEAD_PROVIDER_TTL)
+                    else:
+                        logger.warning(
+                            "OpenCode Zen (%s) HTTP error (%s): %s. Trying next model.",
+                            model_id,
+                            status,
+                            detail,
+                        )
+                    continue
+
+                if isinstance(e, json.JSONDecodeError):
+                    logger.warning(
+                        "OpenCode Zen (%s) empty/invalid response: %s. Trying next model.",
+                        model_id,
+                        e,
+                    )
+                    continue
+
+                if isinstance(e, (KeyError, IndexError)):
+                    logger.warning(
+                        "OpenCode Zen (%s) response missing fields: %s. Trying next model.",
+                        model_id,
+                        e,
+                    )
+                    continue
+
+                if isinstance(e, ValueError):
+                    logger.warning("OpenCode Zen (%s) %s. Trying next model.", model_id, e)
+                    continue
+
+                logger.warning(
+                    "OpenCode Zen (%s) call failed: %s. Trying next model.",
+                    model_id,
+                    e,
+                )
+
+    # 2. SambaNova (Fallback 1) — try DeepSeek-V3.1 only
+    _sambanova_model_ttl = 300.0  # shorter TTL for SambaNova
+    if config.get("sambanova_api_key"):
+        model_id = "DeepSeek-V3.1"
+        model_dead_until = _dead_providers.get("sambanova:DeepSeek-V3.1")
+        if model_dead_until and time.time() < model_dead_until:
+            logger.debug("SambaNova marked dead until %.0f; skipping", model_dead_until)
+        else:
+            _sambanova_rate_limit_wait()
+            session, backend = _create_curl_cffi_llm_session()
+            logger.info(
+                "LLM #2: %s [provider=SambaNova] (backend=%s)", model_id, backend
             )
             try:
                 url = "https://api.sambanova.ai/v1/chat/completions"
@@ -372,7 +518,7 @@ def call_llm(
                 resp.raise_for_status()
 
                 if not resp.content or not resp.content.strip():
-                    raise ValueError("empty response body (likely rate-limited)")
+                    raise ValueError("empty response body")
                 resp_data = resp.json()
 
                 if "error" in resp_data:
@@ -380,16 +526,12 @@ def call_llm(
                     if isinstance(err_msg, dict):
                         err_msg = err_msg.get("message", str(err_msg))
                     logger.warning(
-                        "SambaNova (%s) upstream error: %s. Trying next model.",
-                        model_id,
-                        err_msg,
+                        "SambaNova upstream error: %s. Trying Groq.", err_msg,
                     )
                 else:
                     text = resp_data["choices"][0]["message"]["content"]
                     if not text or not text.strip():
-                        raise ValueError(
-                            f"SambaNova ({model_id}) returned empty content"
-                        )
+                        raise ValueError("SambaNova returned empty content")
                     res_val = json.loads(text) if json_mode else text
                     logger.info(
                         "LLM success: %s [SambaNova] (backend=%s)", model_id, backend
@@ -400,89 +542,36 @@ def call_llm(
                         else res_val
                     )
             except Exception as e:
-                # Handle SSL errors (immediate failover, mark backend dead)
                 if _is_ssl_transport_error(e):
                     logger.warning(
-                        "SambaNova (%s) SSL error with %s backend: %s. Trying next model.",
-                        model_id,
-                        backend,
-                        e,
+                        "SambaNova SSL error with %s backend: %s. Trying Groq.",
+                        backend, e,
                     )
-                    continue
-
-                # Handle HTTP errors (works for both requests and curl_cffi)
-                if _is_http_error(e):
+                elif _is_http_error(e):
                     status = _get_http_status(e)
                     detail = _get_http_detail(e)
-                    if status == 401:
+                    if status == 429:
                         logger.warning(
-                            "SambaNova returned 401 (unauthorized). Check SAMBANOVA_API_KEY. Trying Groq."
+                            "SambaNova rate limited (429). Marking dead for %ds. Trying Groq.",
+                            _sambanova_model_ttl,
                         )
-                        break  # No point trying more models with bad key
-                    elif status in (400, 404):
-                        logger.warning(
-                            "SambaNova (%s) not available (%s): %s. Trying next model.",
-                            model_id,
-                            status,
-                            detail,
-                        )
-                    elif status == 429:
-                        # Exponential backoff: 5s, 10s, 20s based on model index
-                        backoff_secs = min(5 * (2 ** list(SAMBANOVA_MODELS).index(model_id)), 30)
-                        logger.warning(
-                            "SambaNova (%s) rate limited (429). Marking dead for %ds. "
-                            "Backing off %.0fs before next model.",
-                            model_id,
-                            _DEAD_PROVIDER_TTL,
-                            backoff_secs,
-                        )
-                        _mark_provider_dead(f"sambanova:{model_id}", _DEAD_PROVIDER_TTL)
-                        time.sleep(backoff_secs)
+                        _mark_provider_dead("sambanova:DeepSeek-V3.1", _sambanova_model_ttl)
                     else:
                         logger.warning(
-                            "SambaNova (%s) HTTP error (%s): %s. Trying next model.",
-                            model_id,
-                            status,
-                            detail,
+                            "SambaNova HTTP error (%s): %s. Trying Groq.",
+                            status, detail,
                         )
-                    continue
+                elif isinstance(e, (json.JSONDecodeError, KeyError, IndexError, ValueError)):
+                    logger.warning("SambaNova call failed: %s. Trying Groq.", e)
+                else:
+                    logger.warning("SambaNova call failed: %s. Trying Groq.", e)
 
-                # Handle JSON/parse errors
-                if isinstance(e, json.JSONDecodeError):
-                    logger.warning(
-                        "SambaNova (%s) empty/invalid response: %s. Trying next model.",
-                        model_id,
-                        e,
-                    )
-                    continue
-
-                # Handle missing fields
-                if isinstance(e, (KeyError, IndexError)):
-                    logger.warning(
-                        "SambaNova (%s) response missing fields: %s. Trying next model.",
-                        model_id,
-                        e,
-                    )
-                    continue
-
-                # Handle value errors (empty content, etc.)
-                if isinstance(e, ValueError):
-                    logger.warning("SambaNova (%s) %s. Trying next model.", model_id, e)
-                    continue
-
-                # Catch-all for unexpected errors
-                logger.warning(
-                    "SambaNova (%s) call failed: %s. Trying next model.",
-                    model_id,
-                    e,
-                )
-
-    # 2. Groq (Fallback 1) — skip if recently dead
+    # 3. Groq (Fallback 2) — skip if recently dead
     groq_dead_until = _dead_providers.get("groq")
     if groq_dead_until and time.time() < groq_dead_until:
         logger.debug("Groq marked dead until %.0f; skipping", groq_dead_until)
     elif config.get("groq_api_key"):
-        logger.info("LLM #2: llama-3.3-70b-versatile [provider=Groq]")
+        logger.info("LLM #3: llama-3.3-70b-versatile [provider=Groq]")
         session, backend = _create_curl_cffi_llm_session()
         try:
             url = "https://api.groq.com/openai/v1/chat/completions"
@@ -544,7 +633,7 @@ def call_llm(
             else:
                 logger.warning("Groq call failed: %s. Trying Gemini.", e)
 
-    # 3. Gemini (Fallback 2)
+    # 4. Gemini (Fallback 3)
     if config["local"] and config["local"]["llm"].get("api_key"):
         session, backend = _create_curl_cffi_llm_session()
         try:
@@ -552,7 +641,7 @@ def call_llm(
             model_raw = config["local"]["llm"].get("model", "gemini-1.5-flash")
             model_name = model_raw.split("/")[-1] if "/" in model_raw else model_raw
             logger.info(
-                "LLM #3: %s [provider=Gemini] (backend=%s)", model_name, backend
+                "LLM #4: %s [provider=Gemini] (backend=%s)", model_name, backend
             )
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
             generation_config = {"response_mime_type": "application/json"}
@@ -624,7 +713,7 @@ def call_llm(
                     e,
                 )
 
-    # 4. OpenRouter Free Models (Fallback 3+) — try multiple models
+    # 5. OpenRouter Free Models (Fallback 4+) — try multiple models
     _OPENROUTER_FALLBACK_MODELS = (
         "google/gemma-4-26b-a4b-it:free",
         "google/gemma-4-31b-it:free",
@@ -652,7 +741,7 @@ def call_llm(
             _openrouter_rate_limit_wait()
 
             logger.info(
-                "LLM #4: %s [provider=OpenRouter] (backend=%s)", model_id, backend
+                "LLM #5: %s [provider=OpenRouter] (backend=%s)", model_id, backend
             )
             try:
                 url = "https://openrouter.ai/api/v1/chat/completions"
@@ -785,12 +874,13 @@ def call_llm(
 
 
 def test_llm_providers():
-    """Diagnostic tool to verify LLM connectivity for SambaNova, Groq, Gemini, and OpenRouter."""
+    """Diagnostic tool to verify LLM connectivity for all configured providers."""
     config = _get_ai_config()
     if not config:
         print("❌ Configuration not found. Check your config.yaml and enabled state.")
         return
 
+    print("DEBUG CONFIG OPENCODE KEY:", repr(config.get("opencode_api_key")))
     print("DEBUG CONFIG SAMBANOVA KEY:", repr(config.get("sambanova_api_key")))
     print("DEBUG CONFIG GROQ KEY:", repr(config.get("groq_api_key")))
     print("DEBUG CONFIG OPENROUTER KEY:", repr(config.get("openrouter_api_key")))
@@ -805,7 +895,33 @@ def test_llm_providers():
             return "***"
         return f"{k[:4]}...{k[-4:]}"
 
-    # 1. Test SambaNova
+    # 1. Test OpenCode Zen
+    if config.get("opencode_api_key"):
+        try:
+            print(
+                f"Testing OpenCode Zen (Key: {mask_key(config['opencode_api_key'])})..."
+            )
+            url = "https://opencode.ai/zen/v1"
+            headers = {
+                "Authorization": f"Bearer {config['opencode_api_key']}",
+                "Content-Type": "application/json",
+            }
+            payload = {
+                "model": "big-pickle",
+                "messages": [{"role": "user", "content": test_prompt}],
+                "max_tokens": 10,
+            }
+            resp = requests.post(url, headers=headers, json=payload, timeout=15)
+            print("OpenCode Zen Raw Status:", resp.status_code)
+            print("OpenCode Zen Raw Text:", resp.text)
+            resp.raise_for_status()
+            results["OpenCode Zen"] = "OK"
+        except Exception as e:
+            results["OpenCode Zen"] = f"Error: {type(e).__name__}: {str(e)}"
+    else:
+        results["OpenCode Zen"] = "Not Configured"
+
+    # 2. Test SambaNova
     if config.get("sambanova_api_key"):
         try:
             print(
@@ -817,7 +933,7 @@ def test_llm_providers():
                 "Content-Type": "application/json",
             }
             payload = {
-                "model": "Meta-Llama-3.3-70B-Instruct",
+                "model": "DeepSeek-V3.1",
                 "messages": [{"role": "user", "content": test_prompt}],
                 "max_tokens": 10,
             }
@@ -831,7 +947,7 @@ def test_llm_providers():
     else:
         results["SambaNova"] = "Not Configured"
 
-    # 2. Test Groq
+    # 3. Test Groq
     if config.get("groq_api_key"):
         try:
             print(f"Testing Groq (Key: {mask_key(config['groq_api_key'])})...")
@@ -840,7 +956,6 @@ def test_llm_providers():
                 "Authorization": f"Bearer {config['groq_api_key']}",
                 "Content-Type": "application/json",
             }
-            print("SENDING GROQ HEADER:", repr(headers))
             payload = {
                 "model": "llama-3.3-70b-versatile",
                 "messages": [{"role": "user", "content": test_prompt}],
@@ -856,7 +971,7 @@ def test_llm_providers():
     else:
         results["Groq"] = "Not Configured"
 
-    # 3. Test Gemini
+    # 4. Test Gemini
     gemini_key = config["local"]["llm"].get("api_key") if config["local"] else None
     if gemini_key:
         try:
@@ -871,73 +986,7 @@ def test_llm_providers():
     else:
         results["Gemini"] = "Not Configured"
 
-    # 3. Test SambaNova
-    if config.get("sambanova_api_key"):
-        try:
-            print(
-                f"Testing SambaNova (Key: {mask_key(config['sambanova_api_key'])})..."
-            )
-            url = "https://api.sambanova.ai/v1/chat/completions"
-            headers = {
-                "Authorization": f"Bearer {config['sambanova_api_key']}",
-                "Content-Type": "application/json",
-            }
-            payload = {
-                "model": "Meta-Llama-3.3-70B-Instruct",
-                "messages": [{"role": "user", "content": test_prompt}],
-                "max_tokens": 10,
-            }
-            resp = requests.post(url, headers=headers, json=payload, timeout=15)
-            print("SambaNova Raw Status:", resp.status_code)
-            print("SambaNova Raw Text:", resp.text)
-            resp.raise_for_status()
-            results["SambaNova"] = "OK"
-        except Exception as e:
-            results["SambaNova"] = f"Error: {type(e).__name__}: {str(e)}"
-    else:
-        results["SambaNova"] = "Not Configured"
-
-    # 2. Test Groq
-    if config.get("groq_api_key"):
-        try:
-            print(f"Testing Groq (Key: {mask_key(config['groq_api_key'])})...")
-            url = "https://api.groq.com/openai/v1/chat/completions"
-            headers = {
-                "Authorization": f"Bearer {config['groq_api_key']}",
-                "Content-Type": "application/json",
-            }
-            print("SENDING GROQ HEADER:", repr(headers))
-            payload = {
-                "model": "llama-3.3-70b-versatile",
-                "messages": [{"role": "user", "content": test_prompt}],
-                "max_tokens": 10,
-            }
-            resp = requests.post(url, headers=headers, json=payload, timeout=10)
-            print("Groq Raw Status:", resp.status_code)
-            print("Groq Raw Text:", resp.text)
-            resp.raise_for_status()
-            results["Groq"] = "OK"
-        except Exception as e:
-            results["Groq"] = f"Error: {type(e).__name__}: {str(e)}"
-    else:
-        results["Groq"] = "Not Configured"
-
-    # 3. Test Gemini
-    gemini_key = config["local"]["llm"].get("api_key") if config["local"] else None
-    if gemini_key:
-        try:
-            print(f"Testing Gemini (Key: {mask_key(gemini_key)})...")
-            res = call_llm(test_prompt, json_mode=False)
-            results["Gemini"] = "OK" if res else "Empty Response"
-        except Exception as e:
-            err_msg = str(e)
-            if "401" in err_msg:
-                err_msg = "401 Unauthorized (Check your GOOGLE_API_KEY)"
-            results["Gemini"] = f"Error: {err_msg}"
-    else:
-        results["Gemini"] = "Not Configured"
-
-    # 4. Test OpenRouter
+    # 5. Test OpenRouter
     if config.get("openrouter_api_key"):
         try:
             print(
