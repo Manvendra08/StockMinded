@@ -380,7 +380,7 @@ def call_llm(
                 "LLM #1: %s [provider=OpenCode Zen] (backend=%s)", model_id, backend
             )
             try:
-                url = "https://opencode.ai/zen/v1"
+                url = "https://opencode.ai/zen/v1/chat/completions"
                 headers = {
                     "Authorization": f"Bearer {config['opencode_api_key']}",
                     "Content-Type": "application/json",
@@ -901,7 +901,7 @@ def test_llm_providers():
             print(
                 f"Testing OpenCode Zen (Key: {mask_key(config['opencode_api_key'])})..."
             )
-            url = "https://opencode.ai/zen/v1"
+            url = "https://opencode.ai/zen/v1/chat/completions"
             headers = {
                 "Authorization": f"Bearer {config['opencode_api_key']}",
                 "Content-Type": "application/json",
