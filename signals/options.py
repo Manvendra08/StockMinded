@@ -206,7 +206,12 @@ def chain_snapshot(symbol, target_expiries=None, target_strikes=None) -> pd.Data
     skip_filter = target_strikes is not None
     raw = option_chain(symbol, _skip_atm_filter=skip_filter)
     records = raw.get("records", {}).get("data", [])
-    underlying_value = raw.get("records", {}).get("underlyingValue") or 0.0
+    underlying_value = (
+        raw.get("records", {}).get("underlyingValue")
+        or raw.get("underlying_price")
+        or raw.get("filtered", {}).get("underlying_price")
+        or 0.0
+    )
     if not records:
         return pd.DataFrame()
     expiries = list(set(r.get("expiryDate") for r in records if "expiryDate" in r))
@@ -329,10 +334,10 @@ def chain_snapshot(symbol, target_expiries=None, target_strikes=None) -> pd.Data
 
         ce = rec.get("CE", {})
         pe = rec.get("PE", {})
-        ce_iv = ce.get("impliedVolatility", 0) / 100.0
-        pe_iv = pe.get("impliedVolatility", 0) / 100.0
-        ce_ltp = ce.get("lastPrice", 0)
-        pe_ltp = pe.get("lastPrice", 0)
+        ce_iv = (ce.get("impliedVolatility") or 0.0) / 100.0
+        pe_iv = (pe.get("impliedVolatility") or 0.0) / 100.0
+        ce_ltp = ce.get("lastPrice") or 0.0
+        pe_ltp = pe.get("lastPrice") or 0.0
         ce_delta = 0.0
         pe_delta = 0.0
         ce_synthetic = False

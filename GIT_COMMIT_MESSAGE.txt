@@ -1,0 +1,36 @@
+Implement Phase 1: Late-entry timing gates with VWAP/RSI/exhaustion checks
+
+Reduce bot losses from chasing/exhausted entries by adding timing validation to:
+- Alert generation (_generate_trade_alerts): Skip overextended candidates
+- Trade entry (auto_enter_from_alerts): Gate trades on timing_ok flag
+- Journal schema: Track entry_quality + timing_snapshot for backtest
+
+Changes include:
+- CFG-101: Added timing_engine config section (VWAP, RSI, exhaustion thresholds)
+- SIG-201: New signals/timing.py module with 7 timing check functions
+- SRV-301: Timing gate integration in dashboard/server.py alerts
+- PT-401: Trade entry gating + size multiplier in paper_trader.py
+- JRN-601: Extended ops/journal.py with entry_quality columns + methods
+- New unit tests in tests/unit/test_timing.py (19 tests)
+
+Design principles:
+- Fail-open: Missing data defaults to timing_ok=True (never block trades on unavailable data)
+- Multi-check: All 4 checks (VWAP, RSI, distance, exhaustion) must pass
+- Event-risk mode: High exhaustion (>0.6) triggers 0.5x size reduction
+- Backward compatible: Config optional, journal columns nullable
+
+Success metrics:
+- 5–15% of alerts expected to skip (overextended)
+- Entry quality labels enable root-cause backtest analysis
+- Target: Next 20 trades show MFE > 0.5% in first 60 mins (vs current ~–1.5%)
+
+Files modified: 6
+- config/config.yaml
+- signals/timing.py (new content)
+- dashboard/server.py
+- dashboard/paper_trader.py
+- ops/journal.py
+- tests/unit/test_timing.py (new)
+
+Documentation: PHASE1_IMPLEMENTATION_SUMMARY.md
+Technical Spec: Technical Spec: Fast-Market Timing Upgrade for StockMinded.md

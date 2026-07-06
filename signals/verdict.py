@@ -44,9 +44,11 @@ class NiftyVerdict:
 class CombinedVerdict:
     stock: StockVerdict
     nifty: NiftyVerdict
+    nifty_heavyweight_momentum: float | None = None
+    banknifty_heavyweight_momentum: float | None = None
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "stock": asdict(self.stock),
             "nifty": asdict(self.nifty),
             # Keep legacy top-level fields for dashboard compatibility
@@ -60,6 +62,11 @@ class CombinedVerdict:
             if self.stock.can_trade
             else self.nifty.confidence,
         }
+        if self.nifty_heavyweight_momentum is not None:
+            d["nifty_heavyweight_momentum"] = self.nifty_heavyweight_momentum
+        if self.banknifty_heavyweight_momentum is not None:
+            d["banknifty_heavyweight_momentum"] = self.banknifty_heavyweight_momentum
+        return d
 
 
 def _num(v, default=0.0) -> float:
@@ -76,6 +83,19 @@ def _get_val(obj, key, default=None):
 
 
 def build_trade_verdict(data: dict) -> CombinedVerdict:
+    # Fetch index heavyweight momentum
+    nifty_momentum = None
+    banknifty_momentum = None
+    try:
+        from signals.index_weightage import calculate_weighted_momentum
+        nifty_mom_data = calculate_weighted_momentum("NIFTY")
+        banknifty_mom_data = calculate_weighted_momentum("BANKNIFTY")
+        nifty_momentum = nifty_mom_data.get("weighted_momentum")
+        banknifty_momentum = banknifty_mom_data.get("weighted_momentum")
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("Failed to calculate heavyweight momentum in verdict: %s", e)
+
     regime = data.get("regime", {}) or {}
     flows = data.get("flows", {}) or {}
     structure = data.get("structure", {}) or {}
@@ -183,6 +203,17 @@ def build_trade_verdict(data: dict) -> CombinedVerdict:
                 stock_reasons_extra = [
                     f"AI sentiment BEARISH ({ai_conf_lbl}) — caution on long entries"
                 ]
+            # Heavyweight Momentum adjustment
+            if nifty_momentum is not None:
+                if nifty_momentum < -0.25:
+                    stock_conf = "MEDIUM" if stock_conf == "HIGH" else "LOW"
+                    stock_reasons_extra.append(
+                        f"Nifty heavyweight momentum bearish ({nifty_momentum:+.2f}%) — caution on longs"
+                    )
+                elif nifty_momentum > 0.25:
+                    stock_reasons_extra.append(
+                        f"Nifty heavyweight momentum bullish ({nifty_momentum:+.2f}%) aligns with longs"
+                    )
             stock_strategy = "Long A-Grade leaders with RS Slope > 50."
         elif regime_name == "TREND_DOWN" and trend <= -3 and breadth <= 55:
             stock_action = "SHORT_ONLY"
@@ -206,6 +237,17 @@ def build_trade_verdict(data: dict) -> CombinedVerdict:
                 stock_reasons_extra = [
                     f"AI sentiment BULLISH ({ai_conf_lbl}) — caution on short entries"
                 ]
+            # Heavyweight Momentum adjustment
+            if nifty_momentum is not None:
+                if nifty_momentum > 0.25:
+                    stock_conf = "MEDIUM" if stock_conf == "HIGH" else "LOW"
+                    stock_reasons_extra.append(
+                        f"Nifty heavyweight momentum bullish ({nifty_momentum:+.2f}%) — caution on shorts"
+                    )
+                elif nifty_momentum < -0.25:
+                    stock_reasons_extra.append(
+                        f"Nifty heavyweight momentum bearish ({nifty_momentum:+.2f}%) aligns with shorts"
+                    )
             stock_strategy = "Short A-Grade laggards with RS Slope < -50."
         elif regime_name in ("RANGE_HIGH_VOL", "RANGE_LOW_VOL", "VOL_CONTRACTION"):
             # Range regimes: directional stock picking only when leadership is
@@ -359,4 +401,9 @@ def build_trade_verdict(data: dict) -> CombinedVerdict:
         blocks=nifty_blocks,
     )
 
-    return CombinedVerdict(stock=stock_v, nifty=nifty_v)
+    return CombinedVerdict(
+        stock=stock_v,
+        nifty=nifty_v,
+        nifty_heavyweight_momentum=nifty_momentum,
+        banknifty_heavyweight_momentum=banknifty_momentum
+    )

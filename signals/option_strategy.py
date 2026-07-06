@@ -942,6 +942,13 @@ def _resolve_structure(
                     ]
                     setup.short_strikes = [s_strike]
 
+    # Guard: if any leg has zero/corrupt premium, mark setup as not suitable
+    if resolved_legs and any(l.premium <= 0.0 for l in resolved_legs):
+        setup.suitable = False
+        setup.skip_reason = "One or more legs have zero or corrupt premium"
+        setup.legs = []
+        return setup
+
     setup.legs = resolved_legs
     setup.net_credit = max(0, net_credit)
     setup.max_loss_rupees = max(0, max_loss)

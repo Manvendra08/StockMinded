@@ -90,8 +90,12 @@ def load_config(path: str | None = None) -> dict:
 def fetch_dhan_public_universe() -> list[str]:
     import json
     import re
+    import logging
 
-    import requests
+    try:
+        from curl_cffi import requests as curl_requests
+    except ImportError:
+        import requests as curl_requests
 
     symbols = set()
     headers = {
@@ -100,11 +104,15 @@ def fetch_dhan_public_universe() -> list[str]:
 
     # Fetch page 1 from raw HTML
     try:
-        # BUG-37 FIX: Increased timeout from 5s to 15s. Dhan can be slow
-        # under load; 5s caused frequent timeouts and unnecessary CSV fallback.
-        r = requests.get(
-            "https://dhan.co/futures-stocks-list/", headers=headers, timeout=15
-        )
+        if hasattr(curl_requests, "Session"):
+            session = curl_requests.Session(impersonate="chrome120")
+            r = session.get(
+                "https://dhan.co/futures-stocks-list/", headers=headers, timeout=15
+            )
+        else:
+            r = curl_requests.get(
+                "https://dhan.co/futures-stocks-list/", headers=headers, timeout=15
+            )
         if r.status_code == 200:
             match = re.search(
                 r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', r.text, re.DOTALL
@@ -149,8 +157,11 @@ def fetch_dhan_public_universe() -> list[str]:
             }
         }
         try:
-            # BUG-37 FIX: Increased timeout from 5s to 15s (see above).
-            r = requests.post(post_url, headers=post_headers, json=payload, timeout=15)
+            if hasattr(curl_requests, "Session"):
+                session = curl_requests.Session(impersonate="chrome120")
+                r = session.post(post_url, headers=post_headers, json=payload, timeout=15)
+            else:
+                r = curl_requests.post(post_url, headers=post_headers, json=payload, timeout=15)
             if r.status_code == 200:
                 for item in r.json().get("data", []):
                     sym = item.get("Sym")

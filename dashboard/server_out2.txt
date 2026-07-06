@@ -1,0 +1,850 @@
+ * Serving Flask app 'server'
+ * Debug mode: off
+WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5050
+ * Running on http://172.20.10.2:5050
+Press CTRL+C to quit
+[shoonya] GenAcsTok failed: {'stat': 'Not_Ok', 'emsg': 'Invalid Input : INVALID_IP', 'uid': 'FA369105'}
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+127.0.0.1 - - [26/Jun/2026 20:06:10] "GET /api/option-chain?symbol=NIFTY HTTP/1.1" 200 -
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+127.0.0.1 - - [26/Jun/2026 20:06:27] "GET /api/option-chain?symbol=NIFTY HTTP/1.1" 200 -
+127.0.0.1 - - [26/Jun/2026 20:06:39] "GET /api/dashboard HTTP/1.1" 200 -
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+127.0.0.1 - - [26/Jun/2026 20:07:21] "GET /api/dashboard HTTP/1.1" 200 -
+Groq SSL error: HTTPSConnectionPool(host='api.groq.com', port=443): Max retries exceeded with url: /openai/v1/chat/completions (Caused by SSLError(SSLEOFError(8, '[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1000)'))). Marking dead for 300.0s. Trying Gemini.
+Gemini LLM call failed unexpectedly: HTTPSConnectionPool(host='generativelanguage.googleapis.com', port=443): Max retries exceeded with url: /v1beta/models/gemini-2.5-flash-lite:generateContent?key=AIzaSyCqT-1BkUpwmghl6HQH7d5YXkHaYNmnBWU (Caused by SSLError(SSLEOFError(8, '[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1000)'))). Trying OpenRouter.
+Traceback (most recent call last):
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\connectionpool.py", line 464, in _make_request
+    self._validate_conn(conn)
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\connectionpool.py", line 1093, in _validate_conn
+    conn.connect()
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\connection.py", line 796, in connect
+    sock_and_verified = _ssl_wrap_socket_and_match_hostname(
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\connection.py", line 975, in _ssl_wrap_socket_and_match_hostname
+    ssl_sock = ssl_wrap_socket(
+               ^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\util\ssl_.py", line 483, in ssl_wrap_socket
+    ssl_sock = _ssl_wrap_socket_impl(sock, context, tls_in_tls, server_hostname)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\util\ssl_.py", line 527, in _ssl_wrap_socket_impl
+    return ssl_context.wrap_socket(sock, server_hostname=server_hostname)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\ssl.py", line 455, in wrap_socket
+    return self.sslsocket_class._create(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\ssl.py", line 1046, in _create
+    self.do_handshake()
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\ssl.py", line 1321, in do_handshake
+    self._sslobj.do_handshake()
+ssl.SSLEOFError: [SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1000)
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\connectionpool.py", line 787, in urlopen
+    response = self._make_request(
+               ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\connectionpool.py", line 488, in _make_request
+    raise new_e
+urllib3.exceptions.SSLError: [SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1000)
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\requests\adapters.py", line 645, in send
+    resp = conn.urlopen(
+           ^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\connectionpool.py", line 871, in urlopen
+    return self.urlopen(
+           ^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\connectionpool.py", line 841, in urlopen
+    retries = retries.increment(
+              ^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\util\retry.py", line 535, in increment
+    raise MaxRetryError(_pool, url, reason) from reason  # type: ignore[arg-type]
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+urllib3.exceptions.MaxRetryError: HTTPSConnectionPool(host='generativelanguage.googleapis.com', port=443): Max retries exceeded with url: /v1beta/models/gemini-2.5-flash-lite:generateContent?key=AIzaSyCqT-1BkUpwmghl6HQH7d5YXkHaYNmnBWU (Caused by SSLError(SSLEOFError(8, '[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1000)')))
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\manve\Downloads\StockMinded\data\ai_scraper.py", line 233, in call_llm
+    resp = session.post(url, json=payload, timeout=15)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\requests\sessions.py", line 640, in post
+    return self.request("POST", url, data=data, json=json, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\requests\sessions.py", line 592, in request
+    resp = self.send(prep, **send_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\requests\sessions.py", line 706, in send
+    r = adapter.send(request, **kwargs)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\requests\adapters.py", line 676, in send
+    raise SSLError(e, request=request)
+requests.exceptions.SSLError: HTTPSConnectionPool(host='generativelanguage.googleapis.com', port=443): Max retries exceeded with url: /v1beta/models/gemini-2.5-flash-lite:generateContent?key=AIzaSyCqT-1BkUpwmghl6HQH7d5YXkHaYNmnBWU (Caused by SSLError(SSLEOFError(8, '[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1000)')))
+OpenRouter LLM HTTP error (404): {"error":{"message":"No endpoints found for google/gemini-2.0-flash-exp:free.","code":404},"user_id":"user_3DgCrBLzxA6lfXxpwCx1TeXlhH8"}. Headers: {'Date': 'Fri, 26 Jun 2026 14:39:42 GMT', 'Content-Type': 'application/json', 'Transfer-Encoding': 'chunked', 'Connection': 'keep-alive', 'Access-Control-Allow-Origin': '*', 'Access-Control-Expose-Headers': 'X-Generation-Id,cf-ray', 'Permissions-Policy': 'payment=(self "https://checkout.stripe.com" "https://connect-js.stripe.com" "https://js.stripe.com" "https://*.js.stripe.com" "https://hooks.stripe.com")', 'Referrer-Policy': 'no-referrer, strict-origin-when-cross-origin', 'X-Content-Type-Options': 'nosniff', 'Content-Encoding': 'gzip', 'Server': 'cloudflare', 'CF-RAY': 'a11cf6821b403b6d-BOM'}.
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+127.0.0.1 - - [26/Jun/2026 20:09:49] "GET /api/option-chain?symbol=NIFTY HTTP/1.1" 200 -
+127.0.0.1 - - [26/Jun/2026 20:09:49] "GET /api/dashboard HTTP/1.1" 200 -
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+Gemini LLM call failed unexpectedly: HTTPSConnectionPool(host='generativelanguage.googleapis.com', port=443): Max retries exceeded with url: /v1beta/models/gemini-2.5-flash-lite:generateContent?key=AIzaSyCqT-1BkUpwmghl6HQH7d5YXkHaYNmnBWU (Caused by ResponseError('too many 503 error responses')). Trying OpenRouter.
+urllib3.exceptions.ResponseError: too many 503 error responses
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\requests\adapters.py", line 645, in send
+    resp = conn.urlopen(
+           ^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\connectionpool.py", line 871, in urlopen
+    return self.urlopen(
+           ^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\connectionpool.py", line 932, in urlopen
+    retries = retries.increment(method, url, response=response, _pool=self)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\util\retry.py", line 535, in increment
+    raise MaxRetryError(_pool, url, reason) from reason  # type: ignore[arg-type]
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+urllib3.exceptions.MaxRetryError: HTTPSConnectionPool(host='generativelanguage.googleapis.com', port=443): Max retries exceeded with url: /v1beta/models/gemini-2.5-flash-lite:generateContent?key=AIzaSyCqT-1BkUpwmghl6HQH7d5YXkHaYNmnBWU (Caused by ResponseError('too many 503 error responses'))
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\manve\Downloads\StockMinded\data\ai_scraper.py", line 233, in call_llm
+    resp = session.post(url, json=payload, timeout=15)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\requests\sessions.py", line 640, in post
+    return self.request("POST", url, data=data, json=json, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\requests\sessions.py", line 592, in request
+    resp = self.send(prep, **send_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\requests\sessions.py", line 706, in send
+    r = adapter.send(request, **kwargs)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\requests\adapters.py", line 669, in send
+    raise RetryError(e, request=request)
+requests.exceptions.RetryError: HTTPSConnectionPool(host='generativelanguage.googleapis.com', port=443): Max retries exceeded with url: /v1beta/models/gemini-2.5-flash-lite:generateContent?key=AIzaSyCqT-1BkUpwmghl6HQH7d5YXkHaYNmnBWU (Caused by ResponseError('too many 503 error responses'))
+OpenRouter LLM HTTP error (404): {"error":{"message":"No endpoints found for google/gemini-2.0-flash-exp:free.","code":404},"user_id":"user_3DgCrBLzxA6lfXxpwCx1TeXlhH8"}. Headers: {'Date': 'Fri, 26 Jun 2026 14:40:37 GMT', 'Content-Type': 'application/json', 'Transfer-Encoding': 'chunked', 'Connection': 'keep-alive', 'Access-Control-Allow-Origin': '*', 'Access-Control-Expose-Headers': 'X-Generation-Id,cf-ray', 'Permissions-Policy': 'payment=(self "https://checkout.stripe.com" "https://connect-js.stripe.com" "https://js.stripe.com" "https://*.js.stripe.com" "https://hooks.stripe.com")', 'Referrer-Policy': 'no-referrer, strict-origin-when-cross-origin', 'X-Content-Type-Options': 'nosniff', 'Content-Encoding': 'gzip', 'Server': 'cloudflare', 'CF-RAY': 'a11cf7d65be62e2c-BOM'}.
+127.0.0.1 - - [26/Jun/2026 20:12:18] "GET /api/dashboard HTTP/1.1" 200 -
+[option_chain public dhan] BANKNIFTY: no future expiries found in opsum; returning empty
+127.0.0.1 - - [26/Jun/2026 20:12:33] "GET /api/option-chain?symbol=BANKNIFTY HTTP/1.1" 200 -
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+127.0.0.1 - - [26/Jun/2026 20:14:08] "GET /api/refresh HTTP/1.1" 200 -
+127.0.0.1 - - [26/Jun/2026 20:14:19] "GET /api/dashboard HTTP/1.1" 200 -
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+$NIFTY_PVT_BANK.NS: possibly delisted; no price data found  (period=6mo)
+
+1 Failed download:
+['NIFTY_PVT_BANK.NS']: possibly delisted; no price data found  (period=6mo)
+[shoonya] GenAcsTok failed: {'stat': 'Not_Ok', 'emsg': 'Invalid Input : INVALID_IP', 'uid': 'FA369105'}
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+$^CNXIT: possibly delisted; no price data found  (period=6mo)
+
+1 Failed download:
+$JSWSTEEL.NS: possibly delisted; no price data found  (period=6mo)
+['^CNXIT']: possibly delisted; no price data found  (period=6mo)
+
+1 Failed download:
+['JSWSTEEL.NS']: possibly delisted; no price data found  (period=6mo)
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+[shoonya] GenAcsTok failed: {'stat': 'Not_Ok', 'emsg': 'Invalid Input : INVALID_IP', 'uid': 'FA369105'}
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+$^CNXFMCG: possibly delisted; no price data found  (period=6mo)
+
+1 Failed download:
+['^CNXFMCG']: possibly delisted; no price data found  (period=6mo)
+$^NSEI: possibly delisted; no price data found  (period=2y)
+
+1 Failed download:
+['^NSEI']: possibly delisted; no price data found  (period=2y)
+[shoonya] GenAcsTok failed: {'stat': 'Not_Ok', 'emsg': 'Invalid Input : INVALID_IP', 'uid': 'FA369105'}
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+$^CNXENERGY: possibly delisted; no price data found  (period=6mo)
+
+1 Failed download:
+['^CNXENERGY']: possibly delisted; no price data found  (period=6mo)
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+$^NSEI: possibly delisted; no price data found  (period=1mo)
+
+1 Failed download:
+['^NSEI']: possibly delisted; no price data found  (period=1mo)
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+$^CNXAUTO: possibly delisted; no price data found  (period=6mo)
+
+1 Failed download:
+['^CNXAUTO']: possibly delisted; no price data found  (period=6mo)
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+127.0.0.1 - - [26/Jun/2026 21:28:49] "GET /favicon.ico HTTP/1.1" 204 -
+127.0.0.1 - - [26/Jun/2026 21:28:51] "GET /paper HTTP/1.1" 304 -
+127.0.0.1 - - [26/Jun/2026 21:28:52] "GET /api/telegram/status HTTP/1.1" 200 -
+127.0.0.1 - - [26/Jun/2026 21:28:52] "GET /api/dashboard HTTP/1.1" 200 -
+127.0.0.1 - - [26/Jun/2026 21:28:52] "GET /api/paper/settings HTTP/1.1" 200 -
+127.0.0.1 - - [26/Jun/2026 21:28:52] "GET /api/paper/trades HTTP/1.1" 200 -
+127.0.0.1 - - [26/Jun/2026 21:28:53] "GET /api/paper/history HTTP/1.1" 200 -
+127.0.0.1 - - [26/Jun/2026 21:28:53] "GET /favicon.ico HTTP/1.1" 204 -
+127.0.0.1 - - [26/Jun/2026 21:28:53] "GET /api/paper/trades HTTP/1.1" 200 -
+127.0.0.1 - - [26/Jun/2026 21:28:53] "GET /api/paper/skipped HTTP/1.1" 200 -
+127.0.0.1 - - [26/Jun/2026 21:28:54] "GET /api/paper/trades HTTP/1.1" 200 -
+NewsAPI: request failed: HTTPSConnectionPool(host='newsapi.org', port=443): Max retries exceeded with url: /v2/everything?q=%28NSE+OR+BSE+OR+sensex+OR+nifty%29+AND+%28stock+OR+market+OR+finance+OR+trading%29&apiKey=86621d360fb443ac821fbd3bbf9cf521&pageSize=50&sortBy=publishedAt&language=en&from=2026-06-24T15%3A58%3A53 (Caused by SSLError(SSLEOFError(8, '[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1000)')))
+Way2Wealth news fetch failed: Failed to perform, curl: (28) Connection timed out after 20016 milliseconds. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+127.0.0.1 - - [26/Jun/2026 21:29:13] "GET /api/news/headlines HTTP/1.1" 200 -
+[shoonya] GenAcsTok failed: {'stat': 'Not_Ok', 'emsg': 'Invalid Input : INVALID_IP', 'uid': 'FA369105'}
+[option_chain public dhan] BANKNIFTY: no future expiries found in opsum; returning empty
+[shoonya] GenAcsTok failed: {'stat': 'Not_Ok', 'emsg': 'Invalid Input : INVALID_IP', 'uid': 'FA369105'}
+BANKNIFTY: target expiries ['2016-06-30'] not in chain; falling back to 2026-06-30
+[option_chain public dhan] BANKNIFTY: no future expiries found in opsum; returning empty
+BANKNIFTY: target expiries ['2016-06-30'] not in chain; falling back to 2026-06-30
+[shoonya] GenAcsTok failed: {'stat': 'Not_Ok', 'emsg': 'Invalid Input : INVALID_IP', 'uid': 'FA369105'}
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+NIFTY: target expiries ['2016-06-30'] not in chain; falling back to 2026-06-30
+127.0.0.1 - - [26/Jun/2026 21:29:36] "GET /api/options/structures HTTP/1.1" 200 -
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+NIFTY: target expiries ['2016-06-30'] not in chain; falling back to 2026-06-30
+127.0.0.1 - - [26/Jun/2026 21:29:40] "GET /api/options/structures HTTP/1.1" 200 -
+[shoonya] GenAcsTok failed: {'stat': 'Not_Ok', 'emsg': 'Invalid Input : INVALID_IP', 'uid': 'FA369105'}
+[shoonya] GenAcsTok failed: {'stat': 'Not_Ok', 'emsg': 'Invalid Input : INVALID_IP', 'uid': 'FA369105'}
+[option_chain public dhan] BANKNIFTY: no future expiries found in opsum; returning empty
+[option_chain public dhan] BANKNIFTY: no future expiries found in opsum; returning empty
+BANKNIFTY: target expiries ['2016-06-30'] not in chain; falling back to 2026-06-30
+BANKNIFTY: target expiries ['2016-06-30'] not in chain; falling back to 2026-06-30
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+NIFTY: target expiries ['2016-06-30'] not in chain; falling back to 2026-06-30
+127.0.0.1 - - [26/Jun/2026 21:29:58] "GET /api/options/structures HTTP/1.1" 200 -
+NIFTY: target expiries ['2016-06-30'] not in chain; falling back to 2026-06-30
+127.0.0.1 - - [26/Jun/2026 21:29:58] "GET /api/options/structures HTTP/1.1" 200 -
+127.0.0.1 - - [26/Jun/2026 21:30:00] "GET /api/paper/open HTTP/1.1" 200 -
+127.0.0.1 - - [26/Jun/2026 21:30:04] "GET /api/paper/open HTTP/1.1" 200 -
+127.0.0.1 - - [26/Jun/2026 21:30:09] "GET /api/paper/open HTTP/1.1" 200 -
+[shoonya] auth_code not found. Final URL: https://api.shoonya.com/NorenWClientAPI/GetAuthCode
+[shoonya] Failed to obtain auth_code
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+$INDHOTEL.NS: possibly delisted; no price data found  (period=5d)
+127.0.0.1 - - [26/Jun/2026 21:31:11] "GET /api/paper/open HTTP/1.1" 200 -
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+$^CNXIT: possibly delisted; no price data found  (period=6mo)
+
+1 Failed download:
+['^CNXIT']: possibly delisted; no price data found  (period=6mo)
+$IEX.NS: possibly delisted; no price data found  (period=6mo)
+$^CNXINFRA: possibly delisted; no price data found  (period=6mo)
+
+1 Failed download:
+['^CNXINFRA']: possibly delisted; no price data found  (period=6mo)
+$KFINTECH.NS: possibly delisted; no price data found  (period=6mo)
+
+2 Failed downloads:
+['IEX.NS', 'KFINTECH.NS']: possibly delisted; no price data found  (period=6mo)
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+127.0.0.1 - - [26/Jun/2026 21:43:56] "GET /api/telegram/status HTTP/1.1" 200 -
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+[shoonya] GenAcsTok failed: {'stat': 'Not_Ok', 'emsg': 'Invalid Input : INVALID_IP', 'uid': 'FA369105'}
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+$^CNXPHARMA: possibly delisted; no price data found  (period=6mo)
+
+1 Failed download:
+['^CNXPHARMA']: possibly delisted; no price data found  (period=6mo)
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+127.0.0.1 - - [26/Jun/2026 21:58:52] "GET /api/telegram/status HTTP/1.1" 200 -
+$^CNXMETAL: possibly delisted; no price data found  (period=6mo)
+
+1 Failed download:
+['^CNXMETAL']: possibly delisted; no price data found  (period=6mo)
+$^NSEI: possibly delisted; no price data found  (period=2y)
+
+1 Failed download:
+['^NSEI']: possibly delisted; no price data found  (period=2y)
+[shoonya] GenAcsTok failed: {'stat': 'Not_Ok', 'emsg': 'Invalid Input : INVALID_IP', 'uid': 'FA369105'}
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+$^NSEI: possibly delisted; no price data found  (period=1y)
+
+1 Failed download:
+['^NSEI']: possibly delisted; no price data found  (period=1y)
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+127.0.0.1 - - [26/Jun/2026 22:09:09] "GET /paper HTTP/1.1" 304 -
+127.0.0.1 - - [26/Jun/2026 22:09:10] "GET /api/telegram/status HTTP/1.1" 200 -
+127.0.0.1 - - [26/Jun/2026 22:09:10] "GET /api/dashboard HTTP/1.1" 200 -
+127.0.0.1 - - [26/Jun/2026 22:09:10] "GET /api/paper/settings HTTP/1.1" 200 -
+127.0.0.1 - - [26/Jun/2026 22:09:11] "GET /api/paper/history HTTP/1.1" 200 -
+127.0.0.1 - - [26/Jun/2026 22:09:12] "GET /favicon.ico HTTP/1.1" 204 -
+127.0.0.1 - - [26/Jun/2026 22:09:12] "GET /api/paper/skipped HTTP/1.1" 200 -
+127.0.0.1 - - [26/Jun/2026 22:09:12] "GET /api/paper/trades HTTP/1.1" 200 -
+127.0.0.1 - - [26/Jun/2026 22:09:14] "GET /api/paper/trades HTTP/1.1" 200 -
+127.0.0.1 - - [26/Jun/2026 22:09:17] "GET /api/paper/trades HTTP/1.1" 200 -
+[option_chain public dhan] BANKNIFTY: no future expiries found in opsum; returning empty
+BANKNIFTY: target expiries ['2016-06-30'] not in chain; falling back to 2026-06-30
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+NIFTY: target expiries ['2016-06-30'] not in chain; falling back to 2026-06-30
+127.0.0.1 - - [26/Jun/2026 22:09:23] "GET /api/options/structures HTTP/1.1" 200 -
+[option_chain public dhan] BANKNIFTY: no future expiries found in opsum; returning empty
+BANKNIFTY: target expiries ['2016-06-30'] not in chain; falling back to 2026-06-30
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+NIFTY: target expiries ['2016-06-30'] not in chain; falling back to 2026-06-30
+127.0.0.1 - - [26/Jun/2026 22:09:32] "GET /api/options/structures HTTP/1.1" 200 -
+NewsAPI: request failed: HTTPSConnectionPool(host='newsapi.org', port=443): Max retries exceeded with url: /v2/everything?q=%28NSE+OR+BSE+OR+sensex+OR+nifty%29+AND+%28stock+OR+market+OR+finance+OR+trading%29&apiKey=86621d360fb443ac821fbd3bbf9cf521&pageSize=50&sortBy=publishedAt&language=en&from=2026-06-24T16%3A39%3A12 (Caused by SSLError(SSLEOFError(8, '[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1000)')))
+127.0.0.1 - - [26/Jun/2026 22:09:39] "GET /api/news/headlines HTTP/1.1" 200 -
+Groq SSL error: HTTPSConnectionPool(host='api.groq.com', port=443): Max retries exceeded with url: /openai/v1/chat/completions (Caused by SSLError(SSLEOFError(8, '[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1000)'))). Marking dead for 300.0s. Trying Gemini.
+127.0.0.1 - - [26/Jun/2026 22:10:05] "GET /api/paper/open HTTP/1.1" 200 -
+Gemini LLM call failed unexpectedly: HTTPSConnectionPool(host='generativelanguage.googleapis.com', port=443): Max retries exceeded with url: /v1beta/models/gemini-2.5-flash-lite:generateContent?key=AIzaSyCqT-1BkUpwmghl6HQH7d5YXkHaYNmnBWU (Caused by SSLError(SSLEOFError(8, '[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1000)'))). Trying OpenRouter.
+Traceback (most recent call last):
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\connectionpool.py", line 464, in _make_request
+    self._validate_conn(conn)
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\connectionpool.py", line 1093, in _validate_conn
+    conn.connect()
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\connection.py", line 796, in connect
+    sock_and_verified = _ssl_wrap_socket_and_match_hostname(
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\connection.py", line 975, in _ssl_wrap_socket_and_match_hostname
+    ssl_sock = ssl_wrap_socket(
+               ^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\util\ssl_.py", line 483, in ssl_wrap_socket
+    ssl_sock = _ssl_wrap_socket_impl(sock, context, tls_in_tls, server_hostname)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\util\ssl_.py", line 527, in _ssl_wrap_socket_impl
+    return ssl_context.wrap_socket(sock, server_hostname=server_hostname)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\ssl.py", line 455, in wrap_socket
+    return self.sslsocket_class._create(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\ssl.py", line 1046, in _create
+    self.do_handshake()
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\ssl.py", line 1321, in do_handshake
+    self._sslobj.do_handshake()
+ssl.SSLEOFError: [SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1000)
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\connectionpool.py", line 787, in urlopen
+    response = self._make_request(
+               ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\connectionpool.py", line 488, in _make_request
+    raise new_e
+urllib3.exceptions.SSLError: [SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1000)
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\requests\adapters.py", line 645, in send
+    resp = conn.urlopen(
+           ^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\connectionpool.py", line 871, in urlopen
+    return self.urlopen(
+           ^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\connectionpool.py", line 841, in urlopen
+    retries = retries.increment(
+              ^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\util\retry.py", line 535, in increment
+    raise MaxRetryError(_pool, url, reason) from reason  # type: ignore[arg-type]
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+urllib3.exceptions.MaxRetryError: HTTPSConnectionPool(host='generativelanguage.googleapis.com', port=443): Max retries exceeded with url: /v1beta/models/gemini-2.5-flash-lite:generateContent?key=AIzaSyCqT-1BkUpwmghl6HQH7d5YXkHaYNmnBWU (Caused by SSLError(SSLEOFError(8, '[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1000)')))
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\manve\Downloads\StockMinded\data\ai_scraper.py", line 233, in call_llm
+    resp = session.post(url, json=payload, timeout=15)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\requests\sessions.py", line 640, in post
+    return self.request("POST", url, data=data, json=json, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\requests\sessions.py", line 592, in request
+    resp = self.send(prep, **send_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\requests\sessions.py", line 706, in send
+    r = adapter.send(request, **kwargs)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\requests\adapters.py", line 676, in send
+    raise SSLError(e, request=request)
+requests.exceptions.SSLError: HTTPSConnectionPool(host='generativelanguage.googleapis.com', port=443): Max retries exceeded with url: /v1beta/models/gemini-2.5-flash-lite:generateContent?key=AIzaSyCqT-1BkUpwmghl6HQH7d5YXkHaYNmnBWU (Caused by SSLError(SSLEOFError(8, '[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1000)')))
+$MOTILALOFS.NS: possibly delisted; no price data found  (period=1y)
+OpenRouter LLM HTTP error (404): {"error":{"message":"No endpoints found for google/gemini-2.0-flash-exp:free.","code":404},"user_id":"user_3DgCrBLzxA6lfXxpwCx1TeXlhH8"}. Headers: {'Date': 'Fri, 26 Jun 2026 16:40:24 GMT', 'Content-Type': 'application/json', 'Transfer-Encoding': 'chunked', 'Connection': 'keep-alive', 'Access-Control-Allow-Origin': '*', 'Access-Control-Expose-Headers': 'X-Generation-Id,cf-ray', 'Permissions-Policy': 'payment=(self "https://checkout.stripe.com" "https://connect-js.stripe.com" "https://js.stripe.com" "https://*.js.stripe.com" "https://hooks.stripe.com")', 'Referrer-Policy': 'no-referrer, strict-origin-when-cross-origin', 'X-Content-Type-Options': 'nosniff', 'Content-Encoding': 'gzip', 'Server': 'cloudflare', 'CF-RAY': 'a11da7512db53fb4-BOM'}.
+[option_chain public dhan] BANKNIFTY: no future expiries found in opsum; returning empty
+BANKNIFTY: target expiries ['2016-06-30'] not in chain; falling back to 2026-06-30
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+NIFTY: target expiries ['2016-06-30'] not in chain; falling back to 2026-06-30
+127.0.0.1 - - [26/Jun/2026 22:10:24] "GET /api/options/structures HTTP/1.1" 200 -
+127.0.0.1 - - [26/Jun/2026 22:10:27] "GET /api/paper/open HTTP/1.1" 200 -
+127.0.0.1 - - [26/Jun/2026 22:10:55] "GET /api/paper/open HTTP/1.1" 200 -
+$^CNXPHARMA: possibly delisted; no price data found  (period=6mo)
+
+1 Failed download:
+['^CNXPHARMA']: possibly delisted; no price data found  (period=6mo)
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+NewsAPI: request failed: HTTPSConnectionPool(host='newsapi.org', port=443): Max retries exceeded with url: /v2/everything?q=%28NSE+OR+BSE+OR+sensex+OR+nifty%29+AND+%28stock+OR+market+OR+finance+OR+trading%29&apiKey=86621d360fb443ac821fbd3bbf9cf521&pageSize=50&sortBy=publishedAt&language=en&from=2026-06-24T16%3A47%3A36 (Caused by SSLError(SSLEOFError(8, '[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1000)')))
+127.0.0.1 - - [26/Jun/2026 22:24:10] "GET /api/telegram/status HTTP/1.1" 200 -
+[shoonya] GenAcsTok failed: {'stat': 'Not_Ok', 'emsg': 'Invalid Input : INVALID_IP', 'uid': 'FA369105'}
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+127.0.0.1 - - [26/Jun/2026 22:39:10] "GET /api/telegram/status HTTP/1.1" 200 -
+$^CNXIT: possibly delisted; no price data found  (period=6mo)
+
+1 Failed download:
+['^CNXIT']: possibly delisted; no price data found  (period=6mo)
+$^CNXPHARMA: possibly delisted; no price data found  (period=6mo)
+
+1 Failed download:
+['^CNXPHARMA']: possibly delisted; no price data found  (period=6mo)
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+[shoonya] GenAcsTok failed: {'stat': 'Not_Ok', 'emsg': 'Invalid Input : INVALID_IP', 'uid': 'FA369105'}
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+127.0.0.1 - - [26/Jun/2026 22:54:10] "GET /api/telegram/status HTTP/1.1" 200 -
+$NIFTY_PVT_BANK.NS: possibly delisted; no price data found  (period=6mo)
+
+1 Failed download:
+['NIFTY_PVT_BANK.NS']: possibly delisted; no price data found  (period=6mo)
+[shoonya] GenAcsTok failed: {'stat': 'Not_Ok', 'emsg': 'Invalid Input : INVALID_IP', 'uid': 'FA369105'}
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+127.0.0.1 - - [26/Jun/2026 23:09:10] "GET /api/telegram/status HTTP/1.1" 200 -
+Groq LLM call failed: HTTPSConnectionPool(host='api.groq.com', port=443): Max retries exceeded with url: /openai/v1/chat/completions (Caused by ResponseError('too many 429 error responses')). Trying Gemini.
+Gemini LLM call failed unexpectedly: HTTPSConnectionPool(host='generativelanguage.googleapis.com', port=443): Max retries exceeded with url: /v1beta/models/gemini-2.5-flash-lite:generateContent?key=AIzaSyCqT-1BkUpwmghl6HQH7d5YXkHaYNmnBWU (Caused by ResponseError('too many 503 error responses')). Trying OpenRouter.
+urllib3.exceptions.ResponseError: too many 503 error responses
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\requests\adapters.py", line 645, in send
+    resp = conn.urlopen(
+           ^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\connectionpool.py", line 942, in urlopen
+    return self.urlopen(
+           ^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\connectionpool.py", line 932, in urlopen
+    retries = retries.increment(method, url, response=response, _pool=self)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\util\retry.py", line 535, in increment
+    raise MaxRetryError(_pool, url, reason) from reason  # type: ignore[arg-type]
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+urllib3.exceptions.MaxRetryError: HTTPSConnectionPool(host='generativelanguage.googleapis.com', port=443): Max retries exceeded with url: /v1beta/models/gemini-2.5-flash-lite:generateContent?key=AIzaSyCqT-1BkUpwmghl6HQH7d5YXkHaYNmnBWU (Caused by ResponseError('too many 503 error responses'))
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\manve\Downloads\StockMinded\data\ai_scraper.py", line 233, in call_llm
+    resp = session.post(url, json=payload, timeout=15)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\requests\sessions.py", line 640, in post
+    return self.request("POST", url, data=data, json=json, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\requests\sessions.py", line 592, in request
+    resp = self.send(prep, **send_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\requests\sessions.py", line 706, in send
+    r = adapter.send(request, **kwargs)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\requests\adapters.py", line 669, in send
+    raise RetryError(e, request=request)
+requests.exceptions.RetryError: HTTPSConnectionPool(host='generativelanguage.googleapis.com', port=443): Max retries exceeded with url: /v1beta/models/gemini-2.5-flash-lite:generateContent?key=AIzaSyCqT-1BkUpwmghl6HQH7d5YXkHaYNmnBWU (Caused by ResponseError('too many 503 error responses'))
+OpenRouter LLM HTTP error (404): {"error":{"message":"No endpoints found for google/gemini-2.0-flash-exp:free.","code":404},"user_id":"user_3DgCrBLzxA6lfXxpwCx1TeXlhH8"}. Headers: {'Date': 'Fri, 26 Jun 2026 17:41:36 GMT', 'Content-Type': 'application/json', 'Transfer-Encoding': 'chunked', 'Connection': 'keep-alive', 'Access-Control-Allow-Origin': '*', 'Access-Control-Expose-Headers': 'X-Generation-Id,cf-ray', 'Permissions-Policy': 'payment=(self "https://checkout.stripe.com" "https://connect-js.stripe.com" "https://js.stripe.com" "https://*.js.stripe.com" "https://hooks.stripe.com")', 'Referrer-Policy': 'no-referrer, strict-origin-when-cross-origin', 'X-Content-Type-Options': 'nosniff', 'Content-Encoding': 'gzip', 'Server': 'cloudflare', 'CF-RAY': 'a11e00f5fe83ff7a-BOM'}.
+$^CNXMETAL: possibly delisted; no price data found  (period=6mo)
+
+1 Failed download:
+['^CNXMETAL']: possibly delisted; no price data found  (period=6mo)
+[shoonya] GenAcsTok failed: {'stat': 'Not_Ok', 'emsg': 'Invalid Input : INVALID_IP', 'uid': 'FA369105'}
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+Groq LLM call failed: HTTPSConnectionPool(host='api.groq.com', port=443): Max retries exceeded with url: /openai/v1/chat/completions (Caused by ResponseError('too many 429 error responses')). Trying Gemini.
+Gemini LLM call failed unexpectedly: HTTPSConnectionPool(host='generativelanguage.googleapis.com', port=443): Max retries exceeded with url: /v1beta/models/gemini-2.5-flash-lite:generateContent?key=AIzaSyCqT-1BkUpwmghl6HQH7d5YXkHaYNmnBWU (Caused by ResponseError('too many 503 error responses')). Trying OpenRouter.
+urllib3.exceptions.ResponseError: too many 503 error responses
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\requests\adapters.py", line 645, in send
+    resp = conn.urlopen(
+           ^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\connectionpool.py", line 942, in urlopen
+    return self.urlopen(
+           ^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\connectionpool.py", line 932, in urlopen
+    retries = retries.increment(method, url, response=response, _pool=self)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\util\retry.py", line 535, in increment
+    raise MaxRetryError(_pool, url, reason) from reason  # type: ignore[arg-type]
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+urllib3.exceptions.MaxRetryError: HTTPSConnectionPool(host='generativelanguage.googleapis.com', port=443): Max retries exceeded with url: /v1beta/models/gemini-2.5-flash-lite:generateContent?key=AIzaSyCqT-1BkUpwmghl6HQH7d5YXkHaYNmnBWU (Caused by ResponseError('too many 503 error responses'))
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\manve\Downloads\StockMinded\data\ai_scraper.py", line 233, in call_llm
+    resp = session.post(url, json=payload, timeout=15)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\requests\sessions.py", line 640, in post
+    return self.request("POST", url, data=data, json=json, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\requests\sessions.py", line 592, in request
+    resp = self.send(prep, **send_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\requests\sessions.py", line 706, in send
+    r = adapter.send(request, **kwargs)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\requests\adapters.py", line 669, in send
+    raise RetryError(e, request=request)
+requests.exceptions.RetryError: HTTPSConnectionPool(host='generativelanguage.googleapis.com', port=443): Max retries exceeded with url: /v1beta/models/gemini-2.5-flash-lite:generateContent?key=AIzaSyCqT-1BkUpwmghl6HQH7d5YXkHaYNmnBWU (Caused by ResponseError('too many 503 error responses'))
+OpenRouter LLM HTTP error (404): {"error":{"message":"No endpoints found for google/gemini-2.0-flash-exp:free.","code":404},"user_id":"user_3DgCrBLzxA6lfXxpwCx1TeXlhH8"}. Headers: {'Date': 'Fri, 26 Jun 2026 18:11:10 GMT', 'Content-Type': 'application/json', 'Transfer-Encoding': 'chunked', 'Connection': 'keep-alive', 'Access-Control-Allow-Origin': '*', 'Access-Control-Expose-Headers': 'X-Generation-Id,cf-ray', 'Permissions-Policy': 'payment=(self "https://checkout.stripe.com" "https://connect-js.stripe.com" "https://js.stripe.com" "https://*.js.stripe.com" "https://hooks.stripe.com")', 'Referrer-Policy': 'no-referrer, strict-origin-when-cross-origin', 'X-Content-Type-Options': 'nosniff', 'Content-Encoding': 'gzip', 'Server': 'cloudflare', 'CF-RAY': 'a11e2c45ee2a47bc-BOM'}.
+[shoonya] GenAcsTok failed: {'stat': 'Not_Ok', 'emsg': 'Invalid Input : INVALID_IP', 'uid': 'FA369105'}
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+[shoonya] GenAcsTok failed: {'stat': 'Not_Ok', 'emsg': 'Invalid Input : INVALID_IP', 'uid': 'FA369105'}
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+Groq SSL error: HTTPSConnectionPool(host='api.groq.com', port=443): Max retries exceeded with url: /openai/v1/chat/completions (Caused by SSLError(SSLEOFError(8, '[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1000)'))). Marking dead for 300.0s. Trying Gemini.
+Gemini LLM call failed unexpectedly: HTTPSConnectionPool(host='generativelanguage.googleapis.com', port=443): Max retries exceeded with url: /v1beta/models/gemini-2.5-flash-lite:generateContent?key=AIzaSyCqT-1BkUpwmghl6HQH7d5YXkHaYNmnBWU (Caused by SSLError(SSLEOFError(8, '[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1000)'))). Trying OpenRouter.
+Traceback (most recent call last):
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\connectionpool.py", line 464, in _make_request
+    self._validate_conn(conn)
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\connectionpool.py", line 1093, in _validate_conn
+    conn.connect()
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\connection.py", line 796, in connect
+    sock_and_verified = _ssl_wrap_socket_and_match_hostname(
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\connection.py", line 975, in _ssl_wrap_socket_and_match_hostname
+    ssl_sock = ssl_wrap_socket(
+               ^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\util\ssl_.py", line 483, in ssl_wrap_socket
+    ssl_sock = _ssl_wrap_socket_impl(sock, context, tls_in_tls, server_hostname)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\util\ssl_.py", line 527, in _ssl_wrap_socket_impl
+    return ssl_context.wrap_socket(sock, server_hostname=server_hostname)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\ssl.py", line 455, in wrap_socket
+    return self.sslsocket_class._create(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\ssl.py", line 1046, in _create
+    self.do_handshake()
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\ssl.py", line 1321, in do_handshake
+    self._sslobj.do_handshake()
+ssl.SSLEOFError: [SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1000)
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\connectionpool.py", line 787, in urlopen
+    response = self._make_request(
+               ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\connectionpool.py", line 488, in _make_request
+    raise new_e
+urllib3.exceptions.SSLError: [SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1000)
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\requests\adapters.py", line 645, in send
+    resp = conn.urlopen(
+           ^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\connectionpool.py", line 871, in urlopen
+    return self.urlopen(
+           ^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\connectionpool.py", line 841, in urlopen
+    retries = retries.increment(
+              ^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\util\retry.py", line 535, in increment
+    raise MaxRetryError(_pool, url, reason) from reason  # type: ignore[arg-type]
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+urllib3.exceptions.MaxRetryError: HTTPSConnectionPool(host='generativelanguage.googleapis.com', port=443): Max retries exceeded with url: /v1beta/models/gemini-2.5-flash-lite:generateContent?key=AIzaSyCqT-1BkUpwmghl6HQH7d5YXkHaYNmnBWU (Caused by SSLError(SSLEOFError(8, '[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1000)')))
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\manve\Downloads\StockMinded\data\ai_scraper.py", line 233, in call_llm
+    resp = session.post(url, json=payload, timeout=15)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\requests\sessions.py", line 640, in post
+    return self.request("POST", url, data=data, json=json, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\requests\sessions.py", line 592, in request
+    resp = self.send(prep, **send_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\requests\sessions.py", line 706, in send
+    r = adapter.send(request, **kwargs)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\requests\adapters.py", line 676, in send
+    raise SSLError(e, request=request)
+requests.exceptions.SSLError: HTTPSConnectionPool(host='generativelanguage.googleapis.com', port=443): Max retries exceeded with url: /v1beta/models/gemini-2.5-flash-lite:generateContent?key=AIzaSyCqT-1BkUpwmghl6HQH7d5YXkHaYNmnBWU (Caused by SSLError(SSLEOFError(8, '[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1000)')))
+OpenRouter LLM HTTP error (404): {"error":{"message":"No endpoints found for google/gemini-2.0-flash-exp:free.","code":404},"user_id":"user_3DgCrBLzxA6lfXxpwCx1TeXlhH8"}. Headers: {'Date': 'Fri, 26 Jun 2026 18:30:27 GMT', 'Content-Type': 'application/json', 'Transfer-Encoding': 'chunked', 'Connection': 'keep-alive', 'Access-Control-Allow-Origin': '*', 'Access-Control-Expose-Headers': 'X-Generation-Id,cf-ray', 'Permissions-Policy': 'payment=(self "https://checkout.stripe.com" "https://connect-js.stripe.com" "https://js.stripe.com" "https://*.js.stripe.com" "https://hooks.stripe.com")', 'Referrer-Policy': 'no-referrer, strict-origin-when-cross-origin', 'X-Content-Type-Options': 'nosniff', 'Content-Encoding': 'gzip', 'Server': 'cloudflare', 'CF-RAY': 'a11e48811fd23a35-BOM'}.
+$MCX.NS: possibly delisted; no price data found  (period=6mo)
+
+1 Failed download:
+['MCX.NS']: possibly delisted; no price data found  (period=6mo)
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+Groq SSL error: HTTPSConnectionPool(host='api.groq.com', port=443): Max retries exceeded with url: /openai/v1/chat/completions (Caused by SSLError(SSLEOFError(8, '[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1000)'))). Marking dead for 300.0s. Trying Gemini.
+Gemini LLM call failed unexpectedly: HTTPSConnectionPool(host='generativelanguage.googleapis.com', port=443): Max retries exceeded with url: /v1beta/models/gemini-2.5-flash-lite:generateContent?key=AIzaSyCqT-1BkUpwmghl6HQH7d5YXkHaYNmnBWU (Caused by SSLError(SSLEOFError(8, '[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1000)'))). Trying OpenRouter.
+Traceback (most recent call last):
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\connectionpool.py", line 464, in _make_request
+    self._validate_conn(conn)
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\connectionpool.py", line 1093, in _validate_conn
+    conn.connect()
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\connection.py", line 796, in connect
+    sock_and_verified = _ssl_wrap_socket_and_match_hostname(
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\connection.py", line 975, in _ssl_wrap_socket_and_match_hostname
+    ssl_sock = ssl_wrap_socket(
+               ^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\util\ssl_.py", line 483, in ssl_wrap_socket
+    ssl_sock = _ssl_wrap_socket_impl(sock, context, tls_in_tls, server_hostname)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\util\ssl_.py", line 527, in _ssl_wrap_socket_impl
+    return ssl_context.wrap_socket(sock, server_hostname=server_hostname)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\ssl.py", line 455, in wrap_socket
+    return self.sslsocket_class._create(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\ssl.py", line 1046, in _create
+    self.do_handshake()
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\ssl.py", line 1321, in do_handshake
+    self._sslobj.do_handshake()
+ssl.SSLEOFError: [SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1000)
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\connectionpool.py", line 787, in urlopen
+    response = self._make_request(
+               ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\connectionpool.py", line 488, in _make_request
+    raise new_e
+urllib3.exceptions.SSLError: [SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1000)
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\requests\adapters.py", line 645, in send
+    resp = conn.urlopen(
+           ^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\connectionpool.py", line 871, in urlopen
+    return self.urlopen(
+           ^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\connectionpool.py", line 841, in urlopen
+    retries = retries.increment(
+              ^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\util\retry.py", line 535, in increment
+    raise MaxRetryError(_pool, url, reason) from reason  # type: ignore[arg-type]
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+urllib3.exceptions.MaxRetryError: HTTPSConnectionPool(host='generativelanguage.googleapis.com', port=443): Max retries exceeded with url: /v1beta/models/gemini-2.5-flash-lite:generateContent?key=AIzaSyCqT-1BkUpwmghl6HQH7d5YXkHaYNmnBWU (Caused by SSLError(SSLEOFError(8, '[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1000)')))
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\manve\Downloads\StockMinded\data\ai_scraper.py", line 233, in call_llm
+    resp = session.post(url, json=payload, timeout=15)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\requests\sessions.py", line 640, in post
+    return self.request("POST", url, data=data, json=json, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\requests\sessions.py", line 592, in request
+    resp = self.send(prep, **send_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\requests\sessions.py", line 706, in send
+    r = adapter.send(request, **kwargs)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\requests\adapters.py", line 676, in send
+    raise SSLError(e, request=request)
+requests.exceptions.SSLError: HTTPSConnectionPool(host='generativelanguage.googleapis.com', port=443): Max retries exceeded with url: /v1beta/models/gemini-2.5-flash-lite:generateContent?key=AIzaSyCqT-1BkUpwmghl6HQH7d5YXkHaYNmnBWU (Caused by SSLError(SSLEOFError(8, '[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1000)')))
+OpenRouter LLM call failed unexpectedly: HTTPSConnectionPool(host='openrouter.ai', port=443): Max retries exceeded with url: /api/v1/chat/completions (Caused by SSLError(SSLEOFError(8, '[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1000)'))).
+Traceback (most recent call last):
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\connectionpool.py", line 464, in _make_request
+    self._validate_conn(conn)
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\connectionpool.py", line 1093, in _validate_conn
+    conn.connect()
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\connection.py", line 796, in connect
+    sock_and_verified = _ssl_wrap_socket_and_match_hostname(
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\connection.py", line 975, in _ssl_wrap_socket_and_match_hostname
+    ssl_sock = ssl_wrap_socket(
+               ^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\util\ssl_.py", line 483, in ssl_wrap_socket
+    ssl_sock = _ssl_wrap_socket_impl(sock, context, tls_in_tls, server_hostname)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\util\ssl_.py", line 527, in _ssl_wrap_socket_impl
+    return ssl_context.wrap_socket(sock, server_hostname=server_hostname)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\ssl.py", line 455, in wrap_socket
+    return self.sslsocket_class._create(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\ssl.py", line 1046, in _create
+    self.do_handshake()
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\ssl.py", line 1321, in do_handshake
+    self._sslobj.do_handshake()
+ssl.SSLEOFError: [SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1000)
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\connectionpool.py", line 787, in urlopen
+    response = self._make_request(
+               ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\connectionpool.py", line 488, in _make_request
+    raise new_e
+urllib3.exceptions.SSLError: [SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1000)
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\requests\adapters.py", line 645, in send
+    resp = conn.urlopen(
+           ^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\connectionpool.py", line 871, in urlopen
+    return self.urlopen(
+           ^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\connectionpool.py", line 841, in urlopen
+    retries = retries.increment(
+              ^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\urllib3\util\retry.py", line 535, in increment
+    raise MaxRetryError(_pool, url, reason) from reason  # type: ignore[arg-type]
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+urllib3.exceptions.MaxRetryError: HTTPSConnectionPool(host='openrouter.ai', port=443): Max retries exceeded with url: /api/v1/chat/completions (Caused by SSLError(SSLEOFError(8, '[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1000)')))
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\manve\Downloads\StockMinded\data\ai_scraper.py", line 285, in call_llm
+    resp = session.post(url, headers=headers, json=payload, timeout=15)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\requests\sessions.py", line 640, in post
+    return self.request("POST", url, data=data, json=json, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\requests\sessions.py", line 592, in request
+    resp = self.send(prep, **send_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\requests\sessions.py", line 706, in send
+    r = adapter.send(request, **kwargs)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\requests\adapters.py", line 676, in send
+    raise SSLError(e, request=request)
+requests.exceptions.SSLError: HTTPSConnectionPool(host='openrouter.ai', port=443): Max retries exceeded with url: /api/v1/chat/completions (Caused by SSLError(SSLEOFError(8, '[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1000)')))
+127.0.0.1 - - [27/Jun/2026 00:14:49] "GET /favicon.ico HTTP/1.1" 204 -
+127.0.0.1 - - [27/Jun/2026 00:14:56] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [27/Jun/2026 00:14:57] "GET /api/telegram/status HTTP/1.1" 200 -
+127.0.0.1 - - [27/Jun/2026 00:14:57] "GET /api/dashboard HTTP/1.1" 200 -
+127.0.0.1 - - [27/Jun/2026 00:14:58] "GET /favicon.ico HTTP/1.1" 204 -
+[shoonya] GenAcsTok failed: {'stat': 'Not_Ok', 'emsg': 'Invalid Input : INVALID_IP', 'uid': 'FA369105'}
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+127.0.0.1 - - [27/Jun/2026 00:15:32] "GET /api/option-chain?symbol=NIFTY HTTP/1.1" 200 -
+127.0.0.1 - - [27/Jun/2026 00:15:41] "GET /api/dashboard HTTP/1.1" 200 -
+$^NSEI: possibly delisted; no price data found  (period=1d)
+
+1 Failed download:
+['^NSEI']: possibly delisted; no price data found  (period=1d)
+127.0.0.1 - - [27/Jun/2026 00:19:33] "GET /api/intraday?tf=5m HTTP/1.1" 200 -
+$^CNXAUTO: possibly delisted; no price data found  (period=6mo)
+
+1 Failed download:
+['^CNXAUTO']: possibly delisted; no price data found  (period=6mo)
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+127.0.0.1 - - [27/Jun/2026 00:28:43] "GET / HTTP/1.1" 304 -
+127.0.0.1 - - [27/Jun/2026 00:28:43] "GET /api/telegram/status HTTP/1.1" 200 -
+127.0.0.1 - - [27/Jun/2026 00:28:43] "GET /api/dashboard HTTP/1.1" 200 -
+127.0.0.1 - - [27/Jun/2026 00:28:45] "GET /favicon.ico HTTP/1.1" 204 -
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+127.0.0.1 - - [27/Jun/2026 00:28:48] "GET /api/option-chain?symbol=NIFTY HTTP/1.1" 200 -
+127.0.0.1 - - [27/Jun/2026 00:28:48] "GET /api/dashboard HTTP/1.1" 200 -
+127.0.0.1 - - [27/Jun/2026 00:29:20] "GET /paper HTTP/1.1" 200 -
+127.0.0.1 - - [27/Jun/2026 00:29:22] "GET /api/telegram/status HTTP/1.1" 200 -
+127.0.0.1 - - [27/Jun/2026 00:29:22] "GET /api/dashboard HTTP/1.1" 200 -
+127.0.0.1 - - [27/Jun/2026 00:29:22] "GET /api/paper/settings HTTP/1.1" 200 -
+127.0.0.1 - - [27/Jun/2026 00:29:23] "GET /api/paper/history HTTP/1.1" 200 -
+127.0.0.1 - - [27/Jun/2026 00:29:23] "GET /api/paper/trades HTTP/1.1" 200 -
+127.0.0.1 - - [27/Jun/2026 00:29:23] "GET /api/paper/skipped HTTP/1.1" 200 -
+127.0.0.1 - - [27/Jun/2026 00:29:23] "GET /favicon.ico HTTP/1.1" 204 -
+127.0.0.1 - - [27/Jun/2026 00:29:24] "GET /api/paper/trades HTTP/1.1" 200 -
+[option_chain public dhan] BANKNIFTY: no future expiries found in opsum; returning empty
+127.0.0.1 - - [27/Jun/2026 00:29:26] "GET /api/paper/trades HTTP/1.1" 200 -
+BANKNIFTY: target expiries ['2016-06-30'] not in chain; falling back to 2026-06-30
+127.0.0.1 - - [27/Jun/2026 00:29:28] "GET /option-chain HTTP/1.1" 404 -
+127.0.0.1 - - [27/Jun/2026 00:29:30] "GET /favicon.ico HTTP/1.1" 204 -
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+127.0.0.1 - - [27/Jun/2026 00:29:31] "GET /favicon.ico HTTP/1.1" 204 -
+NIFTY: target expiries ['2016-06-30'] not in chain; falling back to 2026-06-30
+127.0.0.1 - - [27/Jun/2026 00:29:31] "GET /api/options/structures HTTP/1.1" 200 -
+127.0.0.1 - - [27/Jun/2026 00:29:31] "GET /favicon.ico HTTP/1.1" 204 -
+[option_chain public dhan] BANKNIFTY: no future expiries found in opsum; returning empty
+BANKNIFTY: target expiries ['2016-06-30'] not in chain; falling back to 2026-06-30
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+NIFTY: target expiries ['2016-06-30'] not in chain; falling back to 2026-06-30
+127.0.0.1 - - [27/Jun/2026 00:29:40] "GET /api/options/structures HTTP/1.1" 200 -
+[option_chain public dhan] BANKNIFTY: no future expiries found in opsum; returning empty
+BANKNIFTY: target expiries ['2016-06-30'] not in chain; falling back to 2026-06-30
+NewsAPI: request failed: HTTPSConnectionPool(host='newsapi.org', port=443): Max retries exceeded with url: /v2/everything?q=%28NSE+OR+BSE+OR+sensex+OR+nifty%29+AND+%28stock+OR+market+OR+finance+OR+trading%29&apiKey=86621d360fb443ac821fbd3bbf9cf521&pageSize=50&sortBy=publishedAt&language=en&from=2026-06-24T18%3A59%3A23 (Caused by SSLError(SSLEOFError(8, '[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1000)')))
+127.0.0.1 - - [27/Jun/2026 00:29:45] "GET /api/news/headlines HTTP/1.1" 200 -
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+NIFTY: target expiries ['2016-06-30'] not in chain; falling back to 2026-06-30
+127.0.0.1 - - [27/Jun/2026 00:29:51] "GET /api/options/structures HTTP/1.1" 200 -
+127.0.0.1 - - [27/Jun/2026 00:30:03] "GET /api/paper/open HTTP/1.1" 200 -
+127.0.0.1 - - [27/Jun/2026 00:30:16] "GET /api/paper/open HTTP/1.1" 200 -
+127.0.0.1 - - [27/Jun/2026 00:30:18] "GET /api/paper/open HTTP/1.1" 200 -
+$^NSEI: possibly delisted; no price data found  (period=1d)
+
+1 Failed download:
+['^NSEI']: possibly delisted; no price data found  (period=1d)
+127.0.0.1 - - [27/Jun/2026 00:32:06] "GET /api/intraday?tf=5m HTTP/1.1" 200 -
+Groq LLM call failed: HTTPSConnectionPool(host='api.groq.com', port=443): Max retries exceeded with url: /openai/v1/chat/completions (Caused by ResponseError('too many 429 error responses')). Trying Gemini.
+[shoonya] GenAcsTok failed: {'stat': 'Not_Ok', 'emsg': 'Invalid Input : INVALID_IP', 'uid': 'FA369105'}
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+[shoonya] GenAcsTok failed: {'stat': 'Not_Ok', 'emsg': 'Invalid Input : INVALID_IP', 'uid': 'FA369105'}
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+$^NSEI: possibly delisted; no price data found  (period=1y)
+
+1 Failed download:
+['^NSEI']: possibly delisted; no price data found  (period=1y)
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+[shoonya] GenAcsTok failed: {'stat': 'Not_Ok', 'emsg': 'Invalid Input : INVALID_IP', 'uid': 'FA369105'}
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty
+Groq LLM call failed: HTTPSConnectionPool(host='api.groq.com', port=443): Max retries exceeded with url: /openai/v1/chat/completions (Caused by ProtocolError('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))). Trying Gemini.
+[shoonya] Playwright OAuth login failed: Page.wait_for_selector: Timeout 60000ms exceeded.
+Call log:
+  - waiting for locator("#lgnusrid") to be visible
+Traceback (most recent call last):
+  File "C:\Users\manve\Downloads\StockMinded\data\shoonya_fetcher.py", line 229, in _get_auth_code_playwright
+    authorize_url = f"https://api.shoonya.com/OAuthlogin/authorize/oauth?client_id={self.vendor_code}"
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\playwright\sync_api\_generated.py", line 8770, in wait_for_selector
+    self._sync(
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\playwright\_impl\_sync_base.py", line 115, in _sync
+    return task.result()
+           ^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\playwright\_impl\_page.py", line 424, in wait_for_selector
+    return await self._main_frame.wait_for_selector(**locals_to_params(locals()))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\playwright\_impl\_frame.py", line 372, in wait_for_selector
+    await self._channel.send(
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\playwright\_impl\_connection.py", line 69, in send
+    return await self._connection.wrap_api_call(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\manve\AppData\Local\Programs\Python\Python312\Lib\site-packages\playwright\_impl\_connection.py", line 559, in wrap_api_call
+    raise rewrite_error(error, f"{parsed_st['apiName']}: {error}") from None
+playwright._impl._errors.TimeoutError: Page.wait_for_selector: Timeout 60000ms exceeded.
+Call log:
+  - waiting for locator("#lgnusrid") to be visible
+
+[shoonya] Failed to obtain auth_code
+[option_chain public dhan] NIFTY: no future expiries found in opsum; returning empty

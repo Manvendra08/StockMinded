@@ -2696,6 +2696,51 @@
                     <div class="skip-table" id="skip-recent"></div>
                 </div>
 
+                <!-- Index Heavyweights Momentum Card -->
+                <div class="bento-item full card" id="index-momentum-card" style="padding: 24px 28px; margin-bottom: 24px;">
+                    <div class="card-title" style="justify-content: space-between; display: flex; width: 100%;">
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <span class="icon">⚖️</span> Index Heavyweights Momentum
+                        </div>
+                        <div style="display: flex; align-items: center; gap: 12px;">
+                            <span id="weights-refresh-ts" class="timestamp" style="font-size: 0.75rem; color: var(--text-muted);">Last Refresh: Loading...</span>
+                            <button id="refresh-weights-btn" onclick="forceRefreshWeights(this)" style="font-size: 0.7rem; padding: 2px 8px; background: rgba(79, 142, 247, 0.15); border: 1px solid rgba(79, 142, 247, 0.3); color: var(--accent-blue); border-radius: var(--radius-sm); cursor: pointer; border-style: solid;">↻ Refresh Weights</button>
+                        </div>
+                    </div>
+                    <div class="index-momentum-grids" style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; margin-top: 16px;">
+                        <!-- Nifty 50 Column -->
+                        <div class="index-mom-col" id="mom-nifty">
+                            <div class="col-header" style="display: flex; justify-content: space-between; border-bottom: 1px solid var(--glass-border); padding-bottom: 8px; margin-bottom: 8px;">
+                                <span style="font-weight: 700; color: var(--text-primary);">NIFTY 50</span>
+                                <span class="mom-badge" id="nifty-mom-badge" style="font-weight: 700; padding: 2px 8px; border-radius: 4px; border: 1px solid transparent;">—</span>
+                            </div>
+                            <div class="constituent-list" id="nifty-constituents-list" style="max-height: 200px; overflow-y: auto; font-size: 0.8rem;">
+                                <!-- filled by JS -->
+                            </div>
+                        </div>
+                        <!-- Bank Nifty Column -->
+                        <div class="index-mom-col" id="mom-banknifty">
+                            <div class="col-header" style="display: flex; justify-content: space-between; border-bottom: 1px solid var(--glass-border); padding-bottom: 8px; margin-bottom: 8px;">
+                                <span style="font-weight: 700; color: var(--text-primary);">BANK NIFTY</span>
+                                <span class="mom-badge" id="banknifty-mom-badge" style="font-weight: 700; padding: 2px 8px; border-radius: 4px; border: 1px solid transparent;">—</span>
+                            </div>
+                            <div class="constituent-list" id="banknifty-constituents-list" style="max-height: 200px; overflow-y: auto; font-size: 0.8rem;">
+                                <!-- filled by JS -->
+                            </div>
+                        </div>
+                        <!-- Sensex Column -->
+                        <div class="index-mom-col" id="mom-sensex">
+                            <div class="col-header" style="display: flex; justify-content: space-between; border-bottom: 1px solid var(--glass-border); padding-bottom: 8px; margin-bottom: 8px;">
+                                <span style="font-weight: 700; color: var(--text-primary);">SENSEX</span>
+                                <span class="mom-badge" id="sensex-mom-badge" style="font-weight: 700; padding: 2px 8px; border-radius: 4px; border: 1px solid transparent;">—</span>
+                            </div>
+                            <div class="constituent-list" id="sensex-constituents-list" style="max-height: 200px; overflow-y: auto; font-size: 0.8rem;">
+                                <!-- filled by JS -->
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Leaders -->
                 <div class="bento-item card">
                     <div class="card-title">
@@ -4511,6 +4556,7 @@
                     renderTicker(d.watchlist || []);
                     renderWatchlist(d.watchlist || []);
                     renderNiftyChart(d.nifty_candles || []);
+                    await loadIndexMomentum();
                 } catch (_) {
                     console.warn("[fetchIntraday] render failed", _);
                 }
@@ -4549,6 +4595,91 @@
                 localStorage.setItem("stockminded-theme", target);
             }
 
+            async function loadIndexMomentum() {
+                const refreshTsEl = document.getElementById("weights-refresh-ts");
+                if (!refreshTsEl) return;
+
+                try {
+                    const res = await fetch("/api/intelligence/index_momentum");
+                    if (!res.ok) return;
+                    const result = await res.json();
+                    if (result.status !== "success") return;
+
+                    // Update timestamp
+                    let tsText = "Last Refresh: Baseline";
+                    if (result.last_refresh) {
+                        try {
+                            const dt = new Date(result.last_refresh);
+                            tsText = `Last Refresh: ${dt.toLocaleString("en-IN")}`;
+                        } catch (_) {
+                            tsText = `Last Refresh: ${result.last_refresh}`;
+                        }
+                    }
+                    refreshTsEl.textContent = tsText;
+
+                    // Helper to render constituent lists
+                    const renderList = (containerId, badgeId, idxData) => {
+                        const listEl = document.getElementById(containerId);
+                        const badgeEl = document.getElementById(badgeId);
+                        if (!listEl || !badgeEl) return;
+
+                        // Render momentum badge
+                        const mom = idxData.weighted_momentum;
+                        badgeEl.textContent = `${mom > 0 ? "+" : ""}${mom}%`;
+                        badgeEl.style.background = mom > 0 ? "rgba(16, 185, 129, 0.15)" : mom < 0 ? "rgba(239, 68, 68, 0.15)" : "rgba(255, 255, 255, 0.05)";
+                        badgeEl.style.borderColor = mom > 0 ? "rgba(16, 185, 129, 0.3)" : mom < 0 ? "rgba(239, 68, 68, 0.3)" : "rgba(255, 255, 255, 0.1)";
+                        badgeEl.style.color = mom > 0 ? "var(--accent-green)" : mom < 0 ? "var(--accent-red)" : "var(--text-muted)";
+
+                        // Render list of constituents
+                        if (!idxData.constituents || idxData.constituents.length === 0) {
+                            listEl.innerHTML = '<div style="padding: 8px; color: var(--text-muted);">No data available</div>';
+                            return;
+                        }
+
+                        // Take top 10 constituents for NIFTY/SENSEX, all for BANKNIFTY
+                        const count = containerId.includes("banknifty") ? idxData.constituents.length : 10;
+                        const displayList = idxData.constituents.slice(0, count);
+
+                        listEl.innerHTML = displayList.map(c => {
+                            const chg = c.change_pct;
+                            const cls = chg > 0 ? "up" : chg < 0 ? "down" : "neutral-c";
+                            const valStr = chg != null ? `${chg > 0 ? "+" : ""}${chg}%` : "—";
+                            return `
+                                <div style="display: flex; justify-content: space-between; padding: 4px 8px; border-bottom: 1px solid rgba(255,255,255,0.02);">
+                                    <span style="font-weight: 500;">${c.symbol} <span style="font-size: 0.65rem; color: var(--text-muted);">(${c.weight}%)</span></span>
+                                    <span class="${cls}" style="font-weight: 600;">${valStr}</span>
+                                </div>
+                            `;
+                        }).join("");
+                    };
+
+                    renderList("nifty-constituents-list", "nifty-mom-badge", result.data.NIFTY);
+                    renderList("banknifty-constituents-list", "banknifty-mom-badge", result.data.BANKNIFTY);
+                    renderList("sensex-constituents-list", "sensex-mom-badge", result.data.SENSEX);
+
+                } catch (e) {
+                    console.warn("Failed to load index weights momentum:", e);
+                }
+            }
+
+            async function forceRefreshWeights(btn) {
+                if (btn.disabled) return;
+                btn.disabled = true;
+                const origText = btn.textContent;
+                btn.textContent = "Refreshing...";
+                try {
+                    const res = await fetch("/api/intelligence/refresh_weights", { method: "POST" });
+                    if (res.ok) {
+                        await loadIndexMomentum();
+                    }
+                } catch (e) {
+                    console.warn(e);
+                } finally {
+                    btn.disabled = false;
+                    btn.textContent = origText;
+                }
+            }
+
             function loadTheme() {
                 const saved =
                     localStorage.getItem("stockminded-theme") || "dark";
@@ -4563,6 +4694,7 @@
                     const data = await fetchDashboard();
                     renderAll(data);
                     await loadOptionChain();
+                    await loadIndexMomentum();
                     document
                         .getElementById("loading-screen")
                         .classList.add("hidden");

@@ -333,7 +333,11 @@ class ShoonyaFetcher:
     # -- OAuth Login ------------------------------------------------------
 
     def _get_auth_code_playwright(self) -> str | None:
-        """Headless browser OAuth login via Playwright."""
+        """Headless browser OAuth login via Playwright.
+
+        Retries once on transient failures (page didn't load, selector timeout)
+        which are common when the network is flaky or the OAuth endpoint is slow.
+        """
         try:
             from playwright.sync_api import sync_playwright
         except ImportError:
@@ -343,65 +347,75 @@ class ShoonyaFetcher:
             return None
 
         authorize_url = f"https://api.shoonya.com/OAuthlogin/authorize/oauth?client_id={self.vendor_code}"
-        logger.info("[shoonya] Launching headless browser for OAuth login...")
-        auth_code: str | None = None
 
-        try:
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
-                page = browser.new_page()
-                captured_urls: list[str] = []
+        for attempt in range(2):
+            if attempt > 0:
+                logger.info("[shoonya] Retrying OAuth login (attempt %d)...", attempt + 1)
+                time.sleep(3)
 
-                def handle_route(route):
-                    req_type = route.request.resource_type
-                    if req_type in ("image", "font"):
-                        route.abort()
-                    else:
-                        route.continue_()
+            auth_code: str | None = None
+            try:
+                with sync_playwright() as p:
+                    browser = p.chromium.launch(headless=True)
+                    page = browser.new_page()
+                    captured_urls: list[str] = []
 
-                page.route("**/*", handle_route)
+                    def handle_route(route):
+                        req_type = route.request.resource_type
+                        if req_type in ("image", "font"):
+                            route.abort()
+                        else:
+                            route.continue_()
 
-                page.on(
-                    "request",
-                    lambda r: captured_urls.append(r.url) if "code=" in r.url else None,
-                )
-                page.on(
-                    "response",
-                    lambda r: captured_urls.append(r.url) if "code=" in r.url else None,
-                )
+                    page.route("**/*", handle_route)
 
-                page.goto(authorize_url, wait_until="commit")
-                page.wait_for_selector("#lgnusrid", state="visible", timeout=60000)
-
-                totp = pyotp.TOTP(self.totp_key).now()
-                page.locator("#lgnusrid").fill(self.user_id)
-                page.locator("#lgnpwd").fill(self.password)
-                page.locator("#lgnotp").fill(totp)
-
-                try:
-                    page.locator("button:has-text('LOGIN')").click()
-                    page.wait_for_url("*code=*", timeout=45000)
-                except Exception as click_err:
-                    logger.debug("[shoonya] Browser navigation error: %s", click_err)
-
-                final_url = page.url
-                browser.close()
-
-                for candidate in [final_url] + captured_urls:
-                    m = re.search(r"[?&]code=([A-Za-z0-9_\-]+)", candidate)
-                    if m:
-                        auth_code = m.group(1)
-                        logger.info("[shoonya] auth_code captured successfully")
-                        break
-
-                if not auth_code:
-                    logger.error(
-                        "[shoonya] auth_code not found. Final URL: %s", final_url
+                    page.on(
+                        "request",
+                        lambda r: captured_urls.append(r.url) if "code=" in r.url else None,
                     )
-        except Exception as exc:
-            logger.exception("[shoonya] Playwright OAuth login failed: %s", exc)
+                    page.on(
+                        "response",
+                        lambda r: captured_urls.append(r.url) if "code=" in r.url else None,
+                    )
 
-        return auth_code
+                    page.goto(authorize_url, wait_until="commit")
+                    # Reduced timeout from 60s to 45s; retry handles slow loads
+                    page.wait_for_selector("#lgnusrid", state="visible", timeout=45000)
+
+                    totp = pyotp.TOTP(self.totp_key).now()
+                    page.locator("#lgnusrid").fill(self.user_id)
+                    page.locator("#lgnpwd").fill(self.password)
+                    page.locator("#lgnotp").fill(totp)
+
+                    try:
+                        page.locator("button:has-text('LOGIN')").click()
+                        page.wait_for_url("*code=*", timeout=45000)
+                    except Exception as click_err:
+                        logger.debug("[shoonya] Browser navigation error: %s", click_err)
+
+                    final_url = page.url
+                    browser.close()
+
+                    for candidate in [final_url] + captured_urls:
+                        m = re.search(r"[?&]code=([A-Za-z0-9_\-]+)", candidate)
+                        if m:
+                            auth_code = m.group(1)
+                            logger.info("[shoonya] auth_code captured successfully")
+                            break
+
+                    if not auth_code:
+                        logger.error(
+                            "[shoonya] auth_code not found. Final URL: %s", final_url
+                        )
+            except Exception as exc:
+                logger.warning("[shoonya] Playwright OAuth attempt %d failed: %s", attempt + 1, exc)
+                continue
+
+            if auth_code:
+                return auth_code
+
+        logger.error("[shoonya] All OAuth attempts exhausted")
+        return None
 
     def _exchange_for_token(self, auth_code: str) -> str | None:
         checksum = _sha256(self.vendor_code + self.secret_code + auth_code)

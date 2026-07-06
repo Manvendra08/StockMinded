@@ -24,6 +24,11 @@ CACHE_DIR = Path(__file__).parent.parent / "data/cache"
 _NSE_SESSION = None
 _NSE_SESSION_TS = 0
 _NSE_SESSION_LOCK = threading.Lock()
+
+# Track when NSE was last unreachable to skip nsepython (which also hits nseindia.com)
+# and avoid wasting 30+ seconds on retries that will fail with the same SSL error.
+_NSE_UNREACHABLE_UNTIL: float = 0  # timestamp; skip retries until this time
+_NSE_UNREACHABLE_COOLDOWN: float = 120  # seconds to skip after failure
 _DHAN_OC_CACHE: dict[str, tuple[float, dict]] = {}
 _DHAN_MASTER_CACHE: pd.DataFrame | None = None
 _OPTION_CHAIN_SOURCE: dict[str, str] = {}
@@ -54,67 +59,76 @@ def _create_retry_session(
 
 
 def _get_nse_session():
-    global _NSE_SESSION, _NSE_SESSION_TS
+    global _NSE_SESSION, _NSE_SESSION_TS, _NSE_UNREACHABLE_UNTIL
     with _NSE_SESSION_LOCK:
         now = time.time()
-        if _NSE_SESSION is None or (now - _NSE_SESSION_TS) > 600:
-            success = False
-            for attempt in range(3):
+        # Skip if session is still valid
+        if _NSE_SESSION is not None and (now - _NSE_SESSION_TS) <= 600:
+            return _NSE_SESSION
+        # Skip if NSE is known unreachable (avoids wasting time on retries)
+        if now < _NSE_UNREACHABLE_UNTIL:
+            return None
+
+        success = False
+        for attempt in range(3):
+            try:
+                # Leverage curl_cffi for robust browser TLS/JA3 impersonation
                 try:
-                    # Leverage curl_cffi for robust browser TLS/JA3 impersonation
-                    try:
-                        from curl_cffi import requests as curl_requests
+                    from curl_cffi import requests as curl_requests
 
-                        session = curl_requests.Session(impersonate="chrome120")
-                    except ImportError:
-                        session = _create_retry_session(retries=5, backoff_factor=1)
+                    session = curl_requests.Session(impersonate="chrome120")
+                except ImportError:
+                    session = _create_retry_session(retries=5, backoff_factor=1)
 
-                    headers = {
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                        "Accept": "*/*",
-                        "Accept-Language": "en-US,en;q=0.9",
-                        "Accept-Encoding": "gzip, deflate, br",
-                        "Connection": "keep-alive",
-                        "Referer": "https://www.nseindia.com/",
-                    }
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "Accept": "*/*",
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Accept-Encoding": "gzip, deflate, br",
+                    "Connection": "keep-alive",
+                    "Referer": "https://www.nseindia.com/",
+                }
+                session.headers.update(headers)
+
+                # Some versions of NSE block if you don't have the cookies from the main page.
+                # We hit the main page first.
+                r = session.get("https://www.nseindia.com", timeout=15)
+                # If home page fails, try a slightly different approach
+                if r.status_code != 200:
+                    headers["User-Agent"] = (
+                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+                    )
                     session.headers.update(headers)
-
-                    # Some versions of NSE block if you don't have the cookies from the main page.
-                    # We hit the main page first.
                     r = session.get("https://www.nseindia.com", timeout=15)
-                    # If home page fails, try a slightly different approach
-                    if r.status_code != 200:
-                        headers["User-Agent"] = (
-                            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
-                        )
-                        session.headers.update(headers)
-                        r = session.get("https://www.nseindia.com", timeout=15)
 
-                    r.raise_for_status()
-                    # Optional: hit a market data page to solidify the session
-                    session.get(
-                        "https://www.nseindia.com/market-data/live-equity-market",
-                        timeout=10,
-                    )
+                r.raise_for_status()
+                # Optional: hit a market data page to solidify the session
+                session.get(
+                    "https://www.nseindia.com/market-data/live-equity-market",
+                    timeout=10,
+                )
 
-                    _NSE_SESSION = session
-                    _NSE_SESSION_TS = now
-                    success = True
-                    logging.getLogger(__name__).debug(
-                        "[_get_nse_session] session warmed up"
-                    )
-                    break
-                except Exception as e:
-                    logging.getLogger(__name__).warning(
-                        "[_get_nse_session] warm-up attempt %s failed: %s: %s",
-                        attempt + 1,
-                        type(e).__name__,
-                        e,
-                    )
-                    time.sleep(2 * (attempt + 1))
+                _NSE_SESSION = session
+                _NSE_SESSION_TS = now
+                success = True
+                logging.getLogger(__name__).debug(
+                    "[_get_nse_session] session warmed up"
+                )
+                break
+            except Exception as e:
+                logging.getLogger(__name__).warning(
+                    "[_get_nse_session] warm-up attempt %s failed: %s: %s",
+                    attempt + 1,
+                    type(e).__name__,
+                    e,
+                )
+                time.sleep(2 * (attempt + 1))
 
-            if not success:
-                _NSE_SESSION = None
+        if not success:
+            _NSE_SESSION = None
+            # Mark NSE as unreachable so option_chain skips nsepython fallbacks
+            # (nsepython also hits nseindia.com and will fail with the same SSL error)
+            _NSE_UNREACHABLE_UNTIL = time.time() + _NSE_UNREACHABLE_COOLDOWN
     return _NSE_SESSION
 
 
@@ -1697,27 +1711,35 @@ def option_chain(symbol: str = "NIFTY", _skip_atm_filter: bool = False) -> dict:
             )
 
     # Fallback to nsepython (might work if our session logic failed but theirs somehow succeeds)
-    try:
-        from nsepython import nse_optionchain_scrapper
-
-        result = nse_optionchain_scrapper(symbol)
-        if result and result.get("records", {}).get("data"):
-            return _save_chain(result)
-    except Exception as e:
-        logging.getLogger(__name__).exception(
-            "nse_optionchain_scrapper failed for %s: %s", symbol, e
+    # Skip if NSE is known unreachable — nsepython also hits nseindia.com and will fail
+    # with the same SSL/DNS error, wasting 30+ seconds on internal retries.
+    if time.time() < _NSE_UNREACHABLE_UNTIL:
+        logging.getLogger(__name__).debug(
+            "Skipping nsepython fallbacks — NSE unreachable until %.0f",
+            _NSE_UNREACHABLE_UNTIL,
         )
+    else:
+        try:
+            from nsepython import nse_optionchain_scrapper
 
-    try:
-        from nsepython import option_chain as nse_oc
+            result = nse_optionchain_scrapper(symbol)
+            if result and result.get("records", {}).get("data"):
+                return _save_chain(result)
+        except Exception as e:
+            logging.getLogger(__name__).exception(
+                "nse_optionchain_scrapper failed for %s: %s", symbol, e
+            )
 
-        result = nse_oc(symbol)
-        if result and result.get("records", {}).get("data"):
-            return _save_chain(result)
-    except Exception as e:
-        logging.getLogger(__name__).exception(
-            "nsepython.option_chain failed for %s: %s", symbol, e
-        )
+        try:
+            from nsepython import option_chain as nse_oc
+
+            result = nse_oc(symbol)
+            if result and result.get("records", {}).get("data"):
+                return _save_chain(result)
+        except Exception as e:
+            logging.getLogger(__name__).exception(
+                "nsepython.option_chain failed for %s: %s", symbol, e
+            )
 
     # 2. Other datasources (fallback 2: Public Dhan, Research360, local files, AI scraper).
     # 2a. Public Dhan Scraper (bypass-safe, unauthenticated, full data).

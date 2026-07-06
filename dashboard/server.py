@@ -3111,6 +3111,12 @@ def _automation_worker():
                     datetime.now().strftime("%H:%M:%S"),
                     market_open,
                 )
+                try:
+                    from signals.index_weightage import refresh_weights_if_needed
+                    refresh_weights_if_needed()
+                except Exception as e:
+                    _log.warning("Failed background weights refresh: %s", e)
+
                 data = _run_engine()
 
                 if market_open:
@@ -3501,6 +3507,45 @@ def api_news_headlines():
     except Exception as e:
         logging.getLogger(__name__).exception("News headlines failed: %s", e)
         return jsonify({"error": str(e), "headlines": []}), 500
+
+
+@app.route("/api/intelligence/index_momentum")
+def get_index_momentum():
+    from signals.index_weightage import calculate_weighted_momentum, load_index_weights_state
+    try:
+        nifty_data = calculate_weighted_momentum("NIFTY")
+        banknifty_data = calculate_weighted_momentum("BANKNIFTY")
+        sensex_data = calculate_weighted_momentum("SENSEX")
+        state = load_index_weights_state()
+        return jsonify({
+            "status": "success",
+            "last_refresh": state.get("last_refresh"),
+            "weights_status": state.get("status"),
+            "data": {
+                "NIFTY": nifty_data,
+                "BANKNIFTY": banknifty_data,
+                "SENSEX": sensex_data
+            }
+        })
+    except Exception as e:
+        logging.getLogger(__name__).exception("Failed to get index momentum: %s", e)
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/api/intelligence/refresh_weights", methods=["POST", "GET"])
+def trigger_refresh_weights():
+    from signals.index_weightage import refresh_weights_if_needed, load_index_weights_state
+    try:
+        success = refresh_weights_if_needed(force=True)
+        state = load_index_weights_state()
+        return jsonify({
+            "status": "success" if success else "failed",
+            "last_refresh": state.get("last_refresh"),
+            "weights_status": state.get("status")
+        })
+    except Exception as e:
+        logging.getLogger(__name__).exception("Failed to force refresh weights: %s", e)
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 @app.route("/api/health")
