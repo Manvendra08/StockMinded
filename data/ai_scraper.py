@@ -389,6 +389,11 @@ def _call_chat_completion(
     return resp.json()["choices"][0]["message"]["content"]
 
 
+def _print_llm(msg: str) -> None:
+    """Print LLM activity to terminal (always visible regardless of log level)."""
+    print(f"[LLM] {msg}", flush=True)
+
+
 def call_llm(
     prompt: str,
     system_prompt: str = "You are a professional Indian stock market strategist.",
@@ -401,6 +406,8 @@ def call_llm(
     config = _get_ai_config()
     if not config:
         return (None, "None") if return_provider else None
+
+    _print_llm(f"calling (prompt_len={len(prompt)}, json={json_mode})")
 
     def is_dead(provider: str) -> bool:
         dead_until = _dead_providers.get(provider)
@@ -417,6 +424,7 @@ def call_llm(
         ]
         for model_id, model_label in _opencode_models:
             try:
+                _print_llm(f"#0 trying {model_label} [OpenCode Zen] (backend={backend})")
                 logger.info("LLM #0: %s [provider=OpenCode Zen] (backend=%s)", model_label, backend)
                 url = "https://opencode.ai/zen/v1/chat/completions"
                 headers = {
@@ -436,29 +444,35 @@ def call_llm(
                 resp.raise_for_status()
                 text = resp.json()["choices"][0]["message"]["content"]
                 res_val = json.loads(text) if json_mode else text
+                _print_llm(f"#0 OK: {model_label} [OpenCode Zen] (backend={backend})")
                 logger.info("LLM success: %s [OpenCode Zen] (backend=%s)", model_label, backend)
                 _log_llm_call(f"OpenCode Zen ({model_label})", resp, prompt=prompt, output=text)
                 return (res_val, f"OpenCode Zen ({model_label})") if return_provider else res_val
             except Exception as e:
                 if _is_ssl_transport_error(e):
                     _dead_providers["opencode"] = time.time() + _DEAD_PROVIDER_TTL
+                    _print_llm(f"#0 SSL error on {model_id}; marking dead. Trying Groq 70b.")
                     logger.warning("OpenCode Zen SSL error; marking dead. Trying Groq 70b.")
                     break
                 elif _is_http_error(e):
                     status = _get_http_status(e)
                     if status in (429, 500, 502, 503):
                         _dead_providers["opencode"] = time.time() + _DEAD_PROVIDER_TTL
+                        _print_llm(f"#0 HTTP {status} on {model_id}; marking dead. Trying Groq 70b.")
                         logger.warning("OpenCode Zen HTTP %s on %s; marking dead %ss. Trying Groq 70b.", status, model_id, _DEAD_PROVIDER_TTL)
                         break
                     else:
+                        _print_llm(f"#0 failed on {model_id}: {e}. Trying next model.")
                         logger.warning("OpenCode Zen %s failed: %s. Trying next model.", model_id, e)
                 else:
+                    _print_llm(f"#0 failed on {model_id}: {e}. Trying next model.")
                     logger.warning("OpenCode Zen %s failed: %s. Trying next model.", model_id, e)
 
     # ── #1. Groq 70b (Fallback 1) ──────────────────────────────────────────
     if not is_dead("groq_70b") and config.get("groq_api_key"):
         session, backend = _create_curl_cffi_llm_session()
         try:
+            _print_llm(f"#1 trying llama-3.3-70b-versatile [Groq] (backend={backend})")
             logger.info("LLM #1: llama-3.3-70b-versatile [provider=Groq]")
             url = "https://api.groq.com/openai/v1/chat/completions"
             headers = {
@@ -478,27 +492,33 @@ def call_llm(
             resp.raise_for_status()
             text = resp.json()["choices"][0]["message"]["content"]
             res_val = json.loads(text) if json_mode else text
+            _print_llm(f"#1 OK: llama-3.3-70b-versatile [Groq] (backend={backend})")
             logger.info("LLM success: llama-3.3-70b-versatile [Groq] (backend=%s)", backend)
             _log_llm_call("Groq (llama-3.3-70b-versatile)", resp, prompt=prompt, output=text)
             return (res_val, "Groq (llama-3.3-70b-versatile)") if return_provider else res_val
         except Exception as e:
             if _is_ssl_transport_error(e):
                 _dead_providers["groq_70b"] = time.time() + _DEAD_PROVIDER_TTL
+                _print_llm("#1 SSL error; marking dead. Trying Nvidia NIM.")
                 logger.warning("Groq 70b SSL error; marking dead. Trying Nvidia NIM.")
             elif _is_http_error(e):
                 status = _get_http_status(e)
                 if status in (429, 500, 502, 503):
                     _dead_providers["groq_70b"] = time.time() + _DEAD_PROVIDER_TTL
+                    _print_llm(f"#1 HTTP {status}; marking dead. Trying Nvidia NIM.")
                     logger.warning("Groq 70b HTTP %s; marking dead %ss. Trying Nvidia NIM.", status, _DEAD_PROVIDER_TTL)
                 else:
+                    _print_llm(f"#1 failed: {e}. Trying Nvidia NIM.")
                     logger.warning("Groq 70b failed: %s. Trying Nvidia NIM.", e)
             else:
+                _print_llm(f"#1 failed: {e}. Trying Nvidia NIM.")
                 logger.warning("Groq 70b failed: %s. Trying Nvidia NIM.", e)
 
     # ── #2. Nvidia NIM (Fallback 2: free tier, OpenAI-compatible, 40 RPM) ───
     if not is_dead("nvidia") and config.get("nvidia_api_key"):
         session, backend = _create_curl_cffi_llm_session()
         try:
+            _print_llm(f"#2 trying nemotron-3-super-120b-a12b [Nvidia NIM] (backend={backend})")
             logger.info("LLM #2: nemotron-3-super-120b-a12b [provider=Nvidia NIM]")
             url = "https://integrate.api.nvidia.com/v1/chat/completions"
             headers = {
@@ -519,27 +539,33 @@ def call_llm(
             resp.raise_for_status()
             text = resp.json()["choices"][0]["message"]["content"]
             res_val = json.loads(text) if json_mode else text
+            _print_llm(f"#2 OK: nemotron-3-super-120b-a12b [Nvidia NIM] (backend={backend})")
             logger.info("LLM success: nemotron-3-super-120b-a12b [Nvidia NIM] (backend=%s)", backend)
             _log_llm_call("Nvidia NIM (nemotron-3-super-120b-a12b)", resp, prompt=prompt, output=text)
             return (res_val, "Nvidia NIM (nemotron-3-super-120b-a12b)") if return_provider else res_val
         except Exception as e:
             if _is_ssl_transport_error(e):
                 _dead_providers["nvidia"] = time.time() + _DEAD_PROVIDER_TTL
+                _print_llm("#2 SSL error; marking dead. Trying Groq 8b.")
                 logger.warning("Nvidia NIM SSL error; marking dead. Trying Groq 8b.")
             elif _is_http_error(e):
                 status = _get_http_status(e)
                 if status in (429, 500, 502, 503):
                     _dead_providers["nvidia"] = time.time() + _DEAD_PROVIDER_TTL
+                    _print_llm(f"#2 HTTP {status}; marking dead. Trying Groq 8b.")
                     logger.warning("Nvidia NIM HTTP %s; marking dead %ss. Trying Groq 8b.", status, _DEAD_PROVIDER_TTL)
                 else:
+                    _print_llm(f"#2 failed: {e}. Trying Groq 8b.")
                     logger.warning("Nvidia NIM failed: %s. Trying Groq 8b.", e)
             else:
+                _print_llm(f"#2 failed: {e}. Trying Groq 8b.")
                 logger.warning("Nvidia NIM failed: %s. Trying Groq 8b.", e)
 
     # ── #3. Groq 8b (Fallback 3) ───────────────────────────────────────────
     if not is_dead("groq_8b") and config.get("groq_api_key"):
         session, backend = _create_curl_cffi_llm_session()
         try:
+            _print_llm(f"#3 trying llama-3.1-8b-instant [Groq] (backend={backend})")
             logger.info("LLM #3: llama-3.1-8b-instant [provider=Groq]")
             url = "https://api.groq.com/openai/v1/chat/completions"
             headers = {
@@ -559,21 +585,26 @@ def call_llm(
             resp.raise_for_status()
             text = resp.json()["choices"][0]["message"]["content"]
             res_val = json.loads(text) if json_mode else text
+            _print_llm(f"#3 OK: llama-3.1-8b-instant [Groq] (backend={backend})")
             logger.info("LLM success: llama-3.1-8b-instant [Groq] (backend=%s)", backend)
             _log_llm_call("Groq (llama-3.1-8b-instant)", resp, prompt=prompt, output=text)
             return (res_val, "Groq (llama-3.1-8b-instant)") if return_provider else res_val
         except Exception as e:
             if _is_ssl_transport_error(e):
                 _dead_providers["groq_8b"] = time.time() + _DEAD_PROVIDER_TTL
+                _print_llm("#3 SSL error; marking dead. Trying Gemini.")
                 logger.warning("Groq 8b SSL error; marking dead. Trying Gemini.")
             elif _is_http_error(e):
                 status = _get_http_status(e)
                 if status in (429, 500, 502, 503):
                     _dead_providers["groq_8b"] = time.time() + _DEAD_PROVIDER_TTL
+                    _print_llm(f"#3 HTTP {status}; marking dead. Trying Gemini.")
                     logger.warning("Groq 8b HTTP %s; marking dead %ss. Trying Gemini.", status, _DEAD_PROVIDER_TTL)
                 else:
+                    _print_llm(f"#3 failed: {e}. Trying Gemini.")
                     logger.warning("Groq 8b failed: %s. Trying Gemini.", e)
             else:
+                _print_llm(f"#3 failed: {e}. Trying Gemini.")
                 logger.warning("Groq 8b failed: %s. Trying Gemini.", e)
 
     # ── #4. Gemini (Fallback 4) ─────────────────────────────────────────────
@@ -585,6 +616,7 @@ def call_llm(
             model_name = model_raw.split("/")[-1] if "/" in model_raw else model_raw
             if model_name == "gemini-1.5-flash":
                 model_name = "gemini-2.5-flash-lite"
+            _print_llm(f"#4 trying {model_name} [Gemini] (backend={backend})")
             logger.info("LLM #4: %s [provider=Gemini] (backend=%s)", model_name, backend)
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
             generation_config = {"response_mime_type": "application/json"}
@@ -614,21 +646,26 @@ def call_llm(
                 raise ValueError("Empty text part in Gemini response")
 
             res_val = json.loads(text) if json_mode else text
+            _print_llm(f"#4 OK: {model_name} [Gemini] (backend={backend})")
             logger.info("LLM success: %s [Gemini] (backend=%s)", model_name, backend)
             _log_llm_call(f"Gemini ({model_name})", resp, prompt=prompt, output=text)
             return (res_val, f"Gemini ({model_name})") if return_provider else res_val
         except Exception as e:
             if _is_ssl_transport_error(e):
                 _dead_providers["gemini"] = time.time() + _DEAD_PROVIDER_TTL
+                _print_llm(f"#4 SSL error on {model_name}; marking dead. Trying Bedrock.")
                 logger.warning("Gemini SSL error; marking dead. Trying Bedrock.")
             elif _is_http_error(e):
                 status = _get_http_status(e)
                 if status in (429, 500, 502, 503):
                     _dead_providers["gemini"] = time.time() + _DEAD_PROVIDER_TTL
+                    _print_llm(f"#4 HTTP {status} on {model_name}; marking dead. Trying Bedrock.")
                     logger.warning("Gemini HTTP %s; marking dead %ss. Trying Bedrock.", status, _DEAD_PROVIDER_TTL)
                 else:
+                    _print_llm(f"#4 failed on {model_name}: {e}. Trying Bedrock.")
                     logger.warning("Gemini failed: %s. Trying Bedrock.", e)
             else:
+                _print_llm(f"#4 failed on {model_name}: {e}. Trying Bedrock.")
                 logger.warning("Gemini failed: %s. Trying Bedrock.", e)
 
     # ── #5. Amazon Bedrock (Last Fallback) ──────────────────────────────────
@@ -643,6 +680,7 @@ def call_llm(
             model_id = model_info["id"]
             model_name = model_info["name"]
             try:
+                _print_llm(f"#5 trying {model_name} [Bedrock/{model_info['provider']}]")
                 logger.info("LLM #5: %s [provider=Bedrock/%s]", model_name, model_info["provider"])
                 url = f"{_BEDROCK_API_BASE}/chat/completions"
                 headers = {
@@ -662,6 +700,7 @@ def call_llm(
                 resp.raise_for_status()
                 text = resp.json()["choices"][0]["message"]["content"]
                 res_val = json.loads(text) if json_mode else text
+                _print_llm(f"#5 OK: {model_name} [Bedrock/{model_info['provider']}] (backend={backend})")
                 logger.info(
                     "LLM success: %s [Bedrock/%s] (backend=%s)",
                     model_name, model_info["provider"], backend
@@ -670,8 +709,10 @@ def call_llm(
                 return (res_val, f"Bedrock ({model_name})") if return_provider else res_val
             except Exception as e:
                 continue
+        _print_llm("#5 all Bedrock models failed; marking dead")
         _dead_providers["bedrock"] = time.time() + _DEAD_PROVIDER_TTL
 
+    _print_llm("ALL PROVIDERS EXHAUSTED")
     logger.warning("LLM scan exhausted: all providers failed")
     return (None, "None") if return_provider else None
 

@@ -4689,14 +4689,22 @@
                         const count = containerId.includes("banknifty") ? idxData.constituents.length : 10;
                         const displayList = idxData.constituents.slice(0, count);
 
-                        // Build header with positive/negative contribution summary
+                        // Build header with positive/negative contribution summary + color bar
                         const posContr = idxData.positive_weight_contribution || 0;
                         const negContr = idxData.negative_weight_contribution || 0;
+                        const totalContr = posContr + negContr;
+                        const posPct = totalContr > 0 ? (posContr / totalContr * 100) : 50;
+                        const negPct = totalContr > 0 ? (negContr / totalContr * 100) : 50;
                         const headerHtml = `
-                            <div style="display: flex; align-items: center; justify-content: space-between; padding: 5px 8px; background: rgba(255,255,255,0.03); border-radius: 4px; margin-bottom: 8px;">
-                                <span style="font-size: 0.72rem; font-weight: 600; color: var(--accent-green);">+${posContr.toFixed(1)}% up</span>
-                                <div style="width: 1px; height: 12px; background: var(--glass-border); margin: 0 8px;"></div>
-                                <span style="font-size: 0.72rem; font-weight: 600; color: var(--accent-red);">-${negContr.toFixed(1)}% down</span>
+                            <div style="padding: 6px 8px; background: rgba(255,255,255,0.03); border-radius: 4px; margin-bottom: 8px;">
+                                <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 5px;">
+                                    <span style="font-size: 0.72rem; font-weight: 600; color: var(--accent-green);">+${posContr.toFixed(1)}% up</span>
+                                    <span style="font-size: 0.72rem; font-weight: 600; color: var(--accent-red);">-${negContr.toFixed(1)}% down</span>
+                                </div>
+                                <div style="display: flex; height: 6px; border-radius: 3px; overflow: hidden; background: rgba(255,255,255,0.05);">
+                                    <div style="width: ${posPct}%; background: linear-gradient(90deg, rgba(16,185,129,0.4), rgba(16,185,129,0.8)); transition: width 0.3s;"></div>
+                                    <div style="width: ${negPct}%; background: linear-gradient(90deg, rgba(239,68,68,0.8), rgba(239,68,68,0.4)); transition: width 0.3s;"></div>
+                                </div>
                             </div>
                             <table class="rank-table" style="width: 100%; margin: 0; border-collapse: collapse;">
                                 <thead>
@@ -4716,8 +4724,16 @@
                             const valStr = chg != null ? `${chg > 0 ? "+" : ""}${chg}%` : "—";
                             const contrStr = contr !== 0 ? `${contr > 0 ? "+" : ""}${contr.toFixed(2)}%` : "—";
                             const contrCls = contr > 0 ? "up" : contr < 0 ? "down" : "neutral-c";
+                            // Heatmap: background intensity based on absolute change %
+                            const absChg = Math.min(Math.abs(chg || 0), 5);
+                            const intensity = absChg / 5;
+                            const bgColor = chg > 0
+                                ? `rgba(16,185,129,${0.05 + intensity * 0.15})`
+                                : chg < 0
+                                    ? `rgba(239,68,68,${0.05 + intensity * 0.15})`
+                                    : "transparent";
                             return `
-                                <tr style="border-bottom: 1px solid rgba(255,255,255,0.02);">
+                                <tr style="border-bottom: 1px solid rgba(255,255,255,0.02); background: ${bgColor};">
                                     <td style="padding: 6px 0; text-align: left;">
                                         <span style="font-weight: 500;">${c.symbol}</span>
                                         <span style="font-size: 0.65rem; color: var(--text-muted); margin-left: 4px;">(${c.weight}%)</span>
