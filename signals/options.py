@@ -90,25 +90,39 @@ def _next_expiry(symbol: str = "NIFTY", preference: str = "weekly") -> str:
     (days_ahead == 0) we return TODAY's expiry, not next week's.
     chain_snapshot() has its own 0-DTE avoidance logic for signal generation,
     so including today here is safe and correct for exit-check contexts.
+    
+    H9 FIX: Post-3:30pm on expiry day, roll to next week's expiry
+    since today's contract has expired.
     """
-    today = datetime.now(timezone(timedelta(hours=5, minutes=30))).date()
+    now_ist = datetime.now(timezone(timedelta(hours=5, minutes=30)))
+    today = now_ist.date()
+    current_time = now_ist.time()
+    market_close = time(15, 30)  # 3:30 PM IST
+    
     if preference == "weekly":
         if symbol == "BANKNIFTY":
             # NSE weekly BANKNIFTY options expire on Wednesdays
             days_ahead = calendar.WEDNESDAY - today.weekday()
-            if days_ahead < 0:  # H1 FIX: < 0 instead of <= 0
+            # H9 FIX: If today is expiry day AND after 3:30pm, roll to next week
+            if days_ahead == 0 and current_time >= market_close:
+                days_ahead = 7
+            elif days_ahead < 0:  # H1 FIX: < 0 instead of <= 0
                 days_ahead += 7
             exp_date = today + timedelta(days=days_ahead)
         elif symbol == "SENSEX":
             # SENSEX weekly options expire on Thursdays
             days_ahead = calendar.THURSDAY - today.weekday()
-            if days_ahead < 0:  # H1 FIX: < 0 instead of <= 0
+            if days_ahead == 0 and current_time >= market_close:
+                days_ahead = 7
+            elif days_ahead < 0:  # H1 FIX: < 0 instead of <= 0
                 days_ahead += 7
             exp_date = today + timedelta(days=days_ahead)
         else:
             # NIFTY and other indices: NSE changed NIFTY weekly expiry from Thursday → Tuesday (effective Apr 2025)
             days_ahead = calendar.TUESDAY - today.weekday()
-            if days_ahead < 0:  # H1 FIX: < 0 instead of <= 0
+            if days_ahead == 0 and current_time >= market_close:
+                days_ahead = 7
+            elif days_ahead < 0:  # H1 FIX: < 0 instead of <= 0
                 days_ahead += 7
             exp_date = today + timedelta(days=days_ahead)
     else:

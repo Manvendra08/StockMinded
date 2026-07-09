@@ -446,14 +446,21 @@ def quote_batch(symbols: list[str]) -> dict[str, dict]:
     out: dict[str, dict] = {s: {} for s in symbols}
 
     # Phase 0: Try Shoonya for each symbol (primary source)
+    # Shoonya rate limit: 120 GetQuotes/min. fetch_fno_quote makes 2 calls
+    # (SearchScrip + GetQuotes), so we throttle at 0.5s per symbol to stay safe.
+    _SHOONYA_CALL_DELAY = 0.5  # seconds between symbols
     try:
         from data.shoonya_fetcher import get_shoonya
 
         shoonya = get_shoonya()
         if shoonya and shoonya.login():
+            _first = True
             for sym in list(out.keys()):
                 if out[sym].get("ltp"):
                     continue  # already populated
+                if not _first:
+                    time.sleep(_SHOONYA_CALL_DELAY)
+                _first = False
                 try:
                     # Try NFO futures quote first (gives full OHLC+OI for F&O stocks)
                     q = shoonya.fetch_fno_quote(sym)
@@ -664,11 +671,19 @@ def quote_batch_public(symbols: list[str]) -> dict[str, dict]:
                 "Chrome/120.0.0.0 Safari/537.36"
             )
         }
-        r = requests.get(
-            "https://dhan.co/futures-stocks-list/",
-            headers=headers,
-            timeout=10,
-        )
+        try:
+            from curl_cffi import requests as curl_requests
+            session = curl_requests.Session(impersonate="chrome120")
+            r = session.get(
+                "https://dhan.co/futures-stocks-list/",
+                timeout=10,
+            )
+        except ImportError:
+            r = requests.get(
+                "https://dhan.co/futures-stocks-list/",
+                headers=headers,
+                timeout=10,
+            )
         if r.status_code != 200:
             return out
 
@@ -1547,6 +1562,80 @@ def option_chain(symbol: str = "NIFTY", _skip_atm_filter: bool = False) -> dict:
             )
         return {"records": {"data": []}}
 
+    def _patch_zero_ltps_from_public_dhan(base_data: dict) -> dict:
+        """Patch zero/missing CE/PE LTPs using public Dhan chain for same symbol."""
+        records = (base_data.get("records") or {}).get("data") or []
+        if not records:
+            return base_data
+
+        def _needs_patch(row: dict) -> bool:
+            ce = row.get("CE")
+            pe = row.get("PE")
+            if isinstance(ce, dict) and (ce.get("lastPrice") or 0) <= 0:
+                return True
+            if isinstance(pe, dict) and (pe.get("lastPrice") or 0) <= 0:
+                return True
+            return False
+
+        if not any(_needs_patch(r) for r in records):
+            return base_data
+
+        public_data = _option_chain_from_public_dhan(symbol)
+        public_rows = (public_data.get("records") or {}).get("data") or []
+        if not public_rows:
+            return base_data
+
+        ltp_map: dict[tuple[float, str], float] = {}
+        for prow in public_rows:
+            strike = prow.get("strikePrice")
+            try:
+                strike_key = float(strike)
+            except (TypeError, ValueError):
+                continue
+            ce = prow.get("CE")
+            pe = prow.get("PE")
+            if isinstance(ce, dict):
+                ce_ltp = ce.get("lastPrice", 0) or 0
+                if ce_ltp > 0:
+                    ltp_map[(strike_key, "CE")] = float(ce_ltp)
+            if isinstance(pe, dict):
+                pe_ltp = pe.get("lastPrice", 0) or 0
+                if pe_ltp > 0:
+                    ltp_map[(strike_key, "PE")] = float(pe_ltp)
+
+        patched_count = 0
+        for row in records:
+            strike = row.get("strikePrice")
+            try:
+                strike_key = float(strike)
+            except (TypeError, ValueError):
+                continue
+
+            ce = row.get("CE")
+            if isinstance(ce, dict) and (ce.get("lastPrice") or 0) <= 0:
+                patched_ce = ltp_map.get((strike_key, "CE"), 0)
+                if patched_ce > 0:
+                    ce["lastPrice"] = patched_ce
+                    patched_count += 1
+
+            pe = row.get("PE")
+            if isinstance(pe, dict) and (pe.get("lastPrice") or 0) <= 0:
+                patched_pe = ltp_map.get((strike_key, "PE"), 0)
+                if patched_pe > 0:
+                    pe["lastPrice"] = patched_pe
+                    patched_count += 1
+
+        if patched_count > 0:
+            source = str(base_data.get("_source") or "unknown")
+            if "public_dhan_ltp" not in source:
+                base_data["_source"] = f"{source}+public_dhan_ltp"
+            logging.getLogger(__name__).info(
+                "[option_chain enrichment] %s: patched %d zero LTP fields via public Dhan",
+                symbol,
+                patched_count,
+            )
+        return base_data
+
     def _try_shoonya() -> dict:
         """Fetch option chain via Shoonya API (primary source)."""
         try:
@@ -1610,13 +1699,17 @@ def option_chain(symbol: str = "NIFTY", _skip_atm_filter: bool = False) -> dict:
                         if r["PE"]:
                             merged[sk]["PE"] = r["PE"]
                     data_out = {
-                        "records": {"data": list(merged.values())},
-                        "underlying_price": result["underlying_price"],
+                        "records": {
+                            "data": list(merged.values()),
+                            "expiryDates": [result.get("expiry")] if result.get("expiry") else [],
+                            "underlyingValue": result.get("underlying_price"),
+                        },
+                        "underlying_price": result.get("underlying_price"),
                         "_source": "shoonya",
                         "filtered": {
-                            "underlying_price": result["underlying_price"],
-                            "atm_strike": round(result["underlying_price"] / 50) * 50,
-                            "strikes": [s["strike"] for s in result["strikes"]],
+                            "underlyingValue": result.get("underlying_price"),
+                            "atm_strike": round((result.get("underlying_price") or 0) / 50) * 50,
+                            "strikes": [s.get("strike") for s in (result.get("strikes") or [])],
                         },
                     }
                     return data_out
@@ -1645,6 +1738,7 @@ def option_chain(symbol: str = "NIFTY", _skip_atm_filter: bool = False) -> dict:
     try:
         data = _try_shoonya()
         if data and data.get("records", {}).get("data"):
+            data = _patch_zero_ltps_from_public_dhan(data)
             return _save_chain(data)
     except Exception as e:
         logging.getLogger(__name__).warning(
@@ -1784,25 +1878,10 @@ def option_chain(symbol: str = "NIFTY", _skip_atm_filter: bool = False) -> dict:
     # 3. Last resort: cached data
     data = _load_cached_chain()
 
-    # Enrichment step for Research360: If LTP is 0, try to patch with Dhan Public LTPs
-    if data.get("_source") == "research360":
+    # Enrichment step: patch zero LTPs from public Dhan for cached feeds (e.g. Shoonya/Research360).
+    if data.get("records", {}).get("data"):
         try:
-            spot = data.get("records", {}).get("underlyingValue")
-            if spot is not None and spot != 0:
-                # Use Dhan Public scraper for LTPs (free, no auth needed)
-                public_data = _option_chain_from_public_dhan(symbol)
-                if public_data.get("records", {}).get("data"):
-                    ltp_map = {}
-                    for row in public_data["records"]["data"]:
-                        s = row["strikePrice"]
-                        ltp_map[f"{s}_CE"] = row["CE"].get("lastPrice", 0)
-                        ltp_map[f"{s}_PE"] = row["PE"].get("lastPrice", 0)
-
-                    for row in data["records"]["data"]:
-                        s = row["strikePrice"]
-                        row["CE"]["lastPrice"] = ltp_map.get(f"{s}_CE", 0)
-                        row["PE"]["lastPrice"] = ltp_map.get(f"{s}_PE", 0)
-                    data["_source"] = "research360+public_dhan_ltp"
+            data = _patch_zero_ltps_from_public_dhan(data)
         except Exception as e:
             logging.getLogger(__name__).exception(
                 "Option chain enrichment failed for %s: %s", symbol, e

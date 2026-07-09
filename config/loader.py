@@ -48,7 +48,11 @@ def _expand(value, _missing: list | None = None):
 # alerts-only / paper-trade mode without a config file.
 _DEFAULT_CONFIG: dict = {
     "universe_source": "fo_sample",
-    "universe_fo_sample": [],
+    "universe_fo_sample": [
+        "RELIANCE", "HDFCBANK", "ICICIBANK", "INFY", "TCS", "LT", "SBIN",
+        "AXISBANK", "KOTAKBANK", "ITC", "HINDUNILVR", "BHARTIARTL",
+        "MARUTI", "M&M", "SUNPHARMA", "BAJFINANCE", "ASIANPAINT", "TITAN", "ADANIENT"
+    ],
     "data_sources": {},
     "broker": {},
     "paths": {"journal_db": "data/trades.db"},
@@ -87,106 +91,51 @@ def load_config(path: str | None = None) -> dict:
     return cfg
 
 
-def fetch_dhan_public_universe() -> list[str]:
-    import json
-    import re
+def fetch_fno200_symbols() -> list[str]:
     import logging
-
     try:
-        from curl_cffi import requests as curl_requests
+        import nsepython
+        import threading
+        
+        result = []
+        def fetch():
+            try:
+                symbols = nsepython.fnolist()
+                if symbols:
+                    result.extend(symbols)
+            except (KeyError, TypeError, AttributeError, Exception) as e:
+                # NSE API response format may have changed
+                logging.getLogger(__name__).debug(f"nsepython.fnolist() failed: {e}")
+                pass
+            
+        t = threading.Thread(target=fetch)
+        t.start()
+        t.join(timeout=5)
+        if result:
+            valid = [s.strip() for s in result if isinstance(s, str) and s.strip() and s != "Symbol"]
+            if valid:
+                return sorted(list(set(valid)))
     except ImportError:
-        import requests as curl_requests
-
-    symbols = set()
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
-
-    # Fetch page 1 from raw HTML
-    try:
-        if hasattr(curl_requests, "Session"):
-            session = curl_requests.Session(impersonate="chrome120")
-            r = session.get(
-                "https://dhan.co/futures-stocks-list/", headers=headers, timeout=15
-            )
-        else:
-            r = curl_requests.get(
-                "https://dhan.co/futures-stocks-list/", headers=headers, timeout=15
-            )
-        if r.status_code == 200:
-            match = re.search(
-                r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', r.text, re.DOTALL
-            )
-            if match:
-                js = json.loads(match.group(1))
-                data = (
-                    js.get("props", {})
-                    .get("pageProps", {})
-                    .get("listData", {})
-                    .get("data", [])
-                )
-                for item in data:
-                    sym = item.get("Sym")
-                    if sym:
-                        symbols.add(sym.strip())
+        logging.getLogger(__name__).debug("nsepython not installed")
+        pass
     except Exception as e:
-        logging.getLogger(__name__).warning(
-            "[universe] Dhan HTML page 1 fetch failed: %s", e
-        )
-
-    # Query remaining pages of Nifty 200 from public customscan API
-    post_url = "https://ow-scanx-analytics.dhan.co/customscan/fetchdt"
-    post_headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Content-Type": "application/json; charset=UTF-8",
-        "Referer": "https://dhan.co/",
-    }
-    for page in range(1, 5):
-        payload = {
-            "data": {
-                "sort": "Mcap",
-                "sorder": "desc",
-                "count": 50,
-                "params": [
-                    {"field": "idxlist.Indexid", "op": "", "val": "18"},
-                    {"field": "Exch", "op": "", "val": "NSE"},
-                    {"field": "OgInst", "op": "", "val": "ES"},
-                ],
-                "fields": ["Sym"],
-                "pgno": page,
-            }
-        }
-        try:
-            if hasattr(curl_requests, "Session"):
-                session = curl_requests.Session(impersonate="chrome120")
-                r = session.post(post_url, headers=post_headers, json=payload, timeout=15)
-            else:
-                r = curl_requests.post(post_url, headers=post_headers, json=payload, timeout=15)
-            if r.status_code == 200:
-                for item in r.json().get("data", []):
-                    sym = item.get("Sym")
-                    if sym:
-                        symbols.add(sym.strip())
-        except Exception as e:
-            logging.getLogger(__name__).warning(
-                "[universe] Dhan customscan page %s failed: %s", page, e
-            )
-
-    return sorted(list(symbols))
+        logging.getLogger(__name__).debug(f"fetch_fno200_symbols unexpected error: {e}")
+        pass
+        
+    logging.getLogger(__name__).warning("[universe] Failed to fetch FNO universe from nsepython, falling back to FO_SAMPLE")
+    # Use hardcoded FO sample list as fallback
+    fo_sample = [
+        "RELIANCE", "HDFCBANK", "ICICIBANK", "INFY", "TCS", "LT", "SBIN",
+        "AXISBANK", "KOTAKBANK", "ITC", "HINDUNILVR", "BHARTIARTL",
+        "MARUTI", "M&M", "SUNPHARMA", "BAJFINANCE", "ASIANPAINT", "TITAN", "ADANIENT"
+    ]
+    return sorted(list(set(fo_sample)))
 
 
 def load_universe(cfg: dict) -> list[str]:
-    src = cfg.get("universe_source", "fo_sample")
+    src = cfg.get("universe_source", "fno200")  # Changed default to fno200
     if src == "fno200":
-        # Make Dhan public URL/API primary
-        try:
-            symbols = fetch_dhan_public_universe()
-            if symbols:
-                return symbols
-        except Exception as e:
-            print(f"[config] Failed to fetch Dhan public F&O universe: {e}")
-
-        # Fallback to local csv
+        # Try local CSV first (more reliable than nsepython API)
         csv_path = Path(__file__).parent / "fno200.csv"
         try:
             import csv
@@ -198,17 +147,26 @@ def load_universe(cfg: dict) -> list[str]:
                     sym = row.get("symbol", "").strip()
                     if sym and sym not in symbols:
                         symbols.append(sym)
-            if not symbols:
-                raise ValueError("fno200.csv loaded but contained no valid symbols")
-            return symbols
+            if symbols:
+                return symbols
         except Exception as e:
-            print(f"Failed to load fno200.csv: {e}")
-            fallback = cfg.get("universe_fo_sample", [])
-            if not fallback:
-                raise ValueError(
-                    "Universe is empty. Check config 'universe_fo_sample' or 'fno200.csv'."
-                ) from e
-            return fallback
+            print(f"[config] Failed to load fno200.csv: {e}")
+
+        # Fallback to NSE API
+        try:
+            symbols = fetch_fno200_symbols()
+            if symbols:
+                return symbols
+        except Exception as e:
+            print(f"[config] Failed to fetch from nsepython: {e}")
+
+        # Final fallback
+        fallback = cfg.get("universe_fo_sample", [])
+        if not fallback:
+            raise ValueError(
+                "Universe is empty. Check config 'universe_fo_sample' or 'fno200.csv'."
+            )
+        return fallback
     else:
         symbols = cfg.get("universe_fo_sample", [])
         if not symbols:

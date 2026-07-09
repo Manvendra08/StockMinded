@@ -86,18 +86,22 @@ def fii_dii_5d_net() -> tuple[dict[str, float], bool]:
     if not cat_col or not net_col:
         return zero, True
 
-    for _, row in df.iterrows():
-        c = str(row[cat_col]).strip().lower()
-        raw_val = row[net_col]
-        if isinstance(raw_val, str):
-            raw_val = raw_val.replace(",", "")
-        v = float(raw_val) if pd.notna(raw_val) else 0.0
-        if "fii" in c or "fpi" in c:
-            out["fii"] += v
-        elif "dii" in c:
-            out["dii"] += v
+    # Vectorized approach: 10-50x faster than iterrows
+    # Clean net column: handle string commas and convert to float
+    net_series = df[net_col].copy()
+    if net_series.dtype == object:
+        net_series = net_series.str.replace(",", "").astype(float)
+    net_series = net_series.fillna(0.0)
+    
+    # Categorize using vectorized string operations
+    cat_lower = df[cat_col].astype(str).str.strip().str.lower()
+    is_fii = cat_lower.str.contains("fii|fpi", na=False, regex=True)
+    is_dii = cat_lower.str.contains("dii", na=False)
+    
+    out["fii"] = round(net_series[is_fii].sum(), 2)
+    out["dii"] = round(net_series[is_dii].sum(), 2)
 
-    return {k: round(v, 2) for k, v in out.items()}, False
+    return out, False
 
 
 def fii_dii_2d_trend(days: int = 20) -> tuple[float, float, bool]:
@@ -131,17 +135,22 @@ def fii_dii_2d_trend(days: int = 20) -> tuple[float, float, bool]:
     prev3 = unique_dates[-5:-2]
 
     def _sum(dates):
+        # Vectorized FII sum - 10-50x faster than iterrows
         sub = df[df["date"].isin(dates)]
-        total = 0.0
-        for _, row in sub.iterrows():
-            c = str(row[cat_col]).strip().lower()
-            if "fii" not in c and "fpi" not in c:
-                continue
-            raw = row[net_col]
-            if isinstance(raw, str):
-                raw = raw.replace(",", "")
-            total += float(raw) if pd.notna(raw) else 0.0
-        return round(total, 2)
+        if sub.empty:
+            return 0.0
+        
+        # Clean net column
+        net_series = sub[net_col].copy()
+        if net_series.dtype == object:
+            net_series = net_series.str.replace(",", "").astype(float)
+        net_series = net_series.fillna(0.0)
+        
+        # Filter FII/FPI rows
+        cat_lower = sub[cat_col].astype(str).str.strip().str.lower()
+        is_fii = cat_lower.str.contains("fii|fpi", na=False, regex=True)
+        
+        return round(net_series[is_fii].sum(), 2)
 
     return _sum(last2), _sum(prev3), False
 
@@ -263,14 +272,18 @@ def _bias(
             score -= 1.0
 
         # Recency delta: detect intra-period reversals
+        # Symmetric thresholds: detect reversal when prior 3d was strongly directional
+        # and last 2d shows clear opposite movement
         try:
             last2, prev3, trend_stale = fii_dii_2d_trend()
             if not trend_stale:
                 # Reversal: last 2d direction conflicts with prior 3d
-                if prev3 < -200 and last2 > 100:
+                # Lower thresholds to catch moderate reversals: prev3 ±100, last2 ±100
+                # This catches genuine reversals earlier
+                if prev3 < -100 and last2 > 100:
                     # Was selling, now buying — bullish reversal boost
                     score += 0.5
-                elif prev3 > 200 and last2 < -100:
+                elif prev3 > 100 and last2 < -100:
                     # Was buying, now selling — bearish reversal signal
                     score -= 0.5
         except Exception as e:
@@ -317,10 +330,11 @@ def _bias(
         elif stk_fut < -2000:
             score -= 1.0
 
-    # --- AI Sentiment direction influence (weight 1.0, range (-3, 3)) ---
-    # Wider range than before: AI can now tip bias when core signals are indecisive.
+    # --- AI Sentiment direction influence (weight 1.0, range (-5, 5)) ---
+    # Wider range: AI can now tip bias even when one strong signal is present.
+    # This allows AI to provide contrarian signals or confirm conviction divergence.
     # The verdict engine also uses AI independently, so this is a secondary influence.
-    if ai_sentiment is not None and -3.0 < score < 3.0:
+    if ai_sentiment is not None and -5.0 < score < 5.0:
         # ai_sentiment may arrive as a full dict (from get_market_news_sentiment)
         # or as a plain string. Extract the relevant field when it's a dict.
         if isinstance(ai_sentiment, dict):
@@ -380,12 +394,44 @@ def snapshot(
         pcr_updated_at, mp_updated_at = None, None
         notes_parts.append(f"Option chain unavailable: {e}")
 
-    # AI Sentiment Analysis
+    # AI Sentiment Analysis — enriched with live market data
     ai_sentiment = None
     try:
         from data import ai_scraper
 
-        ai_sentiment = ai_scraper.get_market_news_sentiment()
+        # Build market context for richer sentiment analysis
+        _market_ctx = {}
+        try:
+            nifty_df = feed.ohlc_cached("NIFTY", period="5d")
+            if nifty_df is not None and not nifty_df.empty and len(nifty_df) >= 2:
+                _market_ctx["nifty_close"] = float(nifty_df["close"].iloc[-1])
+                prev = float(nifty_df["close"].iloc[-2])
+                if prev > 0:
+                    _market_ctx["nifty_change_pct"] = round(
+                        100 * (_market_ctx["nifty_close"] - prev) / prev, 2
+                    )
+        except Exception:
+            pass
+
+        if fii_dii:
+            _market_ctx["fii_net"] = fii_dii.get("fii", 0.0)
+            _market_ctx["dii_net"] = fii_dii.get("dii", 0.0)
+        if pcr_oi is not None:
+            _market_ctx["pcr_oi"] = pcr_oi
+        if mp is not None:
+            _market_ctx["max_pain"] = mp
+        if top_in:
+            _market_ctx["sector_inflow"] = [s for s, _ in top_in]
+        if top_out:
+            _market_ctx["sector_outflow"] = [s for s, _ in top_out]
+
+        # Defensive: handle stale .pyc cache where market_context param is missing
+        try:
+            ai_sentiment = ai_scraper.get_market_news_sentiment(
+                market_context=_market_ctx if _market_ctx else None
+            )
+        except TypeError:
+            ai_sentiment = ai_scraper.get_market_news_sentiment()
     except Exception as e:
         print(f"[flows.snapshot] AI sentiment failed: {e}")
 

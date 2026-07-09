@@ -871,13 +871,14 @@
                 }
 
                 .rank-table th {
-                  font-size: 0.65rem;
+                  font-size: 0.72rem;
                   text-transform: uppercase;
-                  letter-spacing: 1px;
-                  color: var(--text-muted);
+                  letter-spacing: 0.8px;
+                  color: var(--text-secondary);
                   text-align: left;
-                  padding: 8px 12px;
-                  font-weight: 600;
+                  padding: 6px 12px 10px 12px;
+                  font-weight: 700;
+                  white-space: nowrap;
                 }
 
                 .rank-table td {
@@ -2104,6 +2105,56 @@
                   margin-top: 18px;
                 }
 
+                .btn {
+                  border: none;
+                  border-radius: var(--radius-xs);
+                  padding: 10px 16px;
+                  font-weight: 700;
+                  cursor: pointer;
+                  background: var(--glass);
+                  color: var(--text-primary);
+                  border: 1px solid var(--glass-border);
+                  transition: all 0.2s ease;
+                }
+
+                .btn:hover {
+                  transform: scale(1.02);
+                  box-shadow: 0 2px 12px rgba(255, 255, 255, 0.08);
+                }
+
+                .btn:disabled {
+                  opacity: 0.5;
+                  cursor: not-allowed;
+                  transform: none;
+                  box-shadow: none;
+                }
+
+                .btn-sm {
+                  padding: 2px 8px;
+                  font-size: 0.65rem;
+                  border-radius: 8px;
+                }
+
+                .btn .spin {
+                  display: none;
+                  width: 12px;
+                  height: 12px;
+                  border: 2px solid rgba(255, 255, 255, 0.3);
+                  border-top-color: var(--text-primary);
+                  border-radius: 50%;
+                  animation: spin 0.6s linear infinite;
+                  vertical-align: middle;
+                  margin-right: 4px;
+                }
+
+                .btn.loading .spin {
+                  display: inline-block;
+                }
+
+                .btn.loading .btn-text {
+                  display: none;
+                }
+
                 .btn-secondary,
                 .btn-primary {
                   border: none;
@@ -2484,8 +2535,11 @@
                         id="ai-sentiment-container"
                         style="margin-bottom: 0; padding: 24px 28px"
                     >
-                        <div class="card-title" style="margin-bottom: 12px">
-                            <span class="icon">🤖</span> AI Market Sentiment
+                        <div class="card-title" style="margin-bottom: 4px; justify-content: space-between; display: flex; width: 100%; align-items: center;">
+                            <div style="display: flex; align-items: center; gap: 8px;">
+                                <span class="icon">🤖</span> AI Market Sentiment
+                            </div>
+                            <span id="ai-sentiment-fetched-ts" style="font-size: 0.68rem; color: var(--text-muted); white-space: nowrap;"></span>
                         </div>
                         <div
                             id="ai-sentiment-text"
@@ -2643,7 +2697,6 @@
                                 border-top: 1px solid var(--glass-border);
                                 padding-top: 8px;
                                 margin-top: 4px;
-                                display: none;
                             "
                         >
                             <div
@@ -2673,6 +2726,19 @@
                                         color: var(--text-muted);
                                     "
                                 ></span>
+                                <button
+                                    id="verdict-review-btn"
+                                    class="btn btn-sm"
+                                    onclick="runVerdictReview(this)"
+                                    style="
+                                        margin-left: auto;
+                                        padding: 2px 8px;
+                                        font-size: 0.65rem;
+                                        border-radius: 8px;
+                                    "
+                                >
+                                    <span class="spin" style="display:none"></span><span class="btn-text">Run</span>
+                                </button>
                             </div>
                             <div
                                 id="verdict-review-reason"
@@ -3219,42 +3285,6 @@
                 const tsEl = document.getElementById("status-top-short");
                 if (tlEl) tlEl.textContent = topLong;
                 if (tsEl) tsEl.textContent = topShort;
-
-                // 4. Render AI Verdict Review
-                const vr = d.verdict_review || null;
-                const vrContainer = document.getElementById(
-                    "verdict-review-container",
-                );
-                const vrStatus = document.getElementById(
-                    "verdict-review-status",
-                );
-                const vrModel = document.getElementById("verdict-review-model");
-                const vrReason = document.getElementById(
-                    "verdict-review-reason",
-                );
-                if (
-                    vrContainer &&
-                    vr &&
-                    vr.model_used &&
-                    vr.model_used !== "None"
-                ) {
-                    const isApproved = vr.approved !== false;
-                    const tone = isApproved
-                        ? vr.suggested_action === "SKIP"
-                            ? "range"
-                            : "bull"
-                        : "bear";
-                    const icon = isApproved ? "✅" : "⚠️";
-                    vrStatus.textContent = `${icon} ${vr.suggested_action || "PROCEED"}`;
-                    vrStatus.style.color = isApproved
-                        ? "var(--accent-green)"
-                        : "var(--accent-red)";
-                    vrModel.textContent = `| ${vr.model_used}`;
-                    vrReason.textContent = vr.reason || "";
-                    vrContainer.style.display = "block";
-                } else if (vrContainer) {
-                    vrContainer.style.display = "none";
-                }
             }
 
             function renderRegime(d) {
@@ -3459,7 +3489,7 @@
                     )
                     .join("");
 
-                // Render AI Sentiment
+                // Render AI Sentiment — Rich structured output
                 const aiContainer = document.getElementById(
                     "ai-sentiment-container",
                 );
@@ -3480,178 +3510,160 @@
                         }
 
                         if (typeof parsed === "object" && parsed !== null) {
-                            const formatItem = (item) => {
-                                if (!item) return "";
-                                if (typeof item === "string") return item;
-                                if (typeof item === "object") {
-                                    const ticker =
-                                        item.ticker ||
-                                        item.symbol ||
-                                        item.stock ||
-                                        item.name;
-                                    const rationale =
-                                        item.rationale ||
-                                        item.idea ||
-                                        item.reason ||
-                                        item.action ||
-                                        item.description;
-                                    if (ticker && rationale) {
-                                        return `<strong>${ticker}</strong>: ${rationale}`;
-                                    }
-                                    if (ticker)
-                                        return `<strong>${ticker}</strong>`;
-                                    if (rationale) return rationale;
-                                    return Object.entries(item)
-                                        .map(
-                                            ([k, v]) =>
-                                                `<strong>${k}</strong>: ${v}`,
-                                        )
-                                        .join(" | ");
-                                }
-                                return String(item);
-                            };
+                            // Extract sentiment
+                            const sent = (parsed.overall_market_sentiment || "NEUTRAL").toUpperCase();
+                            const tone = sent.includes("BULL") ? "bull" : sent.includes("BEAR") ? "bear" : "range";
+                            const score = parsed.sentiment_score;
+                            const strength = parsed.sentiment_strength || "";
+                            const just = parsed.justification || "";
+                            const narrative = parsed.market_narrative || "";
+                            const confidence = parsed.confidence || "";
+                            const modelUsed = parsed.model_used || "";
 
-                            // Helper to recursively find a key value
-                            const findValue = (obj, keysToFind) => {
-                                // 1. Check direct keys
-                                for (const k of Object.keys(obj)) {
-                                    if (
-                                        keysToFind.some((tk) =>
-                                            k.toLowerCase().includes(tk),
-                                        )
-                                    ) {
-                                        const val = obj[k];
-                                        if (
-                                            val &&
-                                            typeof val === "object" &&
-                                            !Array.isArray(val)
-                                        ) {
-                                            // Try to search deeper inside the nested object
-                                            const subVal = findValue(
-                                                val,
-                                                keysToFind,
-                                            );
-                                            if (subVal) return subVal;
-                                        }
-                                        if (
-                                            val &&
-                                            (typeof val === "string" ||
-                                                typeof val === "number")
-                                        ) {
-                                            return String(val);
-                                        }
-                                    }
-                                }
-                                // 2. Fallback to any string value that matches
-                                for (const v of Object.values(obj)) {
-                                    if (
-                                        v &&
-                                        typeof v === "object" &&
-                                        !Array.isArray(v)
-                                    ) {
-                                        const subVal = findValue(v, keysToFind);
-                                        if (subVal) return subVal;
-                                    }
-                                }
-                                return null;
-                            };
-
-                            // Look specifically for overall sentiment value first
-                            let sent = findValue(parsed, [
-                                "overall_market_sentiment",
-                                "overall_sentiment",
-                                "verdict",
-                                "outlook",
-                            ]);
-                            if (!sent) {
-                                sent = findValue(parsed, ["sentiment"]);
+                            // Sentiment score bar
+                            let scoreBar = "";
+                            if (typeof score === "number") {
+                                const pct = Math.round(((score + 1) / 2) * 100);
+                                const barColor = score > 0.2 ? "var(--accent-green)" : score < -0.2 ? "var(--accent-red)" : "var(--accent-amber)";
+                                scoreBar = `
+                                    <div style="margin:6px 0 10px 0;">
+                                        <div style="display:flex;justify-content:space-between;font-size:0.65rem;color:var(--text-muted);margin-bottom:2px;">
+                                            <span>-1.0</span><span>Score: ${score.toFixed(2)}</span><span>+1.0</span>
+                                        </div>
+                                        <div style="height:6px;background:rgba(255,255,255,0.08);border-radius:3px;overflow:hidden;">
+                                            <div style="height:100%;width:${pct}%;background:${barColor};border-radius:3px;transition:width 0.3s;"></div>
+                                        </div>
+                                    </div>`;
                             }
 
-                            let just = findValue(parsed, [
-                                "justification",
-                                "reason",
-                                "summary",
-                                "explanation",
-                                "content",
-                            ]);
+                            // Key Drivers
+                            const drivers = parsed.key_drivers || parsed.key_catalysts || parsed.catalysts || [];
+                            let driversHtml = "";
+                            if (Array.isArray(drivers) && drivers.length > 0) {
+                                const driverItems = drivers.map(d => {
+                                    if (typeof d === "string") return `<li>${d}</li>`;
+                                    const name = d.name || d.description || d.title || "";
+                                    const detail = d.detail || d.rationale || "";
+                                    const impact = (d.impact || "").toUpperCase();
+                                    const icon = impact === "POS" ? "🟢" : impact === "NEG" ? "🔴" : "⚪";
+                                    return `<li>${icon} <strong>${name}</strong>${detail ? " — " + detail : ""}</li>`;
+                                }).join("");
+                                driversHtml = `
+                                    <div style="margin-top:10px;border-top:1px solid rgba(255,255,255,0.05);padding-top:8px;">
+                                        <div style="font-weight:700;font-size:0.7rem;color:#3b82f6;text-transform:uppercase;margin-bottom:4px;display:flex;align-items:center;gap:4px;">
+                                            <span>⚡</span> Key Drivers
+                                        </div>
+                                        <ul style="margin:0;padding-left:14px;color:var(--text-primary);font-size:0.72rem;line-height:1.5;">
+                                            ${driverItems}
+                                        </ul>
+                                    </div>`;
+                            }
 
-                            if (sent) {
-                                const tone = sent.toLowerCase().includes("bull")
-                                    ? "bull"
-                                    : sent.toLowerCase().includes("bear")
-                                      ? "bear"
-                                      : "range";
+                            // Sector Outlook
+                            const sectorOutlook = parsed.sector_outlook || {};
+                            let sectorHtml = "";
+                            const bullishSectors = sectorOutlook.bullish || [];
+                            const bearishSectors = sectorOutlook.bearish || [];
+                            const neutralSectors = sectorOutlook.neutral || [];
+                            if (bullishSectors.length || bearishSectors.length || neutralSectors.length) {
+                                sectorHtml = `
+                                    <div style="margin-top:10px;border-top:1px solid rgba(255,255,255,0.05);padding-top:8px;">
+                                        <div style="font-weight:700;font-size:0.7rem;color:#8b5cf6;text-transform:uppercase;margin-bottom:6px;display:flex;align-items:center;gap:4px;">
+                                            <span>📊</span> Sector Outlook
+                                        </div>
+                                        <div style="display:flex;flex-wrap:wrap;gap:6px;">
+                                            ${bullishSectors.map(s => `<span style="font-size:0.65rem;padding:2px 8px;border-radius:10px;background:rgba(16,185,129,0.15);color:var(--accent-green);border:1px solid rgba(16,185,129,0.3);">▲ ${s}</span>`).join("")}
+                                            ${bearishSectors.map(s => `<span style="font-size:0.65rem;padding:2px 8px;border-radius:10px;background:rgba(239,68,68,0.15);color:var(--accent-red);border:1px solid rgba(239,68,68,0.3);">▼ ${s}</span>`).join("")}
+                                            ${neutralSectors.map(s => `<span style="font-size:0.65rem;padding:2px 8px;border-radius:10px;background:rgba(255,255,255,0.06);color:var(--text-muted);border:1px solid rgba(255,255,255,0.1);">— ${s}</span>`).join("")}
+                                        </div>
+                                    </div>`;
+                            }
 
-                                // Extract Catalysts & Trade Ideas safely
-                                const catalysts =
-                                    parsed.top_catalysts || parsed.catalysts;
-                                const ideas =
-                                    parsed.actionable_trade_ideas ||
-                                    parsed.trade_ideas ||
-                                    parsed.ideas;
+                            // Risk Factors
+                            const risks = parsed.risk_factors || [];
+                            let risksHtml = "";
+                            if (Array.isArray(risks) && risks.length > 0) {
+                                risksHtml = `
+                                    <div style="margin-top:10px;border-top:1px solid rgba(255,255,255,0.05);padding-top:8px;">
+                                        <div style="font-weight:700;font-size:0.7rem;color:#f59e0b;text-transform:uppercase;margin-bottom:4px;display:flex;align-items:center;gap:4px;">
+                                            <span>⚠️</span> Risk Factors
+                                        </div>
+                                        <ul style="margin:0;padding-left:14px;color:var(--text-primary);font-size:0.72rem;line-height:1.4;">
+                                            ${risks.map(r => `<li>${r}</li>`).join("")}
+                                        </ul>
+                                    </div>`;
+                            }
 
-                                const _modelUsed = parsed.model_used || "";
-                                let html = `
-                <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
-                  <span class="decision-pill ${tone}" style="display:inline-block; padding: 4px 10px; font-size:0.75rem; font-weight:700; border-radius:4px;">${sent.toUpperCase()}</span>
-                  ${_modelUsed ? `<span style="font-size:0.65rem; color:var(--text-muted); background:rgba(255,255,255,0.06); padding:2px 8px; border-radius:3px;">🧠 ${_modelUsed}</span>` : ""}
-                </div>
-                ${just ? `<div style="font-size:0.8rem; color:var(--text-secondary); line-height:1.4; margin-bottom: 12px; font-style: italic;">"${just}"</div>` : ""}
-              `;
+                            // Support / Resistance
+                            const sr = parsed.support_resistance || {};
+                            let srHtml = "";
+                            if (sr.support || sr.resistance) {
+                                srHtml = `
+                                    <div style="margin-top:8px;display:flex;gap:12px;font-size:0.7rem;">
+                                        ${sr.support ? `<span style="color:var(--accent-green);">Support: <strong>${typeof sr.support === 'number' ? sr.support.toLocaleString() : sr.support}</strong></span>` : ""}
+                                        ${sr.resistance ? `<span style="color:var(--accent-red);">Resistance: <strong>${typeof sr.resistance === 'number' ? sr.resistance.toLocaleString() : sr.resistance}</strong></span>` : ""}
+                                    </div>`;
+                            }
 
-                                if (
-                                    Array.isArray(catalysts) &&
-                                    catalysts.length > 0
-                                ) {
-                                    html += `
-                  <div style="margin-top: 10px; border-top: 1px solid rgba(255,255,255,0.05); padding-top: 8px;">
-                    <div style="font-weight: 700; font-size: 0.75rem; color: #3b82f6; text-transform: uppercase; margin-bottom: 4px; display: flex; align-items: center; gap: 4px;">
-                      <span>⚡</span> Key Catalysts
-                    </div>
-                    <ul style="margin: 0; padding-left: 14px; color: var(--text-primary); font-size: 0.75rem; line-height: 1.4;">
-                      ${catalysts.map((c) => `<li style="margin-bottom: 4px;">${formatItem(c)}</li>`).join("")}
-                    </ul>
-                  </div>
-                `;
-                                }
+                            // Actionable Trade Ideas
+                            const ideas = parsed.actionable_trade_ideas || parsed.trade_ideas || parsed.ideas || [];
+                            let ideasHtml = "";
+                            if (Array.isArray(ideas) && ideas.length > 0) {
+                                const ideaItems = ideas.map(i => {
+                                    if (typeof i === "string") return `<li>${i}</li>`;
+                                    const ticker = i.ticker || i.symbol || i.stock || "";
+                                    const dir = (i.direction || "").toUpperCase();
+                                    const reason = i.reason || i.rationale || "";
+                                    const conf = i.confidence || "";
+                                    const dirIcon = dir === "LONG" ? "🟢" : dir === "SHORT" ? "🔴" : "⚪";
+                                    return `<li>${dirIcon} <strong>${ticker}</strong> ${dir}${conf ? ` [${conf}]` : ""}${reason ? " — " + reason : ""}</li>`;
+                                }).join("");
+                                ideasHtml = `
+                                    <div style="margin-top:10px;border-top:1px solid rgba(255,255,255,0.05);padding-top:8px;">
+                                        <div style="font-weight:700;font-size:0.7rem;color:#10b981;text-transform:uppercase;margin-bottom:4px;display:flex;align-items:center;gap:4px;">
+                                            <span>🎯</span> Actionable Ideas
+                                        </div>
+                                        <ul style="margin:0;padding-left:14px;color:var(--text-primary);font-size:0.72rem;line-height:1.5;font-weight:600;">
+                                            ${ideaItems}
+                                        </ul>
+                                    </div>`;
+                            }
 
-                                if (Array.isArray(ideas) && ideas.length > 0) {
-                                    html += `
-                  <div style="margin-top: 10px; border-top: 1px solid rgba(255,255,255,0.05); padding-top: 8px;">
-                    <div style="font-weight: 700; font-size: 0.75rem; color: #10b981; text-transform: uppercase; margin-bottom: 4px; display: flex; align-items: center; gap: 4px;">
-                      <span>🎯</span> Actionable Ideas / Hot Stocks
-                    </div>
-                    <ul style="margin: 0; padding-left: 14px; color: var(--text-primary); font-size: 0.75rem; line-height: 1.4; font-weight: 600;">
-                      ${ideas.map((i) => `<li style="margin-bottom: 4px;">${formatItem(i)}</li>`).join("")}
-                    </ul>
-                  </div>
-                `;
-                                }
+                            // Compose final HTML
+                            let html = `
+                                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+                                    <div style="display:flex;align-items:center;gap:8px;">
+                                        <span class="decision-pill ${tone}" style="display:inline-block;padding:4px 12px;font-size:0.8rem;font-weight:700;border-radius:4px;">${sent}</span>
+                                        ${strength ? `<span style="font-size:0.65rem;color:var(--text-muted);">${strength}</span>` : ""}
+                                        ${confidence ? `<span style="font-size:0.6rem;padding:1px 6px;border-radius:8px;background:rgba(255,255,255,0.06);color:var(--text-muted);">${confidence} conf</span>` : ""}
+                                    </div>
+                                    ${modelUsed ? `<span style="font-size:0.6rem;color:var(--text-muted);background:rgba(255,255,255,0.06);padding:2px 8px;border-radius:3px;">🧠 ${modelUsed}</span>` : ""}
+                                </div>
+                                ${scoreBar}
+                                ${just ? `<div style="font-size:0.78rem;color:var(--text-secondary);line-height:1.5;margin-bottom:8px;">${just}</div>` : ""}
+                                ${narrative ? `<div style="font-size:0.72rem;color:var(--text-muted);line-height:1.5;margin-bottom:8px;font-style:italic;border-left:2px solid rgba(255,255,255,0.1);padding-left:8px;">${narrative}</div>` : ""}
+                                ${srHtml}
+                                ${driversHtml}
+                                ${sectorHtml}
+                                ${risksHtml}
+                                ${ideasHtml}
+                            `;
 
-                                aiText.innerHTML = html;
-                            } else {
-                                aiText.innerHTML = Object.entries(parsed)
-                                    .map(([k, v]) => {
-                                        if (Array.isArray(v)) {
-                                            return `<div style="margin-bottom:4px;"><strong>${k}:</strong><ul style="margin:4px 0 4px 16px; padding:0; list-style-type:disc;">${v.map((item) => `<li>${item}</li>`).join("")}</ul></div>`;
-                                        }
-                                        if (
-                                            typeof v === "object" &&
-                                            v !== null
-                                        ) {
-                                            return `<div style="margin-bottom:4px;"><strong>${k}:</strong> ${JSON.stringify(v)}</div>`;
-                                        }
-                                        return `<div style="margin-bottom:4px;"><strong>${k}:</strong> ${v}</div>`;
-                                    })
-                                    .join("");
+                            aiText.innerHTML = html;
+
+                            // Populate last refresh timestamp
+                            const tsEl = document.getElementById("ai-sentiment-fetched-ts");
+                            if (tsEl) {
+                                const fetchedAt = f.flows?.ai_sentiment_fetched_at;
+                                tsEl.textContent = fetchedAt ? `Refreshed: ${fetchedAt}` : "";
                             }
                         } else {
-                            aiText.textContent = parsed;
+                            aiText.textContent = typeof parsed === "string" ? parsed : JSON.stringify(parsed);
                         }
                         aiContainer.style.display = "block";
                     } else {
                         aiText.innerHTML =
-                            '<div style="color:var(--text-muted);font-style:italic;">No AI Sentiment data available</div>';
+                            '<div style="color:var(--text-muted);font-style:italic;">Click refresh to load AI sentiment analysis</div>';
                         aiContainer.style.display = "block";
                     }
                 }
@@ -4235,6 +4247,43 @@
                 }, 4000);
             }
 
+            async function runVerdictReview(btn) {
+                const statusEl = document.getElementById("verdict-review-status");
+                const modelEl = document.getElementById("verdict-review-model");
+                const reasonEl = document.getElementById("verdict-review-reason");
+                const spinEl = btn.querySelector(".spin");
+                const textEl = btn.querySelector(".btn-text");
+                const origText = textEl.textContent;
+
+                if (spinEl) spinEl.style.display = "inline-block";
+                if (textEl) textEl.textContent = "Reviewing...";
+                btn.disabled = true;
+
+                try {
+                    const res = await fetch("/api/verdict-review");
+                    const d = await res.json();
+
+                    if (d.error) throw new Error(d.error);
+
+                    const isApproved = d.approved !== false;
+                    const icon = isApproved ? "✅" : "⚠️";
+                    statusEl.textContent = `${icon} ${d.suggested_action || "PROCEED"}`;
+                    statusEl.style.color = isApproved
+                        ? "var(--accent-green)"
+                        : "var(--accent-red)";
+                    modelEl.textContent = d.model_used ? `| ${d.model_used}` : "";
+                    reasonEl.textContent = d.reason || "";
+                } catch (e) {
+                    statusEl.textContent = "⚠️ Review failed";
+                    statusEl.style.color = "var(--accent-red)";
+                    reasonEl.textContent = e.message;
+                }
+
+                if (spinEl) spinEl.style.display = "none";
+                if (textEl) textEl.textContent = origText;
+                btn.disabled = false;
+            }
+
             function isMarketOpen() {
                 const now = new Date();
                 // Create a Date object shifted to IST (UTC+5:30)
@@ -4640,17 +4689,44 @@
                         const count = containerId.includes("banknifty") ? idxData.constituents.length : 10;
                         const displayList = idxData.constituents.slice(0, count);
 
-                        listEl.innerHTML = displayList.map(c => {
+                        // Build header with positive/negative contribution summary
+                        const posContr = idxData.positive_weight_contribution || 0;
+                        const negContr = idxData.negative_weight_contribution || 0;
+                        const headerHtml = `
+                            <div style="display: flex; align-items: center; justify-content: space-between; padding: 5px 8px; background: rgba(255,255,255,0.03); border-radius: 4px; margin-bottom: 8px;">
+                                <span style="font-size: 0.72rem; font-weight: 600; color: var(--accent-green);">+${posContr.toFixed(1)}% up</span>
+                                <div style="width: 1px; height: 12px; background: var(--glass-border); margin: 0 8px;"></div>
+                                <span style="font-size: 0.72rem; font-weight: 600; color: var(--accent-red);">-${negContr.toFixed(1)}% down</span>
+                            </div>
+                            <table class="rank-table" style="width: 100%; margin: 0; border-collapse: collapse;">
+                                <thead>
+                                    <tr>
+                                        <th style="text-align: left; padding-bottom: 6px; font-size: 0.72rem; font-weight: 700; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.7px;">Symbol (Wt)</th>
+                                        <th style="text-align: right; padding-bottom: 6px; font-size: 0.72rem; font-weight: 700; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.7px;">Contr</th>
+                                        <th style="text-align: right; padding-bottom: 6px; font-size: 0.72rem; font-weight: 700; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.7px;">Chg %</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                        `;
+
+                        listEl.innerHTML = headerHtml + displayList.map(c => {
                             const chg = c.change_pct;
+                            const contr = c.contribution_pct || 0;
                             const cls = chg > 0 ? "up" : chg < 0 ? "down" : "neutral-c";
                             const valStr = chg != null ? `${chg > 0 ? "+" : ""}${chg}%` : "—";
+                            const contrStr = contr !== 0 ? `${contr > 0 ? "+" : ""}${contr.toFixed(2)}%` : "—";
+                            const contrCls = contr > 0 ? "up" : contr < 0 ? "down" : "neutral-c";
                             return `
-                                <div style="display: flex; justify-content: space-between; padding: 4px 8px; border-bottom: 1px solid rgba(255,255,255,0.02);">
-                                    <span style="font-weight: 500;">${c.symbol} <span style="font-size: 0.65rem; color: var(--text-muted);">(${c.weight}%)</span></span>
-                                    <span class="${cls}" style="font-weight: 600;">${valStr}</span>
-                                </div>
+                                <tr style="border-bottom: 1px solid rgba(255,255,255,0.02);">
+                                    <td style="padding: 6px 0; text-align: left;">
+                                        <span style="font-weight: 500;">${c.symbol}</span>
+                                        <span style="font-size: 0.65rem; color: var(--text-muted); margin-left: 4px;">(${c.weight}%)</span>
+                                    </td>
+                                    <td class="${contrCls}" style="padding: 6px 0; font-weight: 500; font-size: 0.75rem; text-align: right;">${contrStr}</td>
+                                    <td class="${cls}" style="padding: 6px 0; font-weight: 600; text-align: right;">${valStr}</td>
+                                </tr>
                             `;
-                        }).join("");
+                        }).join("") + "</tbody></table>";
                     };
 
                     renderList("nifty-constituents-list", "nifty-mom-badge", result.data.NIFTY);

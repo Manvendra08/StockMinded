@@ -258,28 +258,26 @@ def build_trade_verdict(data: dict) -> CombinedVerdict:
 
             # Gate: need >=5 Q5 names on at least one side to even consider
             if q5_longs >= 5 or q5_shorts >= 5:
-                # AI sentiment influence: symmetric shift across both sides.
-                # +ve shift favors longs and penalizes shorts, -ve shift does opposite.
-                ai_shift = int(round(ai_influence * 3))
                 long_str = (
                     q5_longs
                     + (2 if bias == "LONG" else 0)
                     + (4 if trend > 0 else 0)
-                    + ai_shift
                 )
                 short_str = (
                     q5_shorts
                     + (2 if bias == "SHORT" else 0)
                     + (4 if trend < 0 else 0)
-                    - ai_shift
                 )
 
-                if q5_longs >= 5 and q5_shorts >= 5:
-                    stock_action = "LONG_AND_SHORT"
-                elif long_str > short_str + 4:
+                # Evaluate strength first to avoid overlap bug
+                # If one side has clear edge, take that direction
+                if long_str > short_str + 4:
                     stock_action = "LONG_ONLY"
                 elif short_str > long_str + 4:
                     stock_action = "SHORT_ONLY"
+                elif q5_longs >= 5 and q5_shorts >= 5:
+                    # Both sides qualify but no clear edge - mixed play
+                    stock_action = "LONG_AND_SHORT"
                 else:
                     # Ambiguous - stay out in range regimes
                     pass
@@ -303,9 +301,10 @@ def build_trade_verdict(data: dict) -> CombinedVerdict:
                         stock_conf = "LOW"
                     stock_strategy = f"Range leadership {stock_action}: Only Q5 RS candidates (high bar)."
                     # Log AI influence on range direction decision
-                    if ai_shift != 0:
+                    if ai_influence != 0:
+                        direction = "longs" if ai_influence > 0 else "shorts"
                         stock_reasons_extra.append(
-                            f"AI sentiment {ai_overall} ({ai_conf_lbl}) shifts range {ai_shift:+d}pt toward {'longs' if ai_shift > 0 else 'shorts'}"
+                            f"AI sentiment {ai_overall} ({ai_conf_lbl}) favors {direction} (confidence boost)"
                         )
 
     stock_reasons = list(common_reasons)
@@ -316,6 +315,95 @@ def build_trade_verdict(data: dict) -> CombinedVerdict:
     for extra in stock_reasons_extra:
         if extra not in stock_reasons:
             stock_reasons.append(extra)
+
+    # --- 2. NIFTY OPTIONS SELLING SYSTEM ---
+    nifty_action = "WAIT"
+    nifty_strategy = "Waiting for fresh option chain / low VIX."
+    nifty_can_trade = False
+    nifty_tone = "range"
+    nifty_conf = "LOW"
+    nifty_blocks = list(common_blocks)
+    nifty_reasons = list(common_reasons) + [f"PCR {pcr}", f"MaxPain {max_pain}"]
+    if not option_ok:
+        nifty_blocks.append("Option chain stale/missing")
+
+    if not data_stale and vix < 25 and option_ok:
+        nifty_can_trade = True
+        iv_rank_val = data.get("iv_rank")
+        if iv_rank_val is not None:
+            try:
+                iv_rank_val = float(iv_rank_val)
+            except (ValueError, TypeError):
+                iv_rank_val = None
+        # Issue #6: IV rank check for naked sells
+        # None = unknown IV history -> require defined-risk (safer default)
+        # Only allow naked sells when we have confirmed IV rank >= 40
+        iv_rank_ok = iv_rank_val is not None and iv_rank_val >= 40
+
+        if regime_name in ("TREND_UP", "TREND_DOWN") and abs(trend) >= 4:
+            # Issue #6: require IV rank >= 40 before naked sell; thin-premium environments
+            # produce inadequate compensation for the open-ended risk.
+            if not iv_rank_ok:
+                nifty_action = "OPTION_SELL_DEFINED_RISK"
+                nifty_conf = "LOW" if iv_rank_val is None else "MEDIUM"
+                nifty_tone = "bull" if trend > 0 else "bear"
+                if iv_rank_val is None:
+                    nifty_strategy = "IV rank unknown - downgrade to defined-risk spread (safety first)."
+                else:
+                    nifty_strategy = f"IV rank {iv_rank_val:.0f} < 40 - downgrade naked -> defined-risk spread."
+            else:
+                nifty_action = "NAKED_OPTION_SELL"
+                nifty_conf = (
+                    "HIGH"
+                    if (trend > 0 and bias == "LONG") or (trend < 0 and bias == "SHORT")
+                    else "MEDIUM"
+                )
+                nifty_tone = "bull" if trend > 0 else "bear"
+                side = "PUTS" if trend > 0 else "CALLS"
+                nifty_strategy = f"Naked {side} selling with SL (Aggressive Trend, IVR {iv_rank_val:.0f})."
+        elif regime_name in ("RANGE_HIGH_VOL", "RANGE_LOW_VOL", "VOL_CONTRACTION"):
+            # Range-bound -> Defined risk (Iron Condor / Iron Fly)
+            nifty_action = "OPTION_SELL_DEFINED_RISK"
+            nifty_conf = "MEDIUM"
+            nifty_strategy = (
+                structure.get("primary") or "Sell premium via Iron Condor/Fly (Range)."
+            )
+        else:
+            # Issue #6: fallback naked sell also requires IV rank >= 40
+            if bias in ("LONG", "SHORT") and iv_rank_ok:
+                nifty_action = "NAKED_OPTION_SELL"
+                nifty_conf = "MEDIUM"
+                side = "PUTS" if bias == "LONG" else "CALLS"
+                nifty_strategy = (
+                    f"Naked {side} selling basis Smart Money Bias (IVR {iv_rank_val:.0f})."
+                )
+
+    # --- 3. CIRCUIT BREAKER OVERRIDES ---
+    bearish_cb = (nifty_momentum is not None and nifty_momentum <= -1.5) or (banknifty_momentum is not None and banknifty_momentum <= -1.5) or (ai_influence <= -0.8)
+    bullish_cb = (nifty_momentum is not None and nifty_momentum >= 1.5) or (banknifty_momentum is not None and banknifty_momentum >= 1.5) or (ai_influence >= 0.8)
+
+    if bearish_cb:
+        if stock_action in ("LONG_ONLY", "LONG_AND_SHORT"):
+            stock_action = "WAIT"
+            stock_strategy = "Circuit Breaker: Severe bearish momentum/sentiment. Longs blocked."
+            stock_reasons.append(f"Bearish Circuit Breaker (Nifty Mom: {nifty_momentum:+.2f}%, BN Mom: {banknifty_momentum:+.2f}%, AI Infl: {ai_influence:+.1f})")
+            stock_blocks.append("Bearish Circuit Breaker: Longs Blocked")
+        if nifty_action in ("OPTION_SELL_DEFINED_RISK", "NAKED_OPTION_SELL"):
+            nifty_action = "WAIT"
+            nifty_strategy = "Circuit Breaker: Severe bearish momentum/sentiment. Option selling blocked."
+            nifty_reasons.append(f"Bearish Circuit Breaker (Nifty Mom: {nifty_momentum:+.2f}%, BN Mom: {banknifty_momentum:+.2f}%, AI Infl: {ai_influence:+.1f})")
+            nifty_blocks.append("Bearish Circuit Breaker: Option Selling Blocked")
+    elif bullish_cb:
+        if stock_action in ("SHORT_ONLY", "LONG_AND_SHORT"):
+            stock_action = "WAIT"
+            stock_strategy = "Circuit Breaker: Severe bullish momentum/sentiment. Shorts blocked."
+            stock_reasons.append(f"Bullish Circuit Breaker (Nifty Mom: {nifty_momentum:+.2f}%, BN Mom: {banknifty_momentum:+.2f}%, AI Infl: {ai_influence:+.1f})")
+            stock_blocks.append("Bullish Circuit Breaker: Shorts Blocked")
+        if nifty_action in ("OPTION_SELL_DEFINED_RISK", "NAKED_OPTION_SELL"):
+            nifty_action = "WAIT"
+            nifty_strategy = "Circuit Breaker: Severe bullish momentum/sentiment. Option selling blocked."
+            nifty_reasons.append(f"Bullish Circuit Breaker (Nifty Mom: {nifty_momentum:+.2f}%, BN Mom: {banknifty_momentum:+.2f}%, AI Infl: {ai_influence:+.1f})")
+            nifty_blocks.append("Bullish Circuit Breaker: Option Selling Blocked")
 
     stock_v = StockVerdict(
         action=stock_action,
@@ -330,65 +418,6 @@ def build_trade_verdict(data: dict) -> CombinedVerdict:
         blocks=stock_blocks,
     )
 
-    # --- 2. NIFTY OPTIONS SELLING SYSTEM ---
-    nifty_action = "WAIT"
-    nifty_strategy = "Waiting for fresh option chain / low VIX."
-    nifty_can_trade = False
-    nifty_tone = "range"
-    nifty_conf = "LOW"
-    nifty_blocks = list(common_blocks)
-    if not option_ok:
-        nifty_blocks.append("Option chain stale/missing")
-
-    if not data_stale and vix < 25 and option_ok:
-        nifty_can_trade = True
-        iv_rank_val = data.get("iv_rank")
-        if iv_rank_val is not None:
-            try:
-                iv_rank_val = float(iv_rank_val)
-            except (ValueError, TypeError):
-                iv_rank_val = None
-        iv_rank_ok = (iv_rank_val is None) or (
-            iv_rank_val >= 40
-        )  # None = unknown -> allow but flag
-
-        if regime_name in ("TREND_UP", "TREND_DOWN") and abs(trend) >= 4:
-            # Issue #6: require IV rank >= 40 before naked sell; thin-premium environments
-            # produce inadequate compensation for the open-ended risk.
-            if not iv_rank_ok:
-                nifty_action = "OPTION_SELL_DEFINED_RISK"
-                nifty_conf = "LOW"
-                nifty_tone = "bull" if trend > 0 else "bear"
-                nifty_strategy = f"IV rank {iv_rank_val:.0f} < 40 - downgrade naked -> defined-risk spread."
-            else:
-                nifty_action = "NAKED_OPTION_SELL"
-                nifty_conf = (
-                    "HIGH"
-                    if (trend > 0 and bias == "LONG") or (trend < 0 and bias == "SHORT")
-                    else "MEDIUM"
-                )
-                nifty_tone = "bull" if trend > 0 else "bear"
-                side = "PUTS" if trend > 0 else "CALLS"
-                ivr_display = f"{iv_rank_val:.0f}" if iv_rank_val is not None else "N/A"
-                nifty_strategy = f"Naked {side} selling with SL (Aggressive Trend, IVR {ivr_display})."
-        elif regime_name in ("RANGE_HIGH_VOL", "RANGE_LOW_VOL", "VOL_CONTRACTION"):
-            # Range-bound -> Defined risk (Iron Condor / Iron Fly)
-            nifty_action = "OPTION_SELL_DEFINED_RISK"
-            nifty_conf = "MEDIUM"
-            nifty_strategy = (
-                structure.get("primary") or "Sell premium via Iron Condor/Fly (Range)."
-            )
-        else:
-            # Issue #6: fallback naked sell also requires IV rank >= 40
-            if bias in ("LONG", "SHORT") and iv_rank_ok:
-                nifty_action = "NAKED_OPTION_SELL"
-                nifty_conf = "MEDIUM"
-                side = "PUTS" if bias == "LONG" else "CALLS"
-                ivr_display = f"{iv_rank_val:.0f}" if iv_rank_val is not None else "N/A"
-                nifty_strategy = (
-                    f"Naked {side} selling basis Smart Money Bias (IVR {ivr_display})."
-                )
-
     nifty_v = NiftyVerdict(
         action=nifty_action,
         tone=nifty_tone,
@@ -397,7 +426,7 @@ def build_trade_verdict(data: dict) -> CombinedVerdict:
         confidence_score=_conf_score(nifty_conf),  # Issue #11
         strategy=nifty_strategy,
         can_trade=nifty_can_trade,
-        reasons=list(common_reasons) + [f"PCR {pcr}", f"MaxPain {max_pain}"],
+        reasons=nifty_reasons,
         blocks=nifty_blocks,
     )
 

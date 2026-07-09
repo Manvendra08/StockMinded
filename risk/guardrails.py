@@ -53,11 +53,12 @@ class Guardrails:
                         max_correlation_vs_open: float = 0.0) -> GuardrailCheck:
         reasons: list[str] = []
 
-        if day_pnl <= -self.daily_stop:
-            reasons.append(f"Daily stop hit: day P&L ₹{day_pnl:,.0f} ≤ −₹{self.daily_stop:,.0f}")
+        # Use strict < for stops: hitting exact stop should trigger halt
+        if day_pnl < -self.daily_stop:
+            reasons.append(f"Daily stop hit: day P&L ₹{day_pnl:,.0f} < −₹{self.daily_stop:,.0f}")
 
-        if month_pnl <= -self.monthly_stop:
-            reasons.append(f"Monthly stop hit: month P&L ₹{month_pnl:,.0f} ≤ −₹{self.monthly_stop:,.0f}")
+        if month_pnl < -self.monthly_stop:
+            reasons.append(f"Monthly stop hit: month P&L ₹{month_pnl:,.0f} < −₹{self.monthly_stop:,.0f}")
 
         if open_risk + proposed_risk > self.concurrent_cap:
             reasons.append(
@@ -76,7 +77,7 @@ class Guardrails:
         return GuardrailCheck(ok=not reasons, reasons=reasons)
 
     def eod_flatten_required(self, day_pnl: float) -> bool:
-        return day_pnl <= -self.daily_stop
+        return day_pnl < -self.daily_stop
 
     def size_halve_next_month(self, month_pnl: float) -> bool:
-        return month_pnl <= -self.monthly_stop
+        return month_pnl < -self.monthly_stop

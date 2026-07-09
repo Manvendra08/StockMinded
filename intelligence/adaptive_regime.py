@@ -83,6 +83,8 @@ class AdaptiveRegimeClassifier:
             "breadth": 2.0,
             "vix": 1.0,
             "ema_alignment": 2.0,
+            "heavyweight_momentum": 2.5,
+            "ai_sentiment": 2.0,
         },
         Regime.TREND_DOWN: {
             "trend_score": 3.0,
@@ -90,6 +92,8 @@ class AdaptiveRegimeClassifier:
             "breadth": 2.0,
             "vix": 1.0,
             "ema_alignment": 2.0,
+            "heavyweight_momentum": 2.5,
+            "ai_sentiment": 2.0,
         },
         Regime.RANGE_LOW_VOL: {
             "adx": 2.0,
@@ -97,6 +101,8 @@ class AdaptiveRegimeClassifier:
             "trend_score": 1.5,
             "breadth": 1.0,
             "volatility": 2.0,
+            "heavyweight_momentum": 1.5,
+            "ai_sentiment": 1.0,
         },
         Regime.RANGE_HIGH_VOL: {
             "adx": 1.5,
@@ -104,18 +110,24 @@ class AdaptiveRegimeClassifier:
             "trend_score": 1.0,
             "breadth": 1.5,
             "volatility": 2.0,
+            "heavyweight_momentum": 1.5,
+            "ai_sentiment": 1.5,
         },
         Regime.VOL_EXPANSION: {
             "vix_change": 3.0,
             "vix_level": 2.0,
             "breadth": 1.0,
             "trend_score": 0.5,
+            "heavyweight_momentum": 3.0,
+            "ai_sentiment": 2.5,
         },
         Regime.VOL_CONTRACTION: {
             "vix_change": 2.5,
             "vix_level": 2.0,
             "adx": 1.5,
             "breadth": 0.5,
+            "heavyweight_momentum": 1.5,
+            "ai_sentiment": 1.0,
         },
     }
 
@@ -152,7 +164,7 @@ class AdaptiveRegimeClassifier:
         vix_df = vix_df.dropna(subset=["close"])
 
         # Compute indicators
-        indicators = self._compute_indicators(idx_df, vix_df, stock_universe_data)
+        indicators = self._compute_indicators(idx_df, vix_df, stock_universe_data, index_symbol=index_symbol)
 
         # Build thought graph with all regime hypotheses
         graph = ThoughtGraph("adaptive_regime")
@@ -243,6 +255,7 @@ class AdaptiveRegimeClassifier:
         idx_df: pd.DataFrame,
         vix_df: pd.DataFrame,
         stock_universe_data: dict | None,
+        index_symbol: str = "NIFTY",
     ) -> dict[str, Any]:
         """Compute all market indicators needed for regime evaluation."""
         trend = _trend_score(idx_df["close"])
@@ -269,6 +282,49 @@ class AdaptiveRegimeClassifier:
 
         vix_rank_val = _vix_rank(vix_df["close"])
 
+        # Dynamic/intraday/qualitative enhancements
+        heavyweight_momentum = 0.0
+        try:
+            from signals.index_weightage import calculate_weighted_momentum
+            mom_data = calculate_weighted_momentum(index_symbol)
+            heavyweight_momentum = mom_data.get("weighted_momentum") or 0.0
+        except Exception:
+            pass
+
+        ai_influence = 0.0
+        ai_overall = "NEUTRAL"
+        try:
+            from data import ai_scraper
+            ai_sentiment = ai_scraper.get_market_news_sentiment()
+            if isinstance(ai_sentiment, dict):
+                ai_overall = str(ai_sentiment.get("overall_market_sentiment") or "NEUTRAL").upper()
+                ai_conf_lbl = str(ai_sentiment.get("confidence") or "LOW").upper()
+                ai_score_raw = float(ai_sentiment.get("sentiment_score") or 0.0)
+            elif isinstance(ai_sentiment, str):
+                s = ai_sentiment.strip().upper()
+                if s in ("BULLISH", "POSITIVE", "LONG"):
+                    ai_overall = "BULLISH"
+                elif s in ("BEARISH", "NEGATIVE", "SHORT"):
+                    ai_overall = "BEARISH"
+                ai_conf_lbl = "LOW"
+                ai_score_raw = 0.0
+            
+            if ai_overall == "BULLISH":
+                ai_dir = 1
+            elif ai_overall == "BEARISH":
+                ai_dir = -1
+            elif ai_score_raw > 0.15:
+                ai_dir = 1
+            elif ai_score_raw < -0.15:
+                ai_dir = -1
+            else:
+                ai_dir = 0
+            
+            ai_weight = {"HIGH": 1.0, "MEDIUM": 0.5, "LOW": 0.2}.get(ai_conf_lbl, 0.0)
+            ai_influence = ai_dir * ai_weight
+        except Exception:
+            pass
+
         return {
             "trend_score": trend,
             "adx": adx_val,
@@ -284,6 +340,9 @@ class AdaptiveRegimeClassifier:
             "ema20": float(ema20),
             "ema50": float(ema50),
             "ema200": float(ema200),
+            "heavyweight_momentum": heavyweight_momentum,
+            "ai_influence": ai_influence,
+            "ai_overall": ai_overall,
         }
 
     def _evaluate_hypothesis(
@@ -392,7 +451,76 @@ class AdaptiveRegimeClassifier:
                 ))
                 total_score += score * weights["volatility"]
 
+        # --- Heavyweight Momentum Evidence ---
+        if "heavyweight_momentum" in weights:
+            mom = indicators["heavyweight_momentum"]
+            score = self._score_heavyweight_momentum_for_regime(regime, mom)
+            if score != 0:
+                node.add_evidence(Evidence(
+                    source="heavyweight_momentum",
+                    value=round(mom, 2),
+                    supports=score > 0,
+                    weight=weights["heavyweight_momentum"] * abs(score),
+                ))
+                total_score += score * weights["heavyweight_momentum"]
+
+        # --- AI Sentiment Evidence ---
+        if "ai_sentiment" in weights:
+            ai_infl = indicators["ai_influence"]
+            score = self._score_ai_sentiment_for_regime(regime, ai_infl)
+            if score != 0:
+                node.add_evidence(Evidence(
+                    source="ai_sentiment",
+                    value=round(ai_infl, 2),
+                    supports=score > 0,
+                    weight=weights["ai_sentiment"] * abs(score),
+                ))
+                total_score += score * weights["ai_sentiment"]
+
         return total_score
+
+    def _score_heavyweight_momentum_for_regime(self, regime: Regime, mom: float) -> float:
+        """How well does index heavyweight momentum support this regime?"""
+        if regime == Regime.TREND_UP:
+            if mom >= 1.5: return 1.0
+            if mom >= 0.5: return 0.5
+            if mom <= -1.5: return -1.0
+            if mom <= -0.5: return -0.5
+        elif regime == Regime.TREND_DOWN:
+            if mom <= -1.5: return 1.0
+            if mom <= -0.5: return 0.5
+            if mom >= 1.5: return -1.0
+            if mom >= 0.5: return -0.5
+        elif regime == Regime.VOL_EXPANSION:
+            if abs(mom) >= 1.5: return 1.0
+            if abs(mom) >= 0.75: return 0.5
+        elif regime in (Regime.RANGE_LOW_VOL, Regime.VOL_CONTRACTION):
+            if abs(mom) >= 1.0: return -0.8
+            if abs(mom) < 0.3: return 0.6
+        elif regime == Regime.RANGE_HIGH_VOL:
+            if abs(mom) >= 1.0: return 0.6
+        return 0.0
+
+    def _score_ai_sentiment_for_regime(self, regime: Regime, ai_infl: float) -> float:
+        """How well does AI news sentiment support this regime?"""
+        if regime == Regime.TREND_UP:
+            if ai_infl >= 0.8: return 1.0
+            if ai_infl >= 0.4: return 0.5
+            if ai_infl <= -0.8: return -1.0
+            if ai_infl <= -0.4: return -0.5
+        elif regime == Regime.TREND_DOWN:
+            if ai_infl <= -0.8: return 1.0
+            if ai_infl <= -0.4: return 0.5
+            if ai_infl >= 0.8: return -1.0
+            if ai_infl >= 0.4: return -0.5
+        elif regime == Regime.VOL_EXPANSION:
+            if abs(ai_infl) >= 0.8: return 0.8
+        elif regime in (Regime.RANGE_LOW_VOL, Regime.VOL_CONTRACTION):
+            if abs(ai_infl) >= 0.6: return -0.6
+            if abs(ai_infl) < 0.2: return 0.5
+        elif regime == Regime.RANGE_HIGH_VOL:
+            if abs(ai_infl) >= 0.5: return 0.5
+        return 0.0
 
     # --- Scoring functions: return -1.0 to +1.0 ---
 

@@ -1290,6 +1290,21 @@ def _smart_exit_check(
     vix_floor = settings.get("smart_exit_vix_floor", 16.0)
 
     # Dynamic threshold based on Regime
+    # M1 FIX: Don't use stale regime - fetch fresh regime if not provided
+    if current_regime is None:
+        try:
+            from data import feed
+            vix_df = feed.ohlc_cached("INDIAVIX", period="5d")
+            if vix_df is not None and not vix_df.empty:
+                vix_val = float(vix_df["close"].iloc[-1])
+                # Simple regime inference from VIX level
+                if vix_val < 14:
+                    current_regime = "VOL_CONTRACTION"
+                elif vix_val > 20:
+                    current_regime = "TREND_UP"  # High VIX often accompanies trends
+        except Exception:
+            current_regime = None
+    
     if current_regime == "TREND_UP":
         vix_threshold *= 1.5  # 50% more lenient during uptrends
     elif current_regime == "VOL_CONTRACTION":

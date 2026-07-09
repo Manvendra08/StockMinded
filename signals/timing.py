@@ -141,7 +141,7 @@ def market_exhaustion_score(
         (exhaustion_score: float, reason: str)
         - Score 0.0–1.0: 0=healthy, 1=severe exhaustion
     """
-    if not nifty_df or nifty_df.empty or len(nifty_df) < 20:
+    if nifty_df is None or nifty_df.empty or len(nifty_df) < 20:
         return 0.0, "Market data unavailable; assume healthy"
 
     exhaustion_score = 0.0
@@ -170,15 +170,42 @@ def market_exhaustion_score(
                 )
 
     # VIX check: intraday spike
+    # Use correct VIX value based on context:
+    # - During market hours, compare current intraday VIX to yesterday's close
+    # - After hours, compare today's close to yesterday's close
     if vix_df is not None and not vix_df.empty and len(vix_df) >= 2:
         vix_close_yesterday = vix_df["close"].iloc[-2]
-        vix_close_today = vix_df["close"].iloc[-1]
+        
+        # Determine if last bar is today's incomplete bar (intraday) or complete bar (EOD)
+        # If vix_df includes intraday data, last bar may not have a 'close' yet
+        last_bar_time = vix_df.index[-1] if hasattr(vix_df.index[-1], 'hour') else None
+        now_dt = pd.Timestamp.now(tz='Asia/Kolkata')
+        
+        # Use last available value; if during market hours, this is current VIX
+        vix_current = vix_df["close"].iloc[-1]
+        
+        # Also check intraday high/low columns if available for spike detection
+        if "high" in vix_df.columns and vix_df["high"].iloc[-1] > vix_current:
+            vix_intraday_high = vix_df["high"].iloc[-1]
+        else:
+            vix_intraday_high = vix_current
 
         if vix_close_yesterday > 0:
+            # Compare current/intraday VIX to yesterday's close
             vix_spike_pct = (
-                (vix_close_today - vix_close_yesterday) / vix_close_yesterday * 100
+                (vix_current - vix_close_yesterday) / vix_close_yesterday * 100
             )
-            if vix_spike_pct > vix_spike_threshold_pct:
+            # Also check if intraday high spiked (more aggressive early warning)
+            vix_high_spike_pct = (
+                (vix_intraday_high - vix_close_yesterday) / vix_close_yesterday * 100
+            )
+            
+            if vix_high_spike_pct > vix_spike_threshold_pct:
+                exhaustion_score += 0.4
+                reasons.append(
+                    f"VIX spike: +{vix_high_spike_pct:.1f}% intraday high (threshold {vix_spike_threshold_pct}%)"
+                )
+            elif vix_spike_pct > vix_spike_threshold_pct:
                 exhaustion_score += 0.4
                 reasons.append(
                     f"VIX spike: +{vix_spike_pct:.1f}% intraday (threshold {vix_spike_threshold_pct}%)"
@@ -296,10 +323,12 @@ def evaluate_timing_for_entry(
         )
         checks["market_exhaustion"] = (exhaustion_score, exhaustion_reason)
 
-        # If exhaustion high + direction is LONG: be stricter
-        if exhaustion_score > 0.6 and direction == "LONG":
+        # If exhaustion high: block entries in both directions
+        # High exhaustion means market instability (VIX spike + breadth drop)
+        # Shorts are equally risky as longs during such conditions
+        if exhaustion_score > 0.6:
             failed_checks.append(
-                f"Market exhaustion {exhaustion_score:.2f} (score > 0.6)"
+                f"Market exhaustion {exhaustion_score:.2f} (score > 0.6) - {direction} blocked"
             )
 
     # --- Consolidate Result ---
@@ -434,13 +463,34 @@ def review_timing_with_llm(
                 response_text = message.choices[0].message.content.upper().strip()
                 latency_ms = int((time.time() - start_time) * 1000)
 
-                # Parse response
-                ai_timing_ok = "YES" in response_text
-                confidence = (
-                    0.9
-                    if "YES" in response_text
-                    else (0.5 if "MAYBE" in response_text else 0.1)
-                )
+                # Parse response - improved robust parsing
+                # Look for explicit YES/MAYBE/NO at start of response
+                ai_timing_ok = False
+                confidence = 0.1
+                
+                # Check first word or explicit phrases
+                first_word = response_text.split()[0] if response_text.split() else ""
+                if first_word in ("YES", "YES:", "YES."):
+                    ai_timing_ok = True
+                    confidence = 0.9
+                elif first_word in ("MAYBE", "MAYBE:", "MAYBE."):
+                    ai_timing_ok = False  # MAYBE = not approved
+                    confidence = 0.5
+                elif first_word in ("NO", "NO:", "NO."):
+                    ai_timing_ok = False
+                    confidence = 0.1
+                # Fallback: check if response contains explicit approval phrase
+                elif "TIMING IS SOUND" in response_text or "ENTRY APPROVED" in response_text:
+                    ai_timing_ok = True
+                    confidence = 0.85
+                elif "NOT RECOMMENDED" in response_text or "AVOID ENTRY" in response_text:
+                    ai_timing_ok = False
+                    confidence = 0.1
+                # Last resort: original substring match (with caution)
+                elif "YES" in response_text and "NOT YES" not in response_text:
+                    ai_timing_ok = True
+                    confidence = 0.7
+                    
                 sentiment_warning = (
                     "BEARISH" in sentiment_desc or "FLIP" in response_text
                 )
@@ -482,12 +532,29 @@ def review_timing_with_llm(
                 response_text = response.text.upper().strip() if response.text else ""
                 latency_ms = int((time.time() - start_time) * 1000)
 
-                ai_timing_ok = "YES" in response_text
-                confidence = (
-                    0.85
-                    if "YES" in response_text
-                    else (0.45 if "MAYBE" in response_text else 0.15)
-                )
+                # Improved parsing (same logic as Groq)
+                ai_timing_ok = False
+                confidence = 0.15
+                first_word = response_text.split()[0] if response_text.split() else ""
+                if first_word in ("YES", "YES:", "YES."):
+                    ai_timing_ok = True
+                    confidence = 0.85
+                elif first_word in ("MAYBE", "MAYBE:", "MAYBE."):
+                    ai_timing_ok = False
+                    confidence = 0.45
+                elif first_word in ("NO", "NO:", "NO."):
+                    ai_timing_ok = False
+                    confidence = 0.15
+                elif "TIMING IS SOUND" in response_text or "ENTRY APPROVED" in response_text:
+                    ai_timing_ok = True
+                    confidence = 0.8
+                elif "NOT RECOMMENDED" in response_text or "AVOID ENTRY" in response_text:
+                    ai_timing_ok = False
+                    confidence = 0.15
+                elif "YES" in response_text and "NOT YES" not in response_text:
+                    ai_timing_ok = True
+                    confidence = 0.65
+                    
                 sentiment_warning = "BEARISH" in sentiment_desc
 
                 logger.debug(

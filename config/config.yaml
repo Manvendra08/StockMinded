@@ -96,10 +96,13 @@ data_sources:
     model: "google_genai/gemini-2.5-flash-lite"
     model_tokens: 8192
     api_key: "${GOOGLE_API_KEY}"
+    bedrock_api_key: "${BEDROCK_API_KEY}"
     groq_api_key: "${GROQ_API_KEY}"
     openrouter_api_key: "${OPENROUTER_API_KEY}"
     sambanova_api_key: "${SAMBANOVA_API_KEY}"
     saas_api_key: "${SCRAPEGRAPHAI_API_KEY}"
+    opencode_api_key: "${OPENCODE_API_KEY}"
+    nvidia_api_key: "${NVIDIA_API_KEY}"
 
 options:
   enabled: true
@@ -236,9 +239,11 @@ timing_engine:
         breadth_drop_threshold_pct: 5
 
   # [PHASE 2] Sentiment Tracking
+  # Disabled: previous_sentiment is always None → detect_sentiment_flip() always
+  # returns flip_detected=False, making the per-stock call pure overhead (~0.5s × N stocks).
   sentiment_tracking:
-    enabled: true
-    flip_detection: true
+    enabled: false
+    flip_detection: false
     flip_cooldown_minutes: 30
     tracking_window_trades: 20
 

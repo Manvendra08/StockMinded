@@ -57,6 +57,19 @@ _cache_ts: datetime | None = None
 _cache_lock = __import__("threading").Lock()
 _engine_busy = False
 
+
+def _get_ai_sentiment_ts() -> float:
+    """Return the Unix timestamp of the last AI sentiment fetch (from persistent cache file)."""
+    try:
+        import json as _json
+        _cache_file = PROJECT_ROOT / "data" / "cache" / "ai_sentiment_cache.json"
+        if _cache_file.exists():
+            with open(_cache_file, "r") as _f:
+                return _json.load(_f).get("timestamp", 0.0)
+    except Exception:
+        pass
+    return 0.0
+
 # -- data pipeline health tracking -----------------------------------
 _HEALTH: dict = {
     "shoonya": {
@@ -407,6 +420,7 @@ def _run_engine() -> dict:
                 "notes": "",
                 "option_source": None,
                 "ai_sentiment": None,
+                "ai_sentiment_fetched_at": None,
                 "fii_derivatives_5d": {},
                 "fii_derivatives_stale": False,
                 "trendlyne_kpis": {},
@@ -649,6 +663,9 @@ def _run_engine() -> dict:
             "notes": getattr(flow_snap, "notes", ""),
             "option_source": getattr(flow_snap, "option_source", None),
             "ai_sentiment": getattr(flow_snap, "ai_sentiment", None),
+            "ai_sentiment_fetched_at": (
+                lambda ts: datetime.fromtimestamp(ts).strftime('%d %b %Y, %H:%M') if ts else None
+            )(_get_ai_sentiment_ts()),
             "fii_derivatives_5d": getattr(flow_snap, "fii_derivatives_5d", {}),
             "fii_derivatives_stale": getattr(flow_snap, "fii_derivatives_stale", False),
             "trendlyne_kpis": getattr(flow_snap, "trendlyne_kpis", {}),
@@ -824,14 +841,6 @@ def _run_engine() -> dict:
     # distinct from wall-clock ts (which updates every request).
     result["signals_computed_at"] = status["ts"]
 
-    # Run Brain Verdict Review (LLM second opinion on trading verdict)
-    # Fail-open: if LLM unavailable, verdict_review is None and downstream ignores it.
-    try:
-        result["verdict_review"] = _brain_verdict_review(result)
-    except Exception as vr_e:
-        logging.getLogger(__name__).exception("Brain Verdict Review failed: %s", vr_e)
-        result["verdict_review"] = None
-
     result = _make_safe(result)
     with _cache_lock:
         _cache = result
@@ -858,6 +867,11 @@ def _generate_trade_alerts(data: dict) -> list[dict]:
     risk = data.get("risk", {})
     nifty = data.get("nifty", {})
     banknifty = data.get("banknifty", {})
+
+    # Local OHLC cache to avoid re-fetching the same symbol's data
+    # across LONG and SHORT timing checks (same symbol can appear in both).
+    _local_ohlc_5m: dict[str, pd.DataFrame] = {}
+    _local_ohlc_1d: dict[str, pd.DataFrame] = {}
 
     regime_name = str(regime.get("name") or regime.get("regime") or "")
     bias = flows.get("bias", "NEUTRAL")
@@ -1076,11 +1090,19 @@ def _generate_trade_alerts(data: dict) -> list[dict]:
     # Here we only:
     #   1. Caution in choppy + LOW confidence (avoid noise)
     #   2. Add AI ticker mentions as evidence to individual alerts
-    ai_conf = str(ai_sentiment.get("confidence") or "").upper()
+    # Handle case where ai_sentiment might be a list instead of dict
+    if isinstance(ai_sentiment, list):
+        # If it's a list, try to get confidence from first item if it's a dict
+        ai_conf = str(ai_sentiment[0].get("confidence") if ai_sentiment and isinstance(ai_sentiment[0], dict) else "").upper()
+        # For actionable_trade_ideas, use the list directly if it's a list of dicts
+        actionable_ideas = ai_sentiment if all(isinstance(item, dict) for item in ai_sentiment) else []
+    else:
+        ai_conf = str(ai_sentiment.get("confidence") or "").upper()
+        actionable_ideas = ai_sentiment.get("actionable_trade_ideas") or []
     # Build a lookup of AI-mentioned tickers: {SYMBOL: "LONG"|"SHORT"}
     ai_ideas: dict[str, str] = {
         str(idea.get("ticker", "")).upper(): str(idea.get("direction", "")).upper()
-        for idea in (ai_sentiment.get("actionable_trade_ideas") or [])
+        for idea in actionable_ideas
         if idea.get("ticker") and idea.get("direction") in ("LONG", "SHORT")
     }
 
@@ -1111,8 +1133,12 @@ def _generate_trade_alerts(data: dict) -> list[dict]:
             price = stock.get("ltp", 0)
             if timing_engine_cfg.get("enabled", True):
                 try:
-                    df_5m = feed.ohlc_cached(sym, interval="5m", period="1d")
-                    df_1d = feed.ohlc_cached(sym, interval="1d", period="6mo")
+                    if sym not in _local_ohlc_5m:
+                        _local_ohlc_5m[sym] = feed.ohlc_cached(sym, interval="5m", period="1d")
+                    if sym not in _local_ohlc_1d:
+                        _local_ohlc_1d[sym] = feed.ohlc_cached(sym, interval="1d", period="6mo")
+                    df_5m = _local_ohlc_5m[sym]
+                    df_1d = _local_ohlc_1d[sym]
                     vwap_5m = None
                     if (
                         df_5m is not None
@@ -1281,8 +1307,12 @@ def _generate_trade_alerts(data: dict) -> list[dict]:
             price = stock.get("ltp", 0)
             if timing_engine_cfg.get("enabled", True):
                 try:
-                    df_5m = feed.ohlc_cached(sym, interval="5m", period="1d")
-                    df_1d = feed.ohlc_cached(sym, interval="1d", period="6mo")
+                    if sym not in _local_ohlc_5m:
+                        _local_ohlc_5m[sym] = feed.ohlc_cached(sym, interval="5m", period="1d")
+                    if sym not in _local_ohlc_1d:
+                        _local_ohlc_1d[sym] = feed.ohlc_cached(sym, interval="1d", period="6mo")
+                    df_5m = _local_ohlc_5m[sym]
+                    df_1d = _local_ohlc_1d[sym]
                     vwap_5m = None
                     if (
                         df_5m is not None
@@ -2886,6 +2916,18 @@ def _build_verdict_review_context() -> str:
     return ctx
 
 
+@app.route("/api/verdict-review")
+def api_verdict_review():
+    """On-demand LLM verdict review (manual trigger only, like Intelligence tab)."""
+    try:
+        data = _run_engine()
+        review = _brain_verdict_review(data)
+        return jsonify(review)
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
 def _brain_verdict_review(data: dict) -> dict:
     """LLM reviews the Final Trading Verdict for Directional Stock Strategy.
 
@@ -3470,7 +3512,40 @@ def api_news_headlines():
         # Fetch AI sentiment verdict (non-blocking on failure)
         verdict = None
         try:
-            sentiment = get_market_news_sentiment()
+            # Build market context from cached engine data
+            _market_ctx = {}
+            if _cache:
+                regime = _cache.get("regime", {})
+                flows = _cache.get("flows", {})
+                nifty = _cache.get("nifty", {})
+                if nifty.get("close"):
+                    _market_ctx["nifty_close"] = nifty["close"]
+                    _market_ctx["nifty_change_pct"] = nifty.get("change_pct", 0)
+                if regime.get("vix"):
+                    _market_ctx["vix"] = regime["vix"]
+                if regime.get("name"):
+                    _market_ctx["regime"] = regime["name"]
+                if regime.get("breadth_pct_above_50dma"):
+                    _market_ctx["breadth_pct"] = regime["breadth_pct_above_50dma"]
+                fii_dii = flows.get("fii_dii_5d", {})
+                if fii_dii.get("fii") is not None:
+                    _market_ctx["fii_net"] = fii_dii["fii"]
+                if fii_dii.get("dii") is not None:
+                    _market_ctx["dii_net"] = fii_dii["dii"]
+                if flows.get("pcr_oi") is not None:
+                    _market_ctx["pcr_oi"] = flows["pcr_oi"]
+                if flows.get("max_pain") is not None:
+                    _market_ctx["max_pain"] = flows["max_pain"]
+                inflow = [s for s, _ in (flows.get("top_inflow") or [])]
+                outflow = [s for s, _ in (flows.get("top_outflow") or [])]
+                if inflow:
+                    _market_ctx["sector_inflow"] = inflow
+                if outflow:
+                    _market_ctx["sector_outflow"] = outflow
+
+            sentiment = get_market_news_sentiment(
+                market_context=_market_ctx if _market_ctx else None
+            )
             if sentiment:
                 _health_event(
                     "sentiment_llm", True, sentiment.get("model_used", "unknown")
@@ -3482,10 +3557,14 @@ def api_news_headlines():
                     "sentiment_score": sentiment.get("sentiment_score"),
                     "sentiment_strength": sentiment.get("sentiment_strength"),
                     "justification": sentiment.get("justification"),
-                    "key_catalysts": (sentiment.get("key_catalysts") or [])[:3],
+                    "key_drivers": (sentiment.get("key_drivers") or [])[:5],
+                    "sector_outlook": sentiment.get("sector_outlook", {}),
+                    "risk_factors": (sentiment.get("risk_factors") or [])[:3],
+                    "support_resistance": sentiment.get("support_resistance"),
                     "actionable_trade_ideas": (
                         sentiment.get("actionable_trade_ideas") or []
                     )[:3],
+                    "market_narrative": sentiment.get("market_narrative"),
                     "confidence": sentiment.get("confidence"),
                     "model_used": sentiment.get("model_used"),
                 }
@@ -3565,10 +3644,24 @@ def api_health():
         )
 
 
+def _preamble():
+    """Run heavy engine work in background so first HTTP request is instant."""
+    import logging as _log
+    _log.getLogger(__name__).info("[preamble] Warming engine cache in background...")
+    try:
+        _run_engine()
+        _log.getLogger(__name__).info("[preamble] Engine cache warmed successfully.")
+    except Exception as e:
+        _log.getLogger(__name__).warning("[preamble] Engine warm-up failed: %s", e)
+
+
 if __name__ == "__main__":
     # Start automation thread
     worker = threading.Thread(target=_automation_worker, daemon=True)
     worker.start()
+
+    # Pre-warm engine cache in background so first dashboard load is instant
+    threading.Thread(target=_preamble, daemon=True).start()
 
     __import__("logging").getLogger(__name__).info(
         "StockMinded Dashboard -> http://localhost:5050"

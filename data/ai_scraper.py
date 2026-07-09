@@ -36,6 +36,61 @@ from config.loader import load_config
 
 logger = logging.getLogger(__name__)
 
+_LLM_CALL_LOG: list[dict[str, Any]] = []
+"""In-memory record of every successful LLM call in this process."""
+_LLM_CALL_LOG_PATH = Path("data/cache/llm_call_log.jsonl")
+"""Append-only JSONL log for offline token accounting."""
+
+
+def _log_llm_call(
+    provider: str,
+    resp: Any = None,
+    *,
+    prompt: str = "",
+    output: str = "",
+) -> None:
+    """Record a successful LLM call to in-memory list + JSONL file."""
+    record: dict[str, Any] = {
+        "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "provider": provider,
+        "prompt_len": len(prompt),
+        "output_len": len(output),
+    }
+
+    if resp is not None:
+        try:
+            payload = resp.json() if hasattr(resp, "json") else {}
+        except Exception:
+            payload = {}
+
+        usage = payload.get("usage") or payload.get("usageMetadata")
+        if isinstance(usage, dict):
+            record["prompt_tokens"] = int(
+                usage.get("prompt_tokens")
+                or usage.get("promptTokenCount")
+                or 0
+            )
+            record["completion_tokens"] = int(
+                usage.get("completion_tokens")
+                or usage.get("completionTokenCount")
+                or usage.get("candidatesTokenCount")
+                or 0
+            )
+            record["total_tokens"] = int(
+                usage.get("total_tokens")
+                or usage.get("totalTokenCount")
+                or record["prompt_tokens"] + record["completion_tokens"]
+            )
+
+    _LLM_CALL_LOG.append(record)
+    try:
+        _LLM_CALL_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(_LLM_CALL_LOG_PATH, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record) + "\n")
+    except Exception:
+        pass
+
+
 # Suppress urllib3 retry noise from failing providers (e.g. Groq SSL errors)
 logging.getLogger("urllib3.connectionpool").setLevel(logging.ERROR)
 
@@ -100,6 +155,26 @@ def _get_ai_config() -> Optional[dict]:
         if sambanova_api_key:
             sambanova_api_key = sambanova_api_key.strip().strip("'").strip('"')
 
+        opencode_api_key = cfg.get("opencode_api_key")
+        if (
+            isinstance(opencode_api_key, str)
+            and opencode_api_key.startswith("${")
+            and opencode_api_key.endswith("}")
+        ):
+            opencode_api_key = os.getenv(opencode_api_key[2:-1])
+        if opencode_api_key:
+            opencode_api_key = opencode_api_key.strip().strip("'").strip('"')
+
+        nvidia_api_key = cfg.get("nvidia_api_key")
+        if (
+            isinstance(nvidia_api_key, str)
+            and nvidia_api_key.startswith("${")
+            and nvidia_api_key.endswith("}")
+        ):
+            nvidia_api_key = os.getenv(nvidia_api_key[2:-1])
+        if nvidia_api_key:
+            nvidia_api_key = nvidia_api_key.strip().strip("'").strip('"')
+
         # Self-healing Fallback:
         # If the user accidentally set GOOGLE_API_KEY to their ScrapeGraphAI key (starts with 'sgai-')
         # we route it to saas_api_key and clear api_key so the local Gemini LLM doesn't get initialized with it.
@@ -128,6 +203,8 @@ def _get_ai_config() -> Optional[dict]:
             "groq_api_key": groq_api_key,
             "openrouter_api_key": openrouter_api_key,
             "sambanova_api_key": sambanova_api_key,
+            "opencode_api_key": opencode_api_key,
+            "nvidia_api_key": nvidia_api_key,
         }
     except Exception as e:
         logger.error(f"Failed to load ScrapeGraphAI config: {e}")
@@ -146,10 +223,6 @@ _SAMBANOVA_MIN_INTERVAL = 30.0  # seconds between SambaNova calls
 _openrouter_last_call_ts: float = 0.0
 _OPENROUTER_MIN_INTERVAL = 15.0  # seconds between OpenRouter calls
 
-# Global rate limiter for OpenCode Zen: max 1 call per 5 seconds (generous free tier)
-_opencode_zen_last_call_ts: float = 0.0
-_OPENCODE_ZEN_MIN_INTERVAL = 5.0  # seconds between OpenCode Zen calls
-
 def _sambanova_rate_limit_wait() -> None:
     """Enforce minimum interval between SambaNova API calls to prevent 429 rate limits.
     
@@ -167,21 +240,6 @@ def _sambanova_rate_limit_wait() -> None:
         )
         time.sleep(wait_time)
     _sambanova_last_call_ts = time.time()
-
-
-def _opencode_zen_rate_limit_wait() -> None:
-    """Enforce minimum interval between OpenCode Zen API calls."""
-    global _opencode_zen_last_call_ts
-    now = time.time()
-    elapsed = now - _opencode_zen_last_call_ts
-    if elapsed < _OPENCODE_ZEN_MIN_INTERVAL:
-        wait_time = (_OPENCODE_ZEN_MIN_INTERVAL - elapsed) + _random.uniform(0.3, 1.0)
-        logger.debug(
-            "OpenCode Zen rate limiter: waiting %.1fs (elapsed=%.1fs)",
-            wait_time, elapsed,
-        )
-        time.sleep(wait_time)
-    _opencode_zen_last_call_ts = time.time()
 
 
 def _openrouter_rate_limit_wait() -> None:
@@ -338,19 +396,70 @@ def call_llm(
     max_tokens: int | None = None,
     return_provider: bool = False,
 ) -> Any:
-    """Universal LLM call with fallback: Groq -> Gemini."""
+    """Universal LLM call with fallback:
+    OpenCode Zen -> Groq 70b -> Nvidia NIM -> Groq 8b -> Gemini -> Bedrock."""
     config = _get_ai_config()
     if not config:
         return (None, "None") if return_provider else None
 
-    # 1. Groq (Primary)
-    groq_dead_until = _dead_providers.get("groq")
-    if groq_dead_until and time.time() < groq_dead_until:
-        logger.debug("Groq marked dead until %.0f; skipping", groq_dead_until)
-    elif config.get("groq_api_key"):
-        logger.info("LLM #1: llama-3.3-70b-versatile [provider=Groq]")
+    def is_dead(provider: str) -> bool:
+        dead_until = _dead_providers.get(provider)
+        return bool(dead_until and time.time() < dead_until)
+
+    # ── #0. OpenCode Zen (PRIMARY: free models, OpenAI-compatible) ──────────
+    if not is_dead("opencode") and config.get("opencode_api_key"):
+        session, backend = _create_curl_cffi_llm_session()
+        _opencode_models = [
+            ("big-pickle", "big-pickle (coding/chat)"),
+            ("mimo-v2-pro-free", "mimo-v2-pro-free (logic/reasoning)"),
+            ("minimax-m2.5-free", "minimax-m2.5-free (large context)"),
+            ("nemotron-3-super-free", "nemotron-3-super-free (high-perf coding)"),
+        ]
+        for model_id, model_label in _opencode_models:
+            try:
+                logger.info("LLM #0: %s [provider=OpenCode Zen] (backend=%s)", model_label, backend)
+                url = "https://opencode.ai/zen/v1/chat/completions"
+                headers = {
+                    "Authorization": f"Bearer {config['opencode_api_key']}",
+                    "Content-Type": "application/json",
+                }
+                payload = {
+                    "model": model_id,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "response_format": {"type": "json_object"} if json_mode else None,
+                    "max_tokens": max_tokens,
+                }
+                resp = session.post(url, headers=headers, json=payload, timeout=30)
+                resp.raise_for_status()
+                text = resp.json()["choices"][0]["message"]["content"]
+                res_val = json.loads(text) if json_mode else text
+                logger.info("LLM success: %s [OpenCode Zen] (backend=%s)", model_label, backend)
+                _log_llm_call(f"OpenCode Zen ({model_label})", resp, prompt=prompt, output=text)
+                return (res_val, f"OpenCode Zen ({model_label})") if return_provider else res_val
+            except Exception as e:
+                if _is_ssl_transport_error(e):
+                    _dead_providers["opencode"] = time.time() + _DEAD_PROVIDER_TTL
+                    logger.warning("OpenCode Zen SSL error; marking dead. Trying Groq 70b.")
+                    break
+                elif _is_http_error(e):
+                    status = _get_http_status(e)
+                    if status in (429, 500, 502, 503):
+                        _dead_providers["opencode"] = time.time() + _DEAD_PROVIDER_TTL
+                        logger.warning("OpenCode Zen HTTP %s on %s; marking dead %ss. Trying Groq 70b.", status, model_id, _DEAD_PROVIDER_TTL)
+                        break
+                    else:
+                        logger.warning("OpenCode Zen %s failed: %s. Trying next model.", model_id, e)
+                else:
+                    logger.warning("OpenCode Zen %s failed: %s. Trying next model.", model_id, e)
+
+    # ── #1. Groq 70b (Fallback 1) ──────────────────────────────────────────
+    if not is_dead("groq_70b") and config.get("groq_api_key"):
         session, backend = _create_curl_cffi_llm_session()
         try:
+            logger.info("LLM #1: llama-3.3-70b-versatile [provider=Groq]")
             url = "https://api.groq.com/openai/v1/chat/completions"
             headers = {
                 "Authorization": f"Bearer {config['groq_api_key']}",
@@ -369,57 +478,114 @@ def call_llm(
             resp.raise_for_status()
             text = resp.json()["choices"][0]["message"]["content"]
             res_val = json.loads(text) if json_mode else text
-            logger.info(
-                "LLM success: llama-3.3-70b-versatile [Groq] (backend=%s)", backend
-            )
-            return (
-                (res_val, "Groq (llama-3.3-70b-versatile)")
-                if return_provider
-                else res_val
-            )
+            logger.info("LLM success: llama-3.3-70b-versatile [Groq] (backend=%s)", backend)
+            _log_llm_call("Groq (llama-3.3-70b-versatile)", resp, prompt=prompt, output=text)
+            return (res_val, "Groq (llama-3.3-70b-versatile)") if return_provider else res_val
         except Exception as e:
-            # Handle SSL errors (mark Groq dead for a while)
             if _is_ssl_transport_error(e):
-                _dead_providers["groq"] = time.time() + _DEAD_PROVIDER_TTL
-                logger.warning(
-                    "Groq SSL error with %s backend: %s. Marking dead for %ds. Trying Gemini.",
-                    backend,
-                    e,
-                    _DEAD_PROVIDER_TTL,
-                )
-
-            # Handle HTTP errors (works for both requests and curl_cffi)
+                _dead_providers["groq_70b"] = time.time() + _DEAD_PROVIDER_TTL
+                logger.warning("Groq 70b SSL error; marking dead. Trying Nvidia NIM.")
             elif _is_http_error(e):
                 status = _get_http_status(e)
-                if status == 401:
-                    logger.warning(
-                        "Groq returned 401 (unauthorized). Check GROQ_API_KEY. Trying Gemini."
-                    )
+                if status in (429, 500, 502, 503):
+                    _dead_providers["groq_70b"] = time.time() + _DEAD_PROVIDER_TTL
+                    logger.warning("Groq 70b HTTP %s; marking dead %ss. Trying Nvidia NIM.", status, _DEAD_PROVIDER_TTL)
                 else:
-                    logger.warning(
-                        "Groq HTTP error (%s): %s. Trying Gemini.",
-                        status,
-                        _get_http_detail(e),
-                    )
-
-            # Handle JSON/parse errors
-            elif isinstance(e, json.JSONDecodeError):
-                logger.warning("Groq returned invalid JSON: %s. Trying Gemini.", e)
-
-            # Catch-all
+                    logger.warning("Groq 70b failed: %s. Trying Nvidia NIM.", e)
             else:
-                logger.warning("Groq call failed: %s. Trying Gemini.", e)
+                logger.warning("Groq 70b failed: %s. Trying Nvidia NIM.", e)
 
-    # 3. Gemini (Fallback 2)
-    if config["local"] and config["local"]["llm"].get("api_key"):
+    # ── #2. Nvidia NIM (Fallback 2: free tier, OpenAI-compatible, 40 RPM) ───
+    if not is_dead("nvidia") and config.get("nvidia_api_key"):
+        session, backend = _create_curl_cffi_llm_session()
+        try:
+            logger.info("LLM #2: nemotron-3-super-120b-a12b [provider=Nvidia NIM]")
+            url = "https://integrate.api.nvidia.com/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {config['nvidia_api_key']}",
+                "Content-Type": "application/json",
+            }
+            payload = {
+                "model": "nvidia/nemotron-3-super-120b-a12b",
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt},
+                ],
+                "response_format": {"type": "json_object"} if json_mode else None,
+                "max_tokens": max_tokens or 2048,
+                "temperature": 0.6,
+            }
+            resp = session.post(url, headers=headers, json=payload, timeout=30)
+            resp.raise_for_status()
+            text = resp.json()["choices"][0]["message"]["content"]
+            res_val = json.loads(text) if json_mode else text
+            logger.info("LLM success: nemotron-3-super-120b-a12b [Nvidia NIM] (backend=%s)", backend)
+            _log_llm_call("Nvidia NIM (nemotron-3-super-120b-a12b)", resp, prompt=prompt, output=text)
+            return (res_val, "Nvidia NIM (nemotron-3-super-120b-a12b)") if return_provider else res_val
+        except Exception as e:
+            if _is_ssl_transport_error(e):
+                _dead_providers["nvidia"] = time.time() + _DEAD_PROVIDER_TTL
+                logger.warning("Nvidia NIM SSL error; marking dead. Trying Groq 8b.")
+            elif _is_http_error(e):
+                status = _get_http_status(e)
+                if status in (429, 500, 502, 503):
+                    _dead_providers["nvidia"] = time.time() + _DEAD_PROVIDER_TTL
+                    logger.warning("Nvidia NIM HTTP %s; marking dead %ss. Trying Groq 8b.", status, _DEAD_PROVIDER_TTL)
+                else:
+                    logger.warning("Nvidia NIM failed: %s. Trying Groq 8b.", e)
+            else:
+                logger.warning("Nvidia NIM failed: %s. Trying Groq 8b.", e)
+
+    # ── #3. Groq 8b (Fallback 3) ───────────────────────────────────────────
+    if not is_dead("groq_8b") and config.get("groq_api_key"):
+        session, backend = _create_curl_cffi_llm_session()
+        try:
+            logger.info("LLM #3: llama-3.1-8b-instant [provider=Groq]")
+            url = "https://api.groq.com/openai/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {config['groq_api_key']}",
+                "Content-Type": "application/json",
+            }
+            payload = {
+                "model": "llama-3.1-8b-instant",
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt},
+                ],
+                "response_format": {"type": "json_object"} if json_mode else None,
+                "max_tokens": max_tokens,
+            }
+            resp = session.post(url, headers=headers, json=payload, timeout=15)
+            resp.raise_for_status()
+            text = resp.json()["choices"][0]["message"]["content"]
+            res_val = json.loads(text) if json_mode else text
+            logger.info("LLM success: llama-3.1-8b-instant [Groq] (backend=%s)", backend)
+            _log_llm_call("Groq (llama-3.1-8b-instant)", resp, prompt=prompt, output=text)
+            return (res_val, "Groq (llama-3.1-8b-instant)") if return_provider else res_val
+        except Exception as e:
+            if _is_ssl_transport_error(e):
+                _dead_providers["groq_8b"] = time.time() + _DEAD_PROVIDER_TTL
+                logger.warning("Groq 8b SSL error; marking dead. Trying Gemini.")
+            elif _is_http_error(e):
+                status = _get_http_status(e)
+                if status in (429, 500, 502, 503):
+                    _dead_providers["groq_8b"] = time.time() + _DEAD_PROVIDER_TTL
+                    logger.warning("Groq 8b HTTP %s; marking dead %ss. Trying Gemini.", status, _DEAD_PROVIDER_TTL)
+                else:
+                    logger.warning("Groq 8b failed: %s. Trying Gemini.", e)
+            else:
+                logger.warning("Groq 8b failed: %s. Trying Gemini.", e)
+
+    # ── #4. Gemini (Fallback 4) ─────────────────────────────────────────────
+    if not is_dead("gemini") and config["local"] and config["local"]["llm"].get("api_key"):
         session, backend = _create_curl_cffi_llm_session()
         try:
             api_key = config["local"]["llm"]["api_key"]
-            model_raw = config["local"]["llm"].get("model", "gemini-1.5-flash")
+            model_raw = config["local"]["llm"].get("model", "gemini-2.5-flash-lite")
             model_name = model_raw.split("/")[-1] if "/" in model_raw else model_raw
-            logger.info(
-                "LLM #2: %s [provider=Gemini] (backend=%s)", model_name, backend
-            )
+            if model_name == "gemini-1.5-flash":
+                model_name = "gemini-2.5-flash-lite"
+            logger.info("LLM #4: %s [provider=Gemini] (backend=%s)", model_name, backend)
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
             generation_config = {"response_mime_type": "application/json"}
             if max_tokens is not None:
@@ -441,55 +607,84 @@ def call_llm(
 
             candidates = res.get("candidates", [])
             if not candidates:
-                logger.warning(
-                    "Gemini returned no candidates (Safety filter?). Response: %s", res
-                )
                 raise ValueError("No candidates in Gemini response")
 
-            text = (
-                candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-            )
+            text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
             if not text:
                 raise ValueError("Empty text part in Gemini response")
 
             res_val = json.loads(text) if json_mode else text
             logger.info("LLM success: %s [Gemini] (backend=%s)", model_name, backend)
+            _log_llm_call(f"Gemini ({model_name})", resp, prompt=prompt, output=text)
             return (res_val, f"Gemini ({model_name})") if return_provider else res_val
         except Exception as e:
             if _is_ssl_transport_error(e):
-                logger.warning(
-                    "Gemini SSL error with %s backend: %s. All providers exhausted.",
-                    backend, e,
-                )
+                _dead_providers["gemini"] = time.time() + _DEAD_PROVIDER_TTL
+                logger.warning("Gemini SSL error; marking dead. Trying Bedrock.")
             elif _is_http_error(e):
                 status = _get_http_status(e)
-                if status == 401:
-                    logger.warning(
-                        "Gemini returned 401 (unauthorized). Check GOOGLE_API_KEY. All providers exhausted."
-                    )
+                if status in (429, 500, 502, 503):
+                    _dead_providers["gemini"] = time.time() + _DEAD_PROVIDER_TTL
+                    logger.warning("Gemini HTTP %s; marking dead %ss. Trying Bedrock.", status, _DEAD_PROVIDER_TTL)
                 else:
-                    logger.warning(
-                        "Gemini HTTP error (%s) with %s backend: %s. All providers exhausted.",
-                        status, backend, _get_http_detail(e),
-                    )
-            elif isinstance(e, json.JSONDecodeError):
-                logger.warning("Gemini returned invalid JSON: %s. All providers exhausted.", e)
+                    logger.warning("Gemini failed: %s. Trying Bedrock.", e)
             else:
-                logger.warning(
-                    "Gemini call failed unexpectedly: %s. All providers exhausted.", e,
+                logger.warning("Gemini failed: %s. Trying Bedrock.", e)
+
+    # ── #5. Amazon Bedrock (Last Fallback) ──────────────────────────────────
+    _BEDROCK_API_BASE = "https://integrate.api.nvidia.com/v1"
+    _BEDROCK_MODELS = [
+        {"id": "nvidia/nemotron-3-super-120b-a12b", "name": "Nemotron-3-Super-120B", "provider": "Nvidia"},
+        {"id": "meta/llama-3.3-70b-instruct", "name": "Llama-3.3-70B", "provider": "Meta"},
+    ]
+    if not is_dead("bedrock") and config.get("bedrock_api_key"):
+        session, backend = _create_curl_cffi_llm_session()
+        for model_info in _BEDROCK_MODELS:
+            model_id = model_info["id"]
+            model_name = model_info["name"]
+            try:
+                logger.info("LLM #5: %s [provider=Bedrock/%s]", model_name, model_info["provider"])
+                url = f"{_BEDROCK_API_BASE}/chat/completions"
+                headers = {
+                    "Authorization": f"Bearer {config['bedrock_api_key']}",
+                    "Content-Type": "application/json",
+                }
+                payload = {
+                    "model": model_id,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "response_format": {"type": "json_object"} if json_mode else None,
+                    "max_tokens": max_tokens or 2048,
+                }
+                resp = session.post(url, headers=headers, json=payload, timeout=30)
+                resp.raise_for_status()
+                text = resp.json()["choices"][0]["message"]["content"]
+                res_val = json.loads(text) if json_mode else text
+                logger.info(
+                    "LLM success: %s [Bedrock/%s] (backend=%s)",
+                    model_name, model_info["provider"], backend
                 )
+                _log_llm_call(f"Bedrock ({model_name})", resp, prompt=prompt, output=text)
+                return (res_val, f"Bedrock ({model_name})") if return_provider else res_val
+            except Exception as e:
+                continue
+        _dead_providers["bedrock"] = time.time() + _DEAD_PROVIDER_TTL
 
     logger.warning("LLM scan exhausted: all providers failed")
     return (None, "None") if return_provider else None
 
 
 def test_llm_providers():
-    """Diagnostic tool to verify LLM connectivity for all configured providers."""
+    """Diagnostic tool to verify LLM connectivity for all providers."""
     config = _get_ai_config()
     if not config:
         print("❌ Configuration not found. Check your config.yaml and enabled state.")
         return
 
+    print("DEBUG CONFIG OPENCODE KEY:", repr(config.get("opencode_api_key")))
+    print("DEBUG CONFIG NVIDIA KEY:", repr(config.get("nvidia_api_key")))
     print("DEBUG CONFIG SAMBANOVA KEY:", repr(config.get("sambanova_api_key")))
     print("DEBUG CONFIG GROQ KEY:", repr(config.get("groq_api_key")))
     print("DEBUG CONFIG OPENROUTER KEY:", repr(config.get("openrouter_api_key")))
@@ -504,7 +699,56 @@ def test_llm_providers():
             return "***"
         return f"{k[:4]}...{k[-4:]}"
 
-    # 2. Test SambaNova
+    # 0. Test OpenCode Zen (PRIMARY)
+    if config.get("opencode_api_key"):
+        try:
+            print(f"Testing OpenCode Zen (Key: {mask_key(config['opencode_api_key'])})...")
+            url = "https://opencode.ai/zen/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {config['opencode_api_key']}",
+                "Content-Type": "application/json",
+            }
+            payload = {
+                "model": "big-pickle",
+                "messages": [{"role": "user", "content": test_prompt}],
+                "max_tokens": 10,
+            }
+            resp = requests.post(url, headers=headers, json=payload, timeout=30)
+            print("OpenCode Zen Raw Status:", resp.status_code)
+            print("OpenCode Zen Raw Text:", resp.text[:200])
+            resp.raise_for_status()
+            results["OpenCode Zen"] = "OK"
+        except Exception as e:
+            results["OpenCode Zen"] = f"Error: {type(e).__name__}: {str(e)}"
+    else:
+        results["OpenCode Zen"] = "Not Configured"
+
+    # 0b. Test Nvidia NIM
+    if config.get("nvidia_api_key"):
+        try:
+            print(f"Testing Nvidia NIM (Key: {mask_key(config['nvidia_api_key'])})...")
+            url = "https://integrate.api.nvidia.com/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {config['nvidia_api_key']}",
+                "Content-Type": "application/json",
+            }
+            payload = {
+                "model": "nvidia/nemotron-3-super-120b-a12b",
+                "messages": [{"role": "user", "content": test_prompt}],
+                "max_tokens": 10,
+                "temperature": 0.6,
+            }
+            resp = requests.post(url, headers=headers, json=payload, timeout=30)
+            print("Nvidia NIM Raw Status:", resp.status_code)
+            print("Nvidia NIM Raw Text:", resp.text[:200])
+            resp.raise_for_status()
+            results["Nvidia NIM"] = "OK"
+        except Exception as e:
+            results["Nvidia NIM"] = f"Error: {type(e).__name__}: {str(e)}"
+    else:
+        results["Nvidia NIM"] = "Not Configured"
+
+    # 1. Test SambaNova
     if config.get("sambanova_api_key"):
         try:
             print(
@@ -516,7 +760,7 @@ def test_llm_providers():
                 "Content-Type": "application/json",
             }
             payload = {
-                "model": "DeepSeek-V3.1",
+                "model": "Meta-Llama-3.3-70B-Instruct",
                 "messages": [{"role": "user", "content": test_prompt}],
                 "max_tokens": 10,
             }
@@ -530,7 +774,7 @@ def test_llm_providers():
     else:
         results["SambaNova"] = "Not Configured"
 
-    # 3. Test Groq
+    # 2. Test Groq
     if config.get("groq_api_key"):
         try:
             print(f"Testing Groq (Key: {mask_key(config['groq_api_key'])})...")
@@ -539,6 +783,7 @@ def test_llm_providers():
                 "Authorization": f"Bearer {config['groq_api_key']}",
                 "Content-Type": "application/json",
             }
+            print("SENDING GROQ HEADER:", repr(headers))
             payload = {
                 "model": "llama-3.3-70b-versatile",
                 "messages": [{"role": "user", "content": test_prompt}],
@@ -554,7 +799,7 @@ def test_llm_providers():
     else:
         results["Groq"] = "Not Configured"
 
-    # 4. Test Gemini
+    # 3. Test Gemini
     gemini_key = config["local"]["llm"].get("api_key") if config["local"] else None
     if gemini_key:
         try:
@@ -569,7 +814,73 @@ def test_llm_providers():
     else:
         results["Gemini"] = "Not Configured"
 
-    # 5. Test OpenRouter
+    # 3. Test SambaNova
+    if config.get("sambanova_api_key"):
+        try:
+            print(
+                f"Testing SambaNova (Key: {mask_key(config['sambanova_api_key'])})..."
+            )
+            url = "https://api.sambanova.ai/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {config['sambanova_api_key']}",
+                "Content-Type": "application/json",
+            }
+            payload = {
+                "model": "Meta-Llama-3.3-70B-Instruct",
+                "messages": [{"role": "user", "content": test_prompt}],
+                "max_tokens": 10,
+            }
+            resp = requests.post(url, headers=headers, json=payload, timeout=15)
+            print("SambaNova Raw Status:", resp.status_code)
+            print("SambaNova Raw Text:", resp.text)
+            resp.raise_for_status()
+            results["SambaNova"] = "OK"
+        except Exception as e:
+            results["SambaNova"] = f"Error: {type(e).__name__}: {str(e)}"
+    else:
+        results["SambaNova"] = "Not Configured"
+
+    # 2. Test Groq
+    if config.get("groq_api_key"):
+        try:
+            print(f"Testing Groq (Key: {mask_key(config['groq_api_key'])})...")
+            url = "https://api.groq.com/openai/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {config['groq_api_key']}",
+                "Content-Type": "application/json",
+            }
+            print("SENDING GROQ HEADER:", repr(headers))
+            payload = {
+                "model": "llama-3.3-70b-versatile",
+                "messages": [{"role": "user", "content": test_prompt}],
+                "max_tokens": 10,
+            }
+            resp = requests.post(url, headers=headers, json=payload, timeout=10)
+            print("Groq Raw Status:", resp.status_code)
+            print("Groq Raw Text:", resp.text)
+            resp.raise_for_status()
+            results["Groq"] = "OK"
+        except Exception as e:
+            results["Groq"] = f"Error: {type(e).__name__}: {str(e)}"
+    else:
+        results["Groq"] = "Not Configured"
+
+    # 3. Test Gemini
+    gemini_key = config["local"]["llm"].get("api_key") if config["local"] else None
+    if gemini_key:
+        try:
+            print(f"Testing Gemini (Key: {mask_key(gemini_key)})...")
+            res = call_llm(test_prompt, json_mode=False)
+            results["Gemini"] = "OK" if res else "Empty Response"
+        except Exception as e:
+            err_msg = str(e)
+            if "401" in err_msg:
+                err_msg = "401 Unauthorized (Check your GOOGLE_API_KEY)"
+            results["Gemini"] = f"Error: {err_msg}"
+    else:
+        results["Gemini"] = "Not Configured"
+
+    # 4. Test OpenRouter
     if config.get("openrouter_api_key"):
         try:
             print(
@@ -1551,13 +1862,18 @@ def _fetch_moneycontrol_news() -> list[tuple[str, str]]:
     return headlines
 
 
-def get_market_news_sentiment() -> Optional[dict]:
+def get_market_news_sentiment(market_context: dict | None = None) -> Optional[dict]:
     """Fetch market news, summarize sentiment via LLM or local lexicon fallback.
 
     Pipeline:
       1. Fetch headlines from ICICI Direct, Livemint, Moneycontrol.
       2. Attempt LLM summarization (Groq → Gemini → OpenRouter).
       3. If LLM fails → local lexicon analysis (0 API calls).
+
+    market_context: optional live-market data (NIFTY close/change%, FII/DII net,
+        PCR, max pain, sector inflow/outflow). Used to enrich the LLM prompt,
+        but the resulting sentiment dict is still cached for 1 hour rather than
+        bypassing the cache.
     """
     import time
 
@@ -1643,6 +1959,37 @@ def get_market_news_sentiment() -> Optional[dict]:
             "If a previous sentiment call was inaccurate, adjust your weighting.\n"
         )
 
+    # Build a lightweight market-data block from caller-supplied context.
+    # The caller's intent is to enrich the prompt; the sentiment result itself
+    # is still served from the 1-hour cache above, so this does NOT bypass it.
+    _ctx = market_context or {}
+    _market_data_block = ""
+    if _ctx:
+        _market_data_block = (
+            "\n\n--- LIVE MARKET DATA (use for context, do NOT invent) ---\n"
+        )
+        if _ctx.get("nifty_close"):
+            _market_data_block += (
+                f"NIFTY 50: {_ctx['nifty_close']:.0f} "
+                f"({_ctx.get('nifty_change_pct', 0):+.2f}%)\n"
+            )
+        if _ctx.get("fii_net") is not None:
+            _market_data_block += f"FII Net (5D): ₹{_ctx['fii_net']:.0f} Cr\n"
+        if _ctx.get("dii_net") is not None:
+            _market_data_block += f"DII Net (5D): ₹{_ctx['dii_net']:.0f} Cr\n"
+        if _ctx.get("pcr_oi") is not None:
+            _market_data_block += f"PCR (OI): {_ctx['pcr_oi']:.2f}\n"
+        if _ctx.get("max_pain") is not None:
+            _market_data_block += f"Max Pain: {_ctx['max_pain']:.0f}\n"
+        if _ctx.get("sector_inflow"):
+            _market_data_block += (
+                f"Sectors Inflowing: {', '.join(_ctx['sector_inflow'][:3])}\n"
+            )
+        if _ctx.get("sector_outflow"):
+            _market_data_block += (
+                f"Sectors Outflowing: {', '.join(_ctx['sector_outflow'][:3])}\n"
+            )
+
     prompt = (
         "Analyze these LATEST Indian stock market news headlines from the last 12 hours. "
         "Your analysis MUST be based SOLELY on the provided headlines. "
@@ -1657,6 +2004,7 @@ def get_market_news_sentiment() -> Optional[dict]:
         "7. 'confidence': LOW/MEDIUM/HIGH\n"
         "8. 'model_used': (will be filled by system)\n\n"
         f"{_history_context}"
+        f"{_market_data_block}"
         f"Headlines:\n{news_text}"
     )
 

@@ -138,23 +138,30 @@ def rank_universe(stock_data: dict[str, pd.DataFrame], bench_df: pd.DataFrame) -
         vs50 = r.pct_vs_50dma
         rvol = r.rvol
         
-        # Long setups
-        if s10 > 15 and s20 > 5 and (0.0 <= vs20 <= 6.0) and r.above_50dma and rvol > 1.2:
+        # Determine position relative to 50 DMA:
+        # - strictly_above: price > 50 DMA (bullish bias)
+        # - at_or_below: price <= 50 DMA (bearish or neutral)
+        # This fixes the edge case where price == exactly 50 DMA
+        at_or_below_50dma = (r.pct_vs_50dma <= 0)
+        strictly_above_50dma = (r.pct_vs_50dma > 0)
+        
+        # Long setups (require strictly above 50 DMA)
+        if s10 > 15 and s20 > 5 and (0.0 <= vs20 <= 6.0) and strictly_above_50dma and rvol > 1.2:
             r.quintile = 5
-        elif s10 > 10 and s20 > 0 and (-1.0 <= vs20 <= 8.0) and vs50 > -2.0 and r.above_50dma and rvol > 1.0:
+        elif s10 > 10 and s20 > 0 and (-1.0 <= vs20 <= 8.0) and vs50 > -2.0 and strictly_above_50dma and rvol > 1.0:
             r.quintile = 4
-        elif s10 > 5 and (-2.0 <= vs20 <= 10.0) and r.above_50dma:
+        elif s10 > 5 and (-2.0 <= vs20 <= 10.0) and strictly_above_50dma:
             r.quintile = 3
-        elif s10 > 0 and r.above_50dma:
+        elif s10 > 0 and strictly_above_50dma:
             r.quintile = 2
-        # Short setups
-        elif s10 < -15 and s20 < -5 and (-6.0 <= vs20 <= 0.0) and (not r.above_50dma) and rvol > 1.2:
+        # Short setups (require at or below 50 DMA)
+        elif s10 < -15 and s20 < -5 and (-6.0 <= vs20 <= 0.0) and at_or_below_50dma and rvol > 1.2:
             r.quintile = 5
-        elif s10 < -10 and s20 < 0 and (-8.0 <= vs20 <= 1.0) and vs50 < 2.0 and (not r.above_50dma) and rvol > 1.0:
+        elif s10 < -10 and s20 < 0 and (-8.0 <= vs20 <= 1.0) and vs50 < 2.0 and at_or_below_50dma and rvol > 1.0:
             r.quintile = 4
-        elif s10 < -5 and (-10.0 <= vs20 <= 2.0) and (not r.above_50dma):
+        elif s10 < -5 and (-10.0 <= vs20 <= 2.0) and at_or_below_50dma:
             r.quintile = 3
-        elif s10 < 0 and (not r.above_50dma):
+        elif s10 < 0 and at_or_below_50dma:
             r.quintile = 2
         else:
             r.quintile = 1

@@ -1614,9 +1614,9 @@
                                     <th style="text-align: right">Margin Req</th>
                                     <th style="text-align: right">CMP</th>
                                     <th style="text-align: right">P&L</th>
-                                    <th>Time</th>
+                                    <th>Entry / Exit Time</th>
                                     <th>Status</th>
-                                    <th>Exit / Action</th>
+                                    <th>Exit Reason</th>
                                 </tr>
                             </thead>
                             <tbody id="options-tbody"></tbody>
@@ -4106,7 +4106,7 @@
 
                     let html = "";
                     ops.forEach((t) => {
-                        // Visual legs formatting
+                        // Visual legs formatting with individual P&L
                         let legsHtml = t.legs
                             .map((l) => {
                                 const isSell = l.side === "SELL";
@@ -4118,6 +4118,17 @@
                                     ? "leg-sell"
                                     : "leg-buy";
                                 const actionLabel = isSell ? "SELL" : "BUY";
+                                
+                                // Calculate leg P&L
+                                let legPnl = null;
+                                let legPnlStr = "";
+                                if (l.exit_premium !== null && l.exit_premium !== undefined) {
+                                    const sideMult = isSell ? 1 : -1;
+                                    legPnl = sideMult * (l.entry_premium - l.exit_premium) * l.qty;
+                                    const pnlClass = legPnl >= 0 ? "up" : "down";
+                                    legPnlStr = `<span class="${pnlClass}" style="font-size: 0.7rem; margin-left: 4px;">${legPnl >= 0 ? '+' : ''}₹${Math.abs(legPnl).toLocaleString('en-IN')}</span>`;
+                                }
+                                
                                 const priceLabel =
                                     l.exit_premium !== null &&
                                     l.exit_premium !== undefined
@@ -4133,6 +4144,7 @@
           <span class="leg-strike">${l.strike}</span>
           <span class="badge ${typeClass}">${l.type}</span>
           <span class="leg-premium">${priceLabel}</span>
+          ${legPnlStr}
         </div>`;
                             })
                             .join("");
@@ -4157,27 +4169,65 @@
                                     ? fmtInr(t.current_net_premium)
                                     : "—";
                         const displayPnl = colorPnl(t.pnl);
+                        
+                        // Format entry time
                         const entryTime =
-                            t.entry_date && t.entry_time
-                                ? `${t.entry_date.slice(8, 10)}/${t.entry_date.slice(5, 7)} ${t.entry_time.split(" ")[1].slice(0, 5)}`
+                            t.entry_time
+                                ? t.entry_time.split(" ")[1].slice(0, 5)
                                 : "—";
-                        const actionHtml =
-                            t.status === "OPEN"
-                                ? `<td><button class="close-btn" onclick="closeOptionPosition(${t.id}, this)">✕ Close</button></td>`
-                                : `<td><span class="exit-badge exit-${t.exit_reason}">${(t.exit_reason || "").replace("_", " ")}</span></td>`;
+                        const entryDate =
+                            t.entry_date
+                                ? `${t.entry_date.slice(8, 10)}/${t.entry_date.slice(5, 7)}`
+                                : "—";
+                        
+                        // Get expiry from first leg
+                        let expiryStr = "—";
+                        if (t.legs && t.legs.length > 0 && t.legs[0].expiry) {
+                            const exp = t.legs[0].expiry;
+                            expiryStr = `${exp.slice(8, 10)}/${exp.slice(5, 7)}/${exp.slice(2, 4)}`;
+                        }
+                        
+                        // Format symbol with expiry
+                        const symbolDisplay = `<div style="display:flex; flex-direction:column; gap:2px;">
+                            <span class="bold">${t.symbol}</span>
+                            <span style="font-size:0.65rem; color:var(--text-muted);">Exp: ${expiryStr}</span>
+                        </div>`;
+                        
+                        // Format exit time
+                        let exitTimeStr = "—";
+                        if (t.exit_time) {
+                            const exitDateStr = t.exit_time.split(" ")[0];
+                            const exitDate = `${exitDateStr.slice(8, 10)}/${exitDateStr.slice(5, 7)}`;
+                            const exitTime = t.exit_time.split(" ")[1].slice(0, 5);
+                            exitTimeStr = `${exitDate} ${exitTime}`;
+                        }
+                        
+                        const displayTime = `<div style="display:flex; flex-direction:column; gap:2px; font-size:0.72rem;">
+                            <div><span style="color:var(--text-muted)">Ent:</span> ${entryDate} ${entryTime}</div>
+                            <div><span style="color:var(--text-muted)">Ext:</span> ${exitTimeStr}</div>
+                        </div>`;
+                        
+                        // Entry/Exit Reason
+                        let exitReasonHtml = "";
+                        if (t.status === "OPEN") {
+                            exitReasonHtml = `<td><button class="close-btn" onclick="closeOptionPosition(${t.id}, this)">✕ Close</button></td>`;
+                        } else {
+                            const reason = (t.exit_reason || "").replace(/_/g, " ");
+                            exitReasonHtml = `<td><span class="exit-badge exit-${t.exit_reason}">${reason}</span></td>`;
+                        }
 
                         html += `<tr>
         <td>#${t.id}</td>
-        <td class="bold">${t.symbol}</td>
+        <td>${symbolDisplay}</td>
         <td><span class="badge ${t.structure.includes("BULL") ? "badge-green" : t.structure.includes("BEAR") ? "badge-red" : "badge-blue"}">${t.structure}</span></td>
         <td><div style="display:flex; flex-direction:column; gap:4px;">${legsHtml}</div></td>
         <td style="text-align: right; font-family:var(--mono);">${displayPremium}</td>
         <td style="text-align: right; font-family:var(--mono);">${fmtInr(t.margin_req || 0)}</td>
         <td style="text-align: right; font-family:var(--mono);">${displayCmp}</td>
         <td style="text-align: right; font-family:var(--mono);" class="pnl-cell">${displayPnl}</td>
-        <td class="muted" style="font-size:0.72rem;">${entryTime}</td>
+        <td class="muted">${displayTime}</td>
         <td><span class="badge ${t.status === "OPEN" ? "badge-amber" : "badge-green"}">${t.status}</span></td>
-        ${actionHtml}
+        ${exitReasonHtml}
       </tr>`;
                     });
                     tbody.innerHTML = html;

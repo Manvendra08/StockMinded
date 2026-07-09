@@ -198,7 +198,18 @@ def refresh_weights_if_needed(force: bool = False) -> bool:
 
 
 def calculate_weighted_momentum(index_name: str) -> dict:
-    """Fetch live returns for constituents and calculate weighted index momentum."""
+    """Fetch live returns for constituents and calculate weighted index momentum.
+    
+    Returns:
+        dict with:
+        - weighted_momentum: Overall index momentum (weighted avg change %)
+        - bullish_count: Number of stocks with change > 0.05%
+        - bearish_count: Number of stocks with change < -0.05%
+        - total_weight_captured: Sum of weights for stocks with valid data
+        - positive_weight_contribution: % of index being pushed up
+        - negative_weight_contribution: % of index being pushed down
+        - constituents: List of {symbol, weight, ltp, change_pct, contribution_pct}
+    """
     index_name = index_name.upper()
     if index_name not in CONSTITUENTS:
         return {
@@ -206,6 +217,8 @@ def calculate_weighted_momentum(index_name: str) -> dict:
             "bullish_count": 0,
             "bearish_count": 0,
             "total_weight_captured": 0.0,
+            "positive_weight_contribution": 0.0,
+            "negative_weight_contribution": 0.0,
             "constituents": []
         }
 
@@ -222,6 +235,8 @@ def calculate_weighted_momentum(index_name: str) -> dict:
     valid_weight_sum = 0.0
     bullish_count = 0
     bearish_count = 0
+    positive_weight_sum = 0.0
+    negative_weight_sum = 0.0
     details = []
 
     for s in symbols:
@@ -240,19 +255,26 @@ def calculate_weighted_momentum(index_name: str) -> dict:
             except Exception:
                 pass
 
+        # Calculate contribution: weight * change_pct (as % of index move)
+        contribution_pct = 0.0
         if change_pct is not None:
             weighted_sum += (weight * change_pct)
             valid_weight_sum += weight
+            contribution_pct = round(weight * change_pct / 100, 4)
+            
             if change_pct > 0.05:
                 bullish_count += 1
+                positive_weight_sum += weight
             elif change_pct < -0.05:
                 bearish_count += 1
+                negative_weight_sum += weight
 
         details.append({
             "symbol": s,
             "weight": weight,
             "ltp": ltp,
-            "change_pct": change_pct
+            "change_pct": change_pct,
+            "contribution_pct": contribution_pct
         })
 
     # Sort details by weight descending
@@ -262,10 +284,16 @@ def calculate_weighted_momentum(index_name: str) -> dict:
     if valid_weight_sum > 0:
         weighted_momentum = round(weighted_sum / valid_weight_sum, 2)
 
+    # Calculate contribution percentages (as % of total index weight = 100%)
+    positive_weight_contribution = round(positive_weight_sum, 2)
+    negative_weight_contribution = round(negative_weight_sum, 2)
+
     return {
         "weighted_momentum": weighted_momentum,
         "bullish_count": bullish_count,
         "bearish_count": bearish_count,
         "total_weight_captured": round(valid_weight_sum, 2),
+        "positive_weight_contribution": positive_weight_contribution,
+        "negative_weight_contribution": negative_weight_contribution,
         "constituents": details
     }

@@ -48,6 +48,16 @@ _INDEX_SPOT_NAMES = {
     "FINNIFTY": "Nifty Fin Services",
     "MIDCPNIFTY": "Nifty Midcap 100",
     "SENSEX": "S&P BSE SENSEX",
+    "NIFTY IT": "Nifty IT",
+    "NIFTY AUTO": "Nifty Auto",
+    "NIFTY PHARMA": "Nifty Pharma",
+    "NIFTY FMCG": "Nifty FMCG",
+    "NIFTY METAL": "Nifty Metal",
+    "NIFTY ENERGY": "Nifty Energy",
+    "NIFTY REALTY": "Nifty Realty",
+    "NIFTY INFRA": "Nifty Infra",
+    "NIFTY PSE": "Nifty PSE",
+    "NIFTY PVT BANK": "Nifty Pvt Bank",
 }
 
 # NSE index tokens for spot index queries (NSE cash exchange)
@@ -56,7 +66,17 @@ _INDEX_NSE_TOKENS: dict[str, str] = {
     "BANKNIFTY": "26009",
     "FINNIFTY": "26037",
     "MIDCPNIFTY": "26074",
-    "SENSEX": "26017",
+    "SENSEX": "1",  # Correct SENSEX token for BSE
+    "NIFTY IT": "26008",
+    "NIFTY AUTO": "26029",
+    "NIFTY PHARMA": "26023",
+    "NIFTY FMCG": "26021",
+    "NIFTY METAL": "26030",
+    "NIFTY ENERGY": "26020",
+    "NIFTY REALTY": "26018",
+    "NIFTY INFRA": "26019",
+    "NIFTY PSE": "26024",
+    "NIFTY PVT BANK": "26047",
 }
 _EXCHANGE_MAP: dict[str, str] = {
     "NIFTY": "NFO",
@@ -64,6 +84,16 @@ _EXCHANGE_MAP: dict[str, str] = {
     "FINNIFTY": "NFO",
     "MIDCPNIFTY": "NFO",
     "SENSEX": "BFO",
+    "NIFTY IT": "NFO",
+    "NIFTY AUTO": "NFO",
+    "NIFTY PHARMA": "NFO",
+    "NIFTY FMCG": "NFO",
+    "NIFTY METAL": "NFO",
+    "NIFTY ENERGY": "NFO",
+    "NIFTY REALTY": "NFO",
+    "NIFTY INFRA": "NFO",
+    "NIFTY PSE": "NFO",
+    "NIFTY PVT BANK": "NFO",
 }
 
 
@@ -95,49 +125,63 @@ def _post_jdata(
     try:
         from curl_cffi import requests as curl_requests
 
-        try:
-            resp = curl_requests.post(
-                url, data=body_str, headers=headers, timeout=15, impersonate="chrome120"
-            )
-            if resp.status_code >= 200 and resp.status_code < 300:
-                return resp.json()
-            raw = resp.text
+        max_retries = 2
+        last_exc = None
+        for attempt in range(max_retries):
             try:
-                parsed = json.loads(raw)
-            except Exception:
-                logger.error(
-                    "[shoonya] POST %s -> HTTP %s: %s",
-                    url,
-                    resp.status_code,
-                    raw[:200],
+                resp = curl_requests.post(
+                    url, data=body_str, headers=headers, timeout=30, impersonate="chrome120"
                 )
-                return None
-            if _is_session_expired_response(parsed):
-                logger.info(
-                    "[shoonya] POST %s -> HTTP %s: session expired",
-                    url,
-                    resp.status_code,
-                )
-            else:
-                emsg = str(parsed.get("emsg") or parsed.get("Emsg") or "")
-                if "no data" in emsg.lower():
-                    logger.debug(
-                        "[shoonya] POST %s -> HTTP %s: %s",
-                        url,
-                        resp.status_code,
-                        emsg[:100],
-                    )
-                else:
+                if resp.status_code >= 200 and resp.status_code < 300:
+                    return resp.json()
+                raw = resp.text
+                try:
+                    parsed = json.loads(raw)
+                except Exception:
                     logger.error(
                         "[shoonya] POST %s -> HTTP %s: %s",
                         url,
                         resp.status_code,
                         raw[:200],
                     )
-            return parsed
-        except Exception as exc:
-            logger.error("[shoonya] POST %s (curl_cffi) failed: %s", url, exc)
-            return None
+                    return None
+                if _is_session_expired_response(parsed):
+                    logger.info(
+                        "[shoonya] POST %s -> HTTP %s: session expired",
+                        url,
+                        resp.status_code,
+                    )
+                else:
+                    emsg = str(parsed.get("emsg") or parsed.get("Emsg") or "")
+                    if "no data" in emsg.lower():
+                        logger.debug(
+                            "[shoonya] POST %s -> HTTP %s: %s",
+                            url,
+                            resp.status_code,
+                            emsg[:100],
+                        )
+                    else:
+                        logger.error(
+                            "[shoonya] POST %s -> HTTP %s: %s",
+                            url,
+                            resp.status_code,
+                            raw[:200],
+                        )
+                return parsed
+            except Exception as exc:
+                last_exc = exc
+                error_str = str(exc)
+                is_dns_error = "Could not resolve host" in error_str or "DNSError" in error_str
+                if attempt < max_retries - 1:
+                    logger.warning("[shoony] POST %s attempt %d failed: %s, retrying...", url, attempt + 1, exc)
+                    import time
+                    time.sleep(1)
+                else:
+                    if is_dns_error:
+                        logger.warning("[shoonya] POST %s (curl_cffi) DNS failed after %d retries: %s. Falling back to urllib.", url, max_retries, exc)
+                    else:
+                        logger.error("[shoonya] POST %s (curl_cffi) failed after %d retries: %s", url, max_retries, exc)
+                    break
     except ImportError:
         pass
 
@@ -145,7 +189,7 @@ def _post_jdata(
     try:
         body = body_str.encode("utf-8")
         req = urllib.request.Request(url, data=body, headers=headers)
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         raw = e.read().decode()
@@ -1100,6 +1144,10 @@ class ShoonyaFetcher:
                     bid_val_final = _f2("bp1")
                     ask_val_final = _f2("sp1")
 
+                # Do not include strikes with 0 premium (corrupt or untraded data)
+                if ltp_val is None or ltp_val <= 0.0:
+                    continue
+
                 strikes.append(
                     {
                         "strike": strike,
@@ -1117,7 +1165,7 @@ class ShoonyaFetcher:
                 )
 
             if not strikes:
-                logger.warning("[shoonya] no strikes parsed for %s", base)
+                logger.warning("[shoonya] no valid strikes parsed (all had 0 premium or failed) for %s", base)
                 return None
 
             strikes.sort(key=lambda x: (x["strike"], x["option_type"]))
