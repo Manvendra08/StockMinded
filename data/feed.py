@@ -515,6 +515,22 @@ def quote_batch(symbols: list[str]) -> dict[str, dict]:
             "[quote_batch] dhan fallback failed: %s", e
         )
 
+    # Phase 2: Dhan public scraper fallback (no auth, free)
+    missing = [s for s in out if not out[s].get("ltp")]
+    if missing:
+        try:
+            pub = quote_batch_public(missing)
+            for sym, data in pub.items():
+                if data.get("ltp") and not out[sym].get("ltp"):
+                    out[sym] = data
+                    logging.getLogger(__name__).info(
+                        "[quote_batch] dhan_public filled %s (LTP=%.2f)", sym, data["ltp"]
+                    )
+        except Exception as e:
+            logging.getLogger(__name__).warning(
+                "[quote_batch] dhan_public fallback failed: %s", e
+            )
+
     return out
 
 
