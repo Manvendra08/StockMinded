@@ -277,24 +277,22 @@ def atomic_db_update():
     for attempt in range(20):
         try:
             lock_f = open(LOCK_FILE, "r+")
-            msvcrt.locking(lock_f.fileno(), msvcrt.LK_NBLCK, 1)
+            # Non-blocking (LK_NBLCK) for first 3 attempts, then blocking (LK_LOCK)
+            # to avoid PermissionError stamping on heavily contended files
+            lock_mode = msvcrt.LK_NBLCK if attempt < 3 else msvcrt.LK_LOCK
+            msvcrt.locking(lock_f.fileno(), lock_mode, 1)
             break  # Lock acquired
-        except (OSError, IOError):
+        except PermissionError:
             if lock_f:
                 try:
                     lock_f.close()
-                except Exception as e:
-                    logging.getLogger(__name__).warning(
-                        "[atomic_db_update] lock_f close error on retry %s: %s",
-                        attempt,
-                        e,
-                    )
+                except Exception:
+                    pass
                 lock_f = None
             if attempt < 19:
                 time.sleep(0.2 * (attempt + 1))
                 continue
-            else:
-                raise
+            raise
 
     # Phase 2: Load, yield, save (NO retry on save failure)
     try:
@@ -536,18 +534,18 @@ def enter_trade(alert: dict) -> dict:
     if not is_market_open():
         return {"error": "Market closed (9:15-15:30 IST, Mon-Fri)"}
 
+    symbol = alert["symbol"]
+    entry_price = _get_ltp(symbol)
+    if entry_price is None:
+        return {"error": f"Could not fetch LTP for {symbol}"}
+
     with atomic_db_update() as db:
-        symbol = alert["symbol"]
         direction = alert.get("direction", "LONG")
         today_str = _now_ist().date().isoformat()
 
         for t in db["trades"]:
             if t.get("symbol") == symbol and t.get("entry_date") == today_str:
                 return {"error": f"{symbol} already traded today (id={t['id']})"}
-
-        entry_price = _get_ltp(symbol)
-        if entry_price is None:
-            return {"error": f"Could not fetch LTP for {symbol}"}
 
         settings = db.get("settings", DEFAULT_SETTINGS.copy())
         capital_per_trade = settings.get("capital_per_trade_stocks", settings.get("capital_per_trade", 500000.0))
@@ -708,6 +706,30 @@ def enter_option_structure(
     """Enter a custom option structure."""
     if not is_market_open():
         return {"error": "Market closed"}
+
+    # Fetch Spot and VIX data outside the lock to avoid holding DB lock during slow yfinance API calls
+    underlying_spot = None
+    try:
+        from data import feed
+
+        spot_data = feed.ohlc_cached(underlying, period="5d")
+        if spot_data is not None and not spot_data.empty:
+            underlying_spot = float(spot_data["close"].iloc[-1])
+    except Exception:
+        underlying_spot = None
+
+    try:
+        from data import feed
+
+        vix_df = feed.ohlc_cached("INDIAVIX", period="5d")
+        entry_vix = (
+            float(vix_df["close"].iloc[-1])
+            if vix_df is not None and not vix_df.empty
+            else 0.0
+        )
+    except Exception:
+        entry_vix = 0.0
+
     with atomic_db_update() as db:
         if "option_trades" not in db:
             db["option_trades"] = []
@@ -812,17 +834,6 @@ def enter_option_structure(
         num_lots = max(l.lots for l in resolved_legs) if resolved_legs else 1
         is_defined_risk = struct_type != "naked_short"
 
-        # Get underlying spot for naked_short max_loss calculation
-        underlying_spot = None
-        try:
-            from data import feed
-
-            spot_data = feed.ohlc_cached(underlying, period="5d")
-            if spot_data is not None and not spot_data.empty:
-                underlying_spot = float(spot_data["close"].iloc[-1])
-        except Exception:
-            underlying_spot = None
-
         max_loss = calc_structure_max_loss(
             struct_type,
             net_premium,
@@ -832,17 +843,6 @@ def enter_option_structure(
             underlying_spot=underlying_spot,
         )
 
-        try:
-            from data import feed
-
-            vix_df = feed.ohlc_cached("INDIAVIX", period="5d")
-            entry_vix = (
-                float(vix_df["close"].iloc[-1])
-                if vix_df is not None and not vix_df.empty
-                else 0.0
-            )
-        except Exception:
-            entry_vix = 0.0
         trade = {
             "id": _next_id(db),
             "symbol": underlying,
@@ -935,6 +935,19 @@ def _enter_option_structure(
             naked_reason,
         )
         return {"error": f"{symbol} entry blocked: {naked_reason}"}
+
+    # Fetch VIX outside the lock to avoid holding DB lock during slow yfinance API calls
+    try:
+        from data import feed
+
+        vix_df = feed.ohlc_cached("INDIAVIX", period="5d")
+        entry_vix = (
+            float(vix_df["close"].iloc[-1])
+            if vix_df is not None and not vix_df.empty
+            else setup.vix
+        )
+    except Exception:
+        entry_vix = setup.vix
 
     with atomic_db_update() as db:
         if "option_trades" not in db:
@@ -1029,17 +1042,6 @@ def _enter_option_structure(
         )
         # Smart exit metadata
         short_strikes = [l.strike for l in resolved_legs if l.side == "SELL"]
-        try:
-            from data import feed
-
-            vix_df = feed.ohlc_cached("INDIAVIX", period="5d")
-            entry_vix = (
-                float(vix_df["close"].iloc[-1])
-                if vix_df is not None and not vix_df.empty
-                else setup.vix
-            )
-        except Exception:
-            entry_vix = setup.vix
 
         trade = {
             "id": _next_id(db),
@@ -1391,6 +1393,33 @@ def check_option_exits(
 
     closed = []
     vix_now = vix_current if vix_current is not None else _get_current_vix()
+
+    # Fetch option price map and chain snapshots completely unlocked (to avoid database write locks during slow network APIs)
+    price_map = _build_option_price_map(open_ops)
+
+    settings = db.get("settings", {})
+    smart_enabled = settings.get("smart_exits_enabled", True)
+    chain_cache = {}
+    if smart_enabled:
+        from signals.options import chain_snapshot
+        for sym in {t["symbol"] for t in open_ops}:
+            try:
+                needed_strikes = list(
+                    {
+                        leg["strike"]
+                        for t in open_ops
+                        if t["symbol"] == sym
+                        for leg in t["legs"]
+                    }
+                )
+                chain_cache[sym] = chain_snapshot(
+                    sym, target_strikes=needed_strikes
+                )
+            except Exception as e:
+                logging.getLogger(__name__).exception(
+                    "Failed to fetch chain_snapshot for %s: %s", sym, e
+                )
+
     with atomic_db_update() as db:
         open_ops = [t for t in db.get("option_trades", []) if t.get("status") == "OPEN"]
         if not open_ops:
@@ -1398,34 +1427,12 @@ def check_option_exits(
                 "check_option_exits: no open option trades found (re-read inside lock)"
             )
             return []
-        price_map = _build_option_price_map(open_ops)
+        
+        # Refresh settings and flags inside the lock
         settings = db.get("settings", {})
         auto_close = settings.get("auto_close_eod", True)
         is_eod = is_eod_window(now_ist)
         smart_enabled = settings.get("smart_exits_enabled", True)
-
-        # Fetch chain snapshots for delta breach check
-        chain_cache = {}
-        if smart_enabled:
-            from signals.options import chain_snapshot, net_position_delta
-
-            for sym in {t["symbol"] for t in open_ops}:
-                try:
-                    needed_strikes = list(
-                        {
-                            leg["strike"]
-                            for t in open_ops
-                            if t["symbol"] == sym
-                            for leg in t["legs"]
-                        }
-                    )
-                    chain_cache[sym] = chain_snapshot(
-                        sym, target_strikes=needed_strikes
-                    )
-                except Exception as e:
-                    logging.getLogger(__name__).exception(
-                        "Failed to fetch chain_snapshot for %s: %s", sym, e
-                    )
 
         for t in open_ops:
             # Guard: Check for valid premium setup before enforcing PnL targets

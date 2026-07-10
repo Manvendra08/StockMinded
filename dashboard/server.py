@@ -3389,6 +3389,10 @@ def _automation_worker():
                                         struct.name, legs, sym, cfg
                                     )
                                     if "error" in res:
+                                        _log.warning(
+                                            "  > Auto-enter Option Structure FAILED: %s %s — %s",
+                                            sym, struct.name, res.get("error"),
+                                        )
                                         continue
 
                                     _log.info(
