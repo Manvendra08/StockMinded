@@ -1479,6 +1479,7 @@ def check_option_exits(
                 chain = chain_cache.get(t.get("symbol"))
                 if chain is not None and not chain.empty:
                     delta_threshold = settings.get("smart_exit_delta_threshold", 0.35)
+                    from signals.options import net_position_delta
                     nd = net_position_delta(t["legs"], chain)
                     if nd is not None and abs(nd) > delta_threshold:
                         t["reentry_eligible"] = True
