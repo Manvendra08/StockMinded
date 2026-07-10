@@ -113,6 +113,7 @@ def _post_jdata(
 
     Uses curl_cffi (libcurl-based, robust TLS) with fallback to stdlib urllib.
     """
+    global _SHOONYA_API_FAILURE_TS, _SHOONYA_API_COOLDOWN
     body_str = "jData=" + json.dumps(payload, separators=(",", ":"))
     if access_token:
         body_str += f"&jKey={access_token}"
@@ -125,6 +126,10 @@ def _post_jdata(
     try:
         from curl_cffi import requests as curl_requests
 
+        if _SHOONYA_API_FAILURE_TS > 0 and (time.time() - _SHOONYA_API_FAILURE_TS) < _SHOONYA_API_COOLDOWN:
+            logger.warning("[shoonya] API in cooldown due to recent timeout. Skipping POST.")
+            return None
+
         max_retries = 2
         last_exc = None
         for attempt in range(max_retries):
@@ -133,6 +138,7 @@ def _post_jdata(
                     url, data=body_str, headers=headers, timeout=30, impersonate="chrome120"
                 )
                 if resp.status_code >= 200 and resp.status_code < 300:
+                    _SHOONYA_API_FAILURE_TS = 0.0  # Reset on success
                     return resp.json()
                 raw = resp.text
                 try:
@@ -174,13 +180,14 @@ def _post_jdata(
                 is_dns_error = "Could not resolve host" in error_str or "DNSError" in error_str
                 if attempt < max_retries - 1:
                     logger.warning("[shoony] POST %s attempt %d failed: %s, retrying...", url, attempt + 1, exc)
-                    import time
                     time.sleep(1)
                 else:
                     if is_dns_error:
                         logger.warning("[shoonya] POST %s (curl_cffi) DNS failed after %d retries: %s. Falling back to urllib.", url, max_retries, exc)
                     else:
                         logger.error("[shoonya] POST %s (curl_cffi) failed after %d retries: %s", url, max_retries, exc)
+                        if "curl: (28)" in error_str or "timeout" in error_str.lower() or "could not connect" in error_str.lower():
+                            _SHOONYA_API_FAILURE_TS = time.time()
                     break
     except ImportError:
         pass
@@ -214,6 +221,9 @@ def _post_jdata(
         return parsed
     except Exception as exc:
         logger.error("[shoonya] POST %s failed: %s", url, exc)
+        error_str = str(exc).lower()
+        if "timeout" in error_str or "timed out" in error_str or "winerror 10060" in error_str:
+            _SHOONYA_API_FAILURE_TS = time.time()
         return None
 
 
@@ -238,9 +248,6 @@ def _resolve_token_cache_dir() -> str:
 
 
 def _read_shared_token_file(filepath: str) -> dict | None:
-    import json
-    import time
-
     for _ in range(10):
         try:
             if not os.path.exists(filepath):
@@ -253,9 +260,6 @@ def _read_shared_token_file(filepath: str) -> dict | None:
 
 
 def _write_shared_token_file(filepath: str, data: dict) -> bool:
-    import json
-    import time
-
     temp_filepath = filepath + ".tmp"
     for _ in range(10):
         try:
@@ -339,8 +343,6 @@ class ShoonyaFetcher:
                     logger.debug("[shoonya] cleared cached token")
                 break
             except (PermissionError, OSError):
-                import time
-
                 time.sleep(0.05)
 
     def _verify_token(self) -> bool:
@@ -1396,6 +1398,8 @@ _SHOONYA_INSTANCE: ShoonyaFetcher | None = None
 # to avoid repeatedly running the slow Playwright OAuth flow on every request.
 _SHOONYA_LOGIN_COOLDOWN = 900  # 15 minutes
 _SHOONYA_LOGIN_FAILURE_TS: float = 0.0
+_SHOONYA_API_COOLDOWN = 120    # 2 minutes
+_SHOONYA_API_FAILURE_TS: float = 0.0
 
 
 def get_shoonya() -> ShoonyaFetcher | None:
