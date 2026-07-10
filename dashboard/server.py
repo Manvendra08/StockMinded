@@ -3090,17 +3090,19 @@ def _brain_audit(data: dict, alerts: list[dict]) -> bool:
         {"symbol": a.get("symbol"), "direction": a.get("direction")} for a in alerts
     ]
     prompt = (
-        f"Evaluate this trade signal. "
-        f"Regime={regime_name}, TrendScore={trend_score}, VIX={vix}, Bias={bias}, PCR={pcr}. "
-        f"Signals={_json.dumps(proposed)}. "
-        "Return ONLY valid JSON: "
-        '{"approved": true/false, "reason": "<=10 words"}.'
+        f"A rule-based system already approved these trades. "
+        f"Context: Regime={regime_name}, TrendScore={trend_score}, VIX={vix}, Bias={bias}, PCR={pcr}. "
+        f"Proposed signals={_json.dumps(proposed)}. "
+        f"Only reject if you see a clear contradiction (e.g., VIX spike >25, regime mismatch, "
+        f"extreme PCR >1.5 or <0.5, or signals contradicting regime direction). "
+        f"Return ONLY valid JSON: "
+        '{{"approved": true/false, "reason": "<=10 words"}}.'
     )
 
     try:
         decision = call_llm(
             prompt,
-            system_prompt="You are a risk manager for Indian trading. Reply with strict JSON only.",
+            system_prompt="You are a trade reviewer for Indian markets. Default to APPROVE unless there is a clear risk contradiction. Reply with strict JSON only.",
             json_mode=True,
             max_tokens=50,
         )
@@ -3112,9 +3114,15 @@ def _brain_audit(data: dict, alerts: list[dict]) -> bool:
             reason = (
                 decision.get("reason") if isinstance(decision, dict) else "Rejected"
             )
-            logging.getLogger(__name__).warning("🧠 Brain Audit REJECTED: %s", reason)
+            logging.getLogger(__name__).warning(
+                "🧠 Brain Audit REJECTED: %s | signals=%s regime=%s vix=%s",
+                reason, symbols_sig, regime_name, vix,
+            )
         else:
-            logging.getLogger(__name__).info("🧠 Brain Audit APPROVED")
+            logging.getLogger(__name__).info(
+                "🧠 Brain Audit APPROVED | signals=%s regime=%s vix=%s",
+                symbols_sig, regime_name, vix,
+            )
 
         return approved
     except Exception as e:
