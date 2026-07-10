@@ -251,18 +251,13 @@ def build_trade_verdict(data: dict) -> CombinedVerdict:
             stock_strategy = "Short A-Grade laggards with RS Slope < -50."
         elif regime_name in ("RANGE_HIGH_VOL", "RANGE_LOW_VOL", "VOL_CONTRACTION"):
             # Range regimes: directional stock picking only when leadership is
-            # exceptionally strong.  Marginal setups bleed via EMD close in
+            # exceptionally strong.  Marginal setups bleed via EOD close in
             # choppy conditions.  Prefer option premium selling instead.
             q5_longs = sum(1 for l in leaders if _get_val(l, "quintile", 0) == 5)
             q5_shorts = sum(1 for l in laggards if _get_val(l, "quintile", 0) == 5)
 
-            # Breadth override: when >=65% of stocks are above 50dma with positive
-            # trend, treat as directional even in range regime
-            breadth_override_up = breadth >= 65 and trend >= 2
-            breadth_override_down = breadth <= 35 and trend <= -2
-
-            # Gate: need >=5 Q5 names on at least one side, or breadth override
-            if q5_longs >= 5 or q5_shorts >= 5 or breadth_override_up or breadth_override_down:
+            # Gate: need >=5 Q5 names on at least one side to even consider
+            if q5_longs >= 5 or q5_shorts >= 5:
                 long_str = (
                     q5_longs
                     + (2 if bias == "LONG" else 0)
@@ -276,9 +271,9 @@ def build_trade_verdict(data: dict) -> CombinedVerdict:
 
                 # Evaluate strength first to avoid overlap bug
                 # If one side has clear edge, take that direction
-                if long_str > short_str + 4 or breadth_override_up:
+                if long_str > short_str + 4:
                     stock_action = "LONG_ONLY"
-                elif short_str > long_str + 4 or breadth_override_down:
+                elif short_str > long_str + 4:
                     stock_action = "SHORT_ONLY"
                 elif q5_longs >= 5 and q5_shorts >= 5:
                     # Both sides qualify but no clear edge - mixed play
@@ -310,6 +305,41 @@ def build_trade_verdict(data: dict) -> CombinedVerdict:
                         direction = "longs" if ai_influence > 0 else "shorts"
                         stock_reasons_extra.append(
                             f"AI sentiment {ai_overall} ({ai_conf_lbl}) favors {direction} (confidence boost)"
+                        )
+
+            # Intraday Momentum Override: fires in low-vol regimes when heavyweight
+            # momentum is strongly directional. ADX/breadth are lagging indicators
+            # that miss same-day rallies. This catches genuine momentum days.
+            if stock_action == "WAIT" and vix < 18:
+                if regime_name in ("RANGE_LOW_VOL", "VOL_CONTRACTION"):
+                    if nifty_momentum is not None and nifty_momentum > 0.40:
+                        stock_action = "LONG_ONLY"
+                        stock_tone = "bull"
+                        stock_can_trade = True
+                        stock_conf = "MEDIUM"
+                        stock_strategy = "Intraday momentum play: heavyweights driving LONG in low-vol regime."
+                        stock_reasons_extra.append(
+                            f"Nifty heavyweight momentum {nifty_momentum:+.2f}% signals bullish intraday"
+                        )
+                    elif nifty_momentum is not None and nifty_momentum < -0.40:
+                        stock_action = "SHORT_ONLY"
+                        stock_tone = "bear"
+                        stock_can_trade = True
+                        stock_conf = "MEDIUM"
+                        stock_strategy = "Intraday momentum play: heavyweights driving SHORT in low-vol regime."
+                        stock_reasons_extra.append(
+                            f"Nifty heavyweight momentum {nifty_momentum:+.2f}% signals bearish intraday"
+                        )
+                    # AI bearish override: downgrade confidence if AI disagrees
+                    if stock_action == "LONG_ONLY" and ai_influence < -0.4:
+                        stock_conf = "LOW"
+                        stock_reasons_extra.append(
+                            f"AI sentiment {ai_overall} ({ai_conf_lbl}) contradicts intraday long"
+                        )
+                    elif stock_action == "SHORT_ONLY" and ai_influence > 0.4:
+                        stock_conf = "LOW"
+                        stock_reasons_extra.append(
+                            f"AI sentiment {ai_overall} ({ai_conf_lbl}) contradicts intraday short"
                         )
 
     stock_reasons = list(common_reasons)
