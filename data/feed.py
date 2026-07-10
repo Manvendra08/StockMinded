@@ -1567,10 +1567,12 @@ def option_chain(symbol: str = "NIFTY", _skip_atm_filter: bool = False) -> dict:
                     # price could produce a narrower/different strike range.
                     data.setdefault("_cache", {})
                     data["_cache"].update({"stale": True, "ts": cached.get("ts")})
+                    # Prefix _source so dashboard badge shows "cache:shoonya" etc.
+                    orig_src = data.get("_source") or "unknown"
+                    if not orig_src.startswith("cache"):
+                        data["_source"] = f"cache:{orig_src}"
                     with _SOURCE_LOCK:
-                        _OPTION_CHAIN_SOURCE[symbol] = (
-                            f"cache:{data.get('_source') or 'unknown'}"
-                        )
+                        _OPTION_CHAIN_SOURCE[symbol] = data["_source"]
                     return data
         except Exception as e:
             logging.getLogger(__name__).exception(

@@ -4037,27 +4037,20 @@
                     if (expiries.length > 0) {
                         const expStr = expiries[0];
                         try {
-                            // Parse "DD-Mon-YYYY" format
-                            const [d, mStr, y] = expStr.split("-");
-                            const months = {
-                                Jan: 0,
-                                Feb: 1,
-                                Mar: 2,
-                                Apr: 3,
-                                May: 4,
-                                Jun: 5,
-                                Jul: 6,
-                                Aug: 7,
-                                Sep: 8,
-                                Oct: 9,
-                                Nov: 10,
-                                Dec: 11,
-                            };
-                            const dObj = new Date(
-                                parseInt(y),
-                                months[mStr],
-                                parseInt(d),
-                            );
+                            let dObj;
+                            // Handle YYYY-MM-DD (Shoonya format)
+                            if (/^\d{4}-\d{2}-\d{2}$/.test(expStr)) {
+                                const [y, m, d] = expStr.split("-");
+                                dObj = new Date(parseInt(y), parseInt(m) - 1, parseInt(d));
+                            } else {
+                                // Handle DD-Mon-YYYY format
+                                const [d, mStr, y] = expStr.split("-");
+                                const months = {
+                                    Jan: 0, Feb: 1, Mar: 2, Apr: 3, May: 4, Jun: 5,
+                                    Jul: 6, Aug: 7, Sep: 8, Oct: 9, Nov: 10, Dec: 11,
+                                };
+                                dObj = new Date(parseInt(y), months[mStr], parseInt(d));
+                            }
                             const dayName = dObj.toLocaleDateString("en-US", {
                                 weekday: "long",
                             });
