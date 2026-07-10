@@ -251,13 +251,18 @@ def build_trade_verdict(data: dict) -> CombinedVerdict:
             stock_strategy = "Short A-Grade laggards with RS Slope < -50."
         elif regime_name in ("RANGE_HIGH_VOL", "RANGE_LOW_VOL", "VOL_CONTRACTION"):
             # Range regimes: directional stock picking only when leadership is
-            # exceptionally strong.  Marginal setups bleed via EOD close in
+            # exceptionally strong.  Marginal setups bleed via EMD close in
             # choppy conditions.  Prefer option premium selling instead.
             q5_longs = sum(1 for l in leaders if _get_val(l, "quintile", 0) == 5)
             q5_shorts = sum(1 for l in laggards if _get_val(l, "quintile", 0) == 5)
 
-            # Gate: need >=5 Q5 names on at least one side to even consider
-            if q5_longs >= 5 or q5_shorts >= 5:
+            # Breadth override: when >=65% of stocks are above 50dma with positive
+            # trend, treat as directional even in range regime
+            breadth_override_up = breadth >= 65 and trend >= 2
+            breadth_override_down = breadth <= 35 and trend <= -2
+
+            # Gate: need >=5 Q5 names on at least one side, or breadth override
+            if q5_longs >= 5 or q5_shorts >= 5 or breadth_override_up or breadth_override_down:
                 long_str = (
                     q5_longs
                     + (2 if bias == "LONG" else 0)
@@ -271,9 +276,9 @@ def build_trade_verdict(data: dict) -> CombinedVerdict:
 
                 # Evaluate strength first to avoid overlap bug
                 # If one side has clear edge, take that direction
-                if long_str > short_str + 4:
+                if long_str > short_str + 4 or breadth_override_up:
                     stock_action = "LONG_ONLY"
-                elif short_str > long_str + 4:
+                elif short_str > long_str + 4 or breadth_override_down:
                     stock_action = "SHORT_ONLY"
                 elif q5_longs >= 5 and q5_shorts >= 5:
                     # Both sides qualify but no clear edge - mixed play
@@ -379,8 +384,10 @@ def build_trade_verdict(data: dict) -> CombinedVerdict:
                 )
 
     # --- 3. CIRCUIT BREAKER OVERRIDES ---
-    bearish_cb = (nifty_momentum is not None and nifty_momentum <= -1.5) or (banknifty_momentum is not None and banknifty_momentum <= -1.5) or (ai_influence <= -0.8)
-    bullish_cb = (nifty_momentum is not None and nifty_momentum >= 1.5) or (banknifty_momentum is not None and banknifty_momentum >= 1.5) or (ai_influence >= 0.8)
+    # Threshold 2.5%: normal bullish/bearish days (0.5-1.5%) should not trigger;
+    # only extreme momentum (>2.5%) or strong AI conviction (>0.8) blocks trades.
+    bearish_cb = (nifty_momentum is not None and nifty_momentum <= -2.5) or (banknifty_momentum is not None and banknifty_momentum <= -2.5) or (ai_influence <= -0.8)
+    bullish_cb = (nifty_momentum is not None and nifty_momentum >= 2.5) or (banknifty_momentum is not None and banknifty_momentum >= 2.5) or (ai_influence >= 0.8)
 
     if bearish_cb:
         if stock_action in ("LONG_ONLY", "LONG_AND_SHORT"):

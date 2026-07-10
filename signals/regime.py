@@ -220,6 +220,16 @@ def classify(index_symbol: str = "NIFTY", stock_universe_data: dict | None = Non
         # Issue #3: raised breadth cap from 50->45; 46-50% was a ~40% dead zone
         # where TREND_DOWN fired in essentially mixed-market conditions.
         regime = Regime.TREND_DOWN
+    elif adx < 20 and breadth_val >= 70 and trend >= 2:
+        # Breadth override: strong participation (>=70%) with positive trend
+        # signals TREND_UP even when ADX hasn't caught up yet
+        regime = Regime.TREND_UP
+        notes.append(f"breadth override: {breadth_val:.0f}% stocks above 50dma with trend +{trend}")
+    elif adx < 20 and breadth_val <= 30 and trend <= -2:
+        # Breadth override: weak participation (<=30%) with negative trend
+        # signals TREND_DOWN even when ADX hasn't caught up yet
+        regime = Regime.TREND_DOWN
+        notes.append(f"breadth override: {breadth_val:.0f}% stocks above 50dma with trend {trend}")
     elif adx < 20 and vix_now < 14:
         regime = Regime.RANGE_LOW_VOL
     elif adx < 20 and vix_now >= 16:
