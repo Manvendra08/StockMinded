@@ -1761,7 +1761,59 @@ def option_chain(symbol: str = "NIFTY", _skip_atm_filter: bool = False) -> dict:
             "[option_chain shoonya] failed for %s: %s", symbol, e
         )
 
-    # 1. Direct NSE/nsepython (fallback 1: direct API + nsepython library).
+    # 1. Sensibull oxide API (free, no auth, live derivatives prices + greeks).
+    try:
+        from data.sensibull_fetcher import fetch_option_chain as _sensibull_fetch
+        raw_sb = _sensibull_fetch(symbol)
+        if raw_sb and raw_sb.get("strikes"):
+            # Convert Sensibull normalized format to records.data format
+            merged: dict[float, dict] = {}
+            for s in raw_sb["strikes"]:
+                sk = s["strike"]
+                if sk not in merged:
+                    merged[sk] = {
+                        "strikePrice": sk,
+                        "expiryDate": raw_sb.get("expiry", ""),
+                    }
+                leg = {
+                    "strikePrice": sk,
+                    "expiryDate": raw_sb.get("expiry", ""),
+                    "underlying": raw_sb.get("symbol", symbol),
+                    "identifier": f"{raw_sb.get('symbol', symbol)}{raw_sb.get('expiry', '')}{sk}{s['option_type']}",
+                    "openInterest": s.get("oi", 0),
+                    "changeinOpenInterest": 0,
+                    "totalTradedVolume": s.get("volume", 0),
+                    "lastPrice": s.get("ltp", 0),
+                    "impliedVolatility": s.get("iv", 0),
+                    "greeks": {
+                        "delta": s.get("delta"),
+                        "gamma": s.get("gamma"),
+                        "theta": s.get("theta"),
+                        "vega": s.get("vega"),
+                    },
+                }
+                merged[sk][s["option_type"]] = leg
+            data = {
+                "records": {
+                    "data": list(merged.values()),
+                    "expiryDates": raw_sb.get("all_expiries", []),
+                    "underlyingValue": raw_sb.get("underlying_price"),
+                },
+                "underlying_price": raw_sb.get("underlying_price"),
+                "_source": "sensibull",
+                "filtered": {
+                    "underlyingValue": raw_sb.get("underlying_price"),
+                    "atm_strike": round((raw_sb.get("underlying_price") or 0) / 50) * 50,
+                    "strikes": [s.get("strike") for s in (raw_sb.get("strikes") or [])],
+                },
+            }
+            return _save_chain(data)
+    except Exception as e:
+        logging.getLogger(__name__).warning(
+            "[option_chain sensibull] failed for %s: %s", symbol, e
+        )
+
+    # 2. Direct NSE/nsepython (fallback 2: direct API + nsepython library).
     # Try robust direct fetch (NSE) first
     session = _get_nse_session()
     if session:
@@ -1860,58 +1912,6 @@ def option_chain(symbol: str = "NIFTY", _skip_atm_filter: bool = False) -> dict:
     except Exception as e:
         logging.getLogger(__name__).warning(
             "[option_chain public dhan] failed for %s: %s", symbol, e
-        )
-
-    # 2b. Sensibull oxide API (free, no auth, live derivatives prices + greeks).
-    try:
-        from data.sensibull_fetcher import fetch_option_chain as _sensibull_fetch
-        raw_sb = _sensibull_fetch(symbol)
-        if raw_sb and raw_sb.get("strikes"):
-            # Convert Sensibull normalized format to records.data format
-            merged: dict[float, dict] = {}
-            for s in raw_sb["strikes"]:
-                sk = s["strike"]
-                if sk not in merged:
-                    merged[sk] = {
-                        "strikePrice": sk,
-                        "expiryDate": raw_sb.get("expiry", ""),
-                    }
-                leg = {
-                    "strikePrice": sk,
-                    "expiryDate": raw_sb.get("expiry", ""),
-                    "underlying": raw_sb.get("symbol", symbol),
-                    "identifier": f"{raw_sb.get('symbol', symbol)}{raw_sb.get('expiry', '')}{sk}{s['option_type']}",
-                    "openInterest": s.get("oi", 0),
-                    "changeinOpenInterest": 0,
-                    "totalTradedVolume": s.get("volume", 0),
-                    "lastPrice": s.get("ltp", 0),
-                    "impliedVolatility": s.get("iv", 0),
-                    "greeks": {
-                        "delta": s.get("delta"),
-                        "gamma": s.get("gamma"),
-                        "theta": s.get("theta"),
-                        "vega": s.get("vega"),
-                    },
-                }
-                merged[sk][s["option_type"]] = leg
-            data = {
-                "records": {
-                    "data": list(merged.values()),
-                    "expiryDates": raw_sb.get("all_expiries", []),
-                    "underlyingValue": raw_sb.get("underlying_price"),
-                },
-                "underlying_price": raw_sb.get("underlying_price"),
-                "_source": "sensibull",
-                "filtered": {
-                    "underlyingValue": raw_sb.get("underlying_price"),
-                    "atm_strike": round((raw_sb.get("underlying_price") or 0) / 50) * 50,
-                    "strikes": [s.get("strike") for s in (raw_sb.get("strikes") or [])],
-                },
-            }
-            return _save_chain(data)
-    except Exception as e:
-        logging.getLogger(__name__).warning(
-            "[option_chain sensibull] failed for %s: %s", symbol, e
         )
 
     # 2c. Research360 — no auth required, provides OI for all strikes + LTP
