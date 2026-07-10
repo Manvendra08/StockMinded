@@ -1159,7 +1159,7 @@ def _get_persistent_sentiment_cache() -> tuple[Optional[Any], float, float]:
 
 
 def _set_persistent_sentiment_cache(
-    sentiment: Any, timestamp: float, ttl: float = 3600.0
+    sentiment: Any, timestamp: float, ttl: float = 600.0
 ) -> None:
     """Save sentiment, timestamp, and expires_at to a persistent local file."""
     import json
@@ -1923,7 +1923,7 @@ def get_market_news_sentiment(market_context: dict | None = None) -> Optional[di
     # Check persistent cache
     cached_val, cached_ts, expires_at = _get_persistent_sentiment_cache()
     if expires_at == 0.0 and cached_ts > 0.0:
-        expires_at = cached_ts + 3600.0
+        expires_at = cached_ts + 600.0
 
     if cached_val is not None and now < expires_at:
         logger.info(
@@ -2086,7 +2086,7 @@ def get_market_news_sentiment(market_context: dict | None = None) -> Optional[di
     except Exception as hist_err:
         logger.error("Failed to save sentiment history: %s", hist_err)
 
-    _set_persistent_sentiment_cache(sentiment, now, ttl=3600.0)
+    _set_persistent_sentiment_cache(sentiment, now, ttl=600.0)
     return sentiment
 
 
