@@ -832,7 +832,7 @@ def _resolve_structure(
             leg.strike = current_strike
             leg.premium = current_prem
             # Also update related long leg(s) if this is a structured strategy
-            if setup.strategy in ("IRON_CONDOR", "IRON_CONDOR_WIDE") and wing > 0:
+            if setup.strategy in ("IRON_CONDOR", "IRON_CONDOR_WIDE", "BEAR_CALL_SPREAD", "BULL_PUT_SPREAD") and wing > 0:
                 if leg.type == "PE":
                     long_target = _nearest(
                         current_strike - wing, strikes, prefer_higher=False
