@@ -1934,7 +1934,7 @@ def get_market_news_sentiment(market_context: dict | None = None) -> Optional[di
 
     # 1. Fetch headlines from all sources in parallel
     headlines: list[tuple[str, str]] = []
-    recency_cutoff = now - 36 * 3600  # Last 36 hours only
+    recency_cutoff = now - 6 * 3600  # Last 6 hours only (intraday focus)
 
     with ThreadPoolExecutor(max_workers=4) as executor:
         future_to_source = {
@@ -1968,7 +1968,7 @@ def get_market_news_sentiment(market_context: dict | None = None) -> Optional[di
     if not headlines:
         fallback = {
             "overall_market_sentiment": "NEUTRAL",
-            "justification": "News feed returned no actionable headlines in the last 36 hours.",
+            "justification": "News feed returned no actionable headlines in the last 6 hours.",
             "top_catalysts": ["Low-quality or duplicate headlines filtered out."],
             "actionable_trade_ideas": [],
         }
@@ -2032,21 +2032,26 @@ def get_market_news_sentiment(market_context: dict | None = None) -> Optional[di
             )
 
     prompt = (
-        "Analyze these LATEST Indian stock market news headlines from the last 12 hours. "
-        "Your analysis MUST be based SOLELY on the provided headlines. "
-        "Strictly ignore your internal training data about past years; ONLY use the headlines provided. "
-        "If no specific recent events are found in the text, do not invent them. Return JSON:\n"
-        "1. 'overall_market_sentiment': BULLISH/BEARISH/NEUTRAL\n"
+        "Analyze these Indian stock market news headlines for TODAY's trading sentiment.\n\n"
+        "CRITICAL RULES:\n"
+        "1. Headlines are listed NEWEST FIRST. Weight the first 5 headlines 2x more than the rest.\n"
+        "2. If headlines contradict each other (e.g., 'Sensex rises' vs 'Nifty tumbles'), "
+        "the NEWER headline reflects the CURRENT market state. The older headline describes a PAST event.\n"
+        "3. Determine the CURRENT intraday trend: has sentiment SHIFTED from earlier today?\n"
+        "4. Your sentiment must reflect what is happening NOW, not what happened hours ago.\n"
+        "5. Do NOT invent events. Use ONLY the provided headlines.\n\n"
+        "Return JSON:\n"
+        "1. 'overall_market_sentiment': BULLISH/BEARISH/NEUTRAL (based on CURRENT trend)\n"
         "2. 'sentiment_score': float -1 to 1\n"
         "3. 'sentiment_strength': WEAK/MODERATE/STRONG\n"
-        "4. 'justification': 1-2 sentence summary based EXCLUSIVELY on the provided headlines.\n"
+        "4. 'justification': 1-2 sentences. Start with the CURRENT state, then note any intraday shift.\n"
         "5. 'key_catalysts': list of {type: POS/NEG/NEUT, description: str}\n"
         "6. 'actionable_trade_ideas': list of {direction: LONG/SHORT, ticker: str, reason: str}\n"
         "7. 'confidence': LOW/MEDIUM/HIGH\n"
         "8. 'model_used': (will be filled by system)\n\n"
         f"{_history_context}"
         f"{_market_data_block}"
-        f"Headlines:\n{news_text}"
+        f"Headlines (newest first):\n{news_text}"
     )
 
     sentiment, model_used = call_llm(prompt, return_provider=True)
