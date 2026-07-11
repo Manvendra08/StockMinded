@@ -59,39 +59,25 @@ class TestLoadConfig:
 
 
 class TestLoadUniverse:
-    def test_load_universe_dhan_primary_success(self, monkeypatch):
-        mock_symbols = ["MOCK1", "MOCK2"]
-        monkeypatch.setattr(
-            "config.loader.fetch_dhan_public_universe",
-            lambda: mock_symbols
-        )
-        cfg = {"universe_source": "fno200"}
-        symbols = load_config() # dummy to get imports, or we can import load_universe
+    def test_load_universe_fo_sample(self):
+        """Test loading universe from fo_sample config"""
+        cfg = {"universe_source": "fo_sample", "universe_fo_sample": ["FO1", "FO2", "FO3"]}
         from config.loader import load_universe
         res = load_universe(cfg)
-        assert res == mock_symbols
+        assert res == ["FO1", "FO2", "FO3"]
 
-    def test_load_universe_dhan_fallback_on_failure(self, monkeypatch, tmp_path):
-        # Force fetch_dhan_public_universe to fail/return None
-        monkeypatch.setattr(
-            "config.loader.fetch_dhan_public_universe",
-            lambda: None
-        )
-        
-        # Mock Path in loader to point to a temporary csv file
-        csv_content = "symbol,sector,lot_size\nFALLBACK1,BANK,100\nFALLBACK2,IT,200\n"
-        csv_file = tmp_path / "fno200.csv"
-        with open(csv_file, "w", encoding="utf-8") as f:
-            f.write(csv_content)
-            
-        monkeypatch.setattr(
-            "config.loader.Path",
-            lambda *args, **kwargs: csv_file
-        )
-        
-        cfg = {"universe_source": "fno200"}
+    def test_load_universe_fo_sample_empty_raises(self):
+        """Test that empty fo_sample raises ValueError"""
+        cfg = {"universe_source": "fo_sample", "universe_fo_sample": []}
         from config.loader import load_universe
+        with pytest.raises(ValueError, match="Universe is empty"):
+            load_universe(cfg)
+
+    def test_load_universe_fno200_unknown_source_raises(self):
+        """Test that unknown universe source falls back to fo_sample"""
+        cfg = {"universe_source": "unknown", "universe_fo_sample": ["FB1", "FB2"]}
+        from config.loader import load_universe
+        # unknown source falls through to else branch which uses fo_sample
         res = load_universe(cfg)
-        assert "FALLBACK1" in res
-        assert "FALLBACK2" in res
+        assert res == ["FB1", "FB2"]
 

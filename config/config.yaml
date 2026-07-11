@@ -176,6 +176,19 @@ banknifty_options:
   min_short_premium: 15.0
   max_short_premium: 500.0
 
+# FII Derivatives Thresholds (₹Cr) for bias scoring
+# Normalized by 5-day rolling average volume in future enhancement
+fii_derivatives_thresholds:
+  index_futures_5d_cr: 1000
+  index_options_5d_cr: 2000
+  stock_futures_5d_cr: 2000
+
+# FII Derivatives Thresholds (₹Cr) - configurable to normalize across expiry weeks
+fii_derivatives_thresholds:
+  index_futures_5d_cr: 1000.0
+  index_options_5d_cr: 2000.0
+  stock_futures_5d_cr: 2000.0
+
 # Timing Engine - Overextension & Market Exhaustion Filters
 timing_engine:
   enabled: true

@@ -1,5 +1,5 @@
 # StockMinded — Full Code Audit Report
-**Repository:** https://github.com/Manvendra08/StockMinded  
+**Repository:** C:\Users\manve\Downloads\StockMinded
 **Audit Date:** 2026-07-10  
 **Auditor:** Perplexity AI (line-by-line static analysis)  
 **Scope:** All source `.py` files, config, ops, signals, intelligence, data modules  

@@ -7,7 +7,17 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA = """
+# Schema version for migrations
+SCHEMA_VERSION = 3
+
+SCHEMA = f"""
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER PRIMARY KEY,
+    applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+INSERT OR IGNORE INTO schema_version (version) VALUES (0);
+
 CREATE TABLE IF NOT EXISTS regime_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts TEXT NOT NULL,
@@ -73,11 +83,78 @@ CREATE TABLE IF NOT EXISTS trade_exit_analysis (
 """
 
 
+def _migrate_schema(conn: sqlite3.Connection) -> None:
+    """Apply schema migrations to bring database up to SCHEMA_VERSION."""
+    cursor = conn.cursor()
+    cursor.execute("SELECT version FROM schema_version ORDER BY version DESC LIMIT 1")
+    row = cursor.fetchone()
+    current_version = row[0] if row else 0
+    
+    if current_version >= SCHEMA_VERSION:
+        return
+    
+    # Migration from v1 to v2: Add new columns to trades table
+    if current_version < 2:
+        cursor.execute("""
+            ALTER TABLE trades ADD COLUMN source_regime TEXT
+        """)
+        cursor.execute("""
+            ALTER TABLE trades ADD COLUMN skip_reason TEXT
+        """)
+        cursor.execute("""
+            ALTER TABLE trades ADD COLUMN entry_quality TEXT
+        """)
+        cursor.execute("""
+            ALTER TABLE trades ADD COLUMN loss_root_cause TEXT
+        """)
+        cursor.execute("""
+            ALTER TABLE trades ADD COLUMN timing_snapshot JSON
+        """)
+        cursor.execute("""
+            ALTER TABLE trades ADD COLUMN event_risk_mode INTEGER DEFAULT 0
+        """)
+    
+    # Migration from v2 to v3: Add new tables
+    if current_version < 3:
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS skipped_trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL,
+                symbol TEXT,
+                direction TEXT,
+                alert_confidence TEXT,
+                skip_reason TEXT,
+                regime TEXT,
+                flow_bias TEXT,
+                risk_gate TEXT,
+                notes TEXT
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS trade_exit_analysis (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_id INTEGER UNIQUE NOT NULL,
+                ts TEXT NOT NULL,
+                loss_root_cause TEXT,
+                timing_at_exit JSON,
+                notes TEXT,
+                FOREIGN KEY(trade_id) REFERENCES trades(id)
+            )
+        """)
+    
+    cursor.execute(
+        "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, datetime('now'))",
+        (SCHEMA_VERSION,)
+    )
+    conn.commit()
+
+
 class Journal:
     def __init__(self, db_path: str):
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(db_path)
         self.conn.executescript(SCHEMA)
+        _migrate_schema(self.conn)
         self.conn.commit()
 
     def log_regime(self, payload: dict) -> None:

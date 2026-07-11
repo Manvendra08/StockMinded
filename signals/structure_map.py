@@ -48,7 +48,7 @@ MAP: dict[Regime, StructurePlan] = {
 
 
 def plan_for(regime: Regime) -> StructurePlan:
-    return MAP[regime]
+    return MAP.get(regime, StructurePlan(primary="Hold — regime unrecognized", secondary=None, notes=""))
 
 
 def build_structure_map(cfg=None) -> dict[str, dict[str, str]]:

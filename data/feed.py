@@ -15,6 +15,7 @@ from typing import Optional
 import pandas as pd
 import requests
 from requests.adapters import HTTPAdapter
+from tenacity import retry, stop_after_attempt, wait_exponential
 from urllib3.util.retry import Retry
 
 CACHE_DIR = Path(__file__).parent.parent / "data/cache"
@@ -1404,16 +1405,30 @@ def ohlc(symbol: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
     """Daily/intraday OHLC. yfinance primary."""
     import contextlib
     import io
+    from tenacity import retry, stop_after_attempt, wait_exponential
 
     yf = _yf()
     tkr = YF_SYMBOL.get(symbol) or (
         symbol if "." in symbol or "=" in symbol or "^" in symbol else f"{symbol}.NS"
     )
-    # Suppress yfinance's noisy "possibly delisted" stdout messages
-    with contextlib.redirect_stdout(io.StringIO()):
-        df = yf.download(
-            tkr, period=period, interval=interval, progress=False, auto_adjust=False
-        )
+    
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        reraise=True
+    )
+    def _download_with_retry():
+        with contextlib.redirect_stdout(io.StringIO()):
+            return yf.download(
+                tkr, period=period, interval=interval, progress=False, auto_adjust=False
+            )
+
+    try:
+        df = _download_with_retry()
+    except Exception as e:
+        logging.getLogger(__name__).exception(f"ohlc download failed for {symbol} after retries: {e}")
+        return pd.DataFrame()
+    
     df = _flatten_columns(df)
     if df.empty:
         return df
@@ -2287,6 +2302,34 @@ def fii_dii_cash(days: int = 10) -> pd.DataFrame:
 
     df = pd.DataFrame(cached_data)
 
+    if df.empty:
+        return df
+
+    # BUG-D02 FIX: Schema validation - ensure required columns exist
+    # Handle various column name variations from different data sources
+    # (StockEdge uses 'netValue', nsepython uses 'netvalue' or 'net', AI may use 'Value')
+    cols_lower = {c.lower(): c for c in df.columns}
+    
+    # Check for date column
+    date_col = cols_lower.get("date")
+    if not date_col:
+        raise ValueError("FII/DII schema validation failed: missing 'date' column")
+    
+    # Check for category column  
+    cat_col = cols_lower.get("category") or cols_lower.get("clienttype")
+    if not cat_col:
+        raise ValueError("FII/DII schema validation failed: missing 'category'/'clienttype' column")
+    
+    # Check for net value column (various possible names)
+    net_col = cols_lower.get("netvalue") or cols_lower.get("net") or cols_lower.get("value")
+    if not net_col:
+        raise ValueError("FII/DII schema validation failed: missing 'netvalue'/'net'/'value' column")
+
+    # Use the actual column names for downstream processing
+    df["date"] = df[date_col]
+    df["category"] = df[cat_col]
+    df["netValue"] = df[net_col]
+
     if "date" in df.columns:
         parsed_dates = pd.to_datetime(df["date"], format="%d-%b-%Y", errors="coerce")
         mask_failed = parsed_dates.isna() & df["date"].notna()
@@ -2535,6 +2578,9 @@ def ohlc_cached(symbol: str, period: str = "1y", interval: str = "1d") -> pd.Dat
     eliminating the latency spike where 200+ symbols were re-fetched simultaneously.
 
     BUG-11 FIX: All cache access is protected by _OHLC_CACHE_LOCK.
+
+    BUG-D01 FIX: Post-market-close freshness check. If market is closed (after 15:30 IST)
+    and cached data is from before market close, invalidate to force fresh fetch.
     """
     key = f"{symbol}_{period}_{interval}"
     now = time.time()
@@ -2543,7 +2589,16 @@ def ohlc_cached(symbol: str, period: str = "1y", interval: str = "1d") -> pd.Dat
         if key in _OHLC_CACHE:
             cached_df, cached_ts = _OHLC_CACHE[key]
             if not cached_df.empty and (now - cached_ts) < 120:
-                return cached_df.copy()
+                # BUG-D01: If market has closed since cache was written, invalidate.
+                ist_now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
+                market_close = ist_now.replace(hour=15, minute=30, second=0, microsecond=0)
+                cache_time_ist = datetime.fromtimestamp(cached_ts, timezone.utc).astimezone(
+                    timezone(timedelta(hours=5, minutes=30))
+                )
+                if ist_now > market_close and cache_time_ist < market_close:
+                    pass  # Invalidate by falling through to fetch
+                else:
+                    return cached_df.copy()
 
     # Cache miss or expired — fetch fresh data
     df = _cached_ohlc(symbol, period, interval, key)

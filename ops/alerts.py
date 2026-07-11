@@ -23,6 +23,12 @@ class Alerter:
     def send(self, text: str) -> bool:
         global _last_send
         import time
+        
+        # BUG-A01 FIX: Enforce Telegram 4096-char limit
+        MAX_TG = 4096
+        if len(text) > MAX_TG:
+            text = text[:MAX_TG - 20] + "\n...[truncated]"
+        
         _last_send["ts"] = time.strftime("%Y-%m-%d %H:%M:%S")
         _last_send["text_preview"] = text[:50] + "..." if len(text) > 50 else text
 

@@ -1,0 +1,13 @@
+{
+  "servers": {
+    "github.com/modelcontextprotocol/servers/tree/main/src/memory": {
+      "command": "cmd",
+      "args": [
+        "/c",
+        "npx",
+        "-y",
+        "@modelcontextprotocol/server-memory"
+      ]
+    }
+  }
+}

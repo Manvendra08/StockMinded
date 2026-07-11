@@ -56,8 +56,10 @@ def run_dashboard(cfg: dict) -> None:
     ranks = lead_mod.rank_universe(stock_data, bench)
     inflow_syms = [s for s, _ in flow_snap.top_inflow_sectors]
     # Pass sector_map so a_grade() can filter leaders/laggards by inflow sectors.
-    # load_sector_map() returns {} on failure, which gracefully skips the filter.
-    longs, shorts = lead_mod.a_grade(ranks, inflow_sectors=inflow_syms, sector_map=sector_map or None)
+    # load_sector_map() returns {} on failure; log warning to avoid silent disable.
+    if not sector_map:
+        logging.getLogger(__name__).warning("sector_map is empty — inflow sector filtering disabled")
+    longs, shorts = lead_mod.a_grade(ranks, inflow_sectors=inflow_syms, sector_map=sector_map if sector_map else None)
 
     structure = sm.plan_for(regime_snap.regime)
 
@@ -205,7 +207,7 @@ def run_agot_test(cfg: dict) -> None:
     h1.add_evidence(Evidence("test", 1, True, 3.0))
     h1.add_evidence(Evidence("test2", 1, True, 2.0))
     best = graph.select_best()
-    assert best is not None and "TREND_UP" in best.label, "ThoughtGraph failed"
+    assert best is not None and best.label.upper() == Regime.TREND_UP.value, "ThoughtGraph failed"
     print(f"  ✅ ThoughtGraph works (best={best.label}, conf={best.confidence:.2f})")
 
     # 2. Test AdaptiveRegime (unit-level, no data fetch)
@@ -278,8 +280,10 @@ def run_health(cfg: dict) -> None:
         checks.append(f"❌ VIX: {e}")
 
     try:
-        pcr_oi, pcr_vol, mp, stale, _, updated_at, _ = feed.get_pcr_max_pain_cached("NIFTY")
-        checks.append(f"✅ PCR (OI): {pcr_oi} (Updated: {updated_at})")
+        pcr_oi, pcr_vol, mp, pcr_stale, mp_stale, pcr_updated_at, mp_updated_at = (
+            feed.get_pcr_max_pain_cached("NIFTY")
+        )
+        checks.append(f"✅ PCR (OI): {pcr_oi} stale={pcr_stale} (Updated: {pcr_updated_at})")
     except Exception as e:
         checks.append(f"❌ Option chain/PCR feed: {e}")
 
@@ -298,6 +302,8 @@ def run_schedule(cfg: dict) -> None:
             "APScheduler / pytz not installed. Run: pip install apscheduler pytz"
         )
 
+    alerter = Alerter(cfg["alerts"].get("telegram_bot_token"), cfg["alerts"].get("telegram_chat_id"))
+
     ist = pytz_timezone("Asia/Kolkata")
     sched = BlockingScheduler(timezone=ist)
 
@@ -307,8 +313,9 @@ def run_schedule(cfg: dict) -> None:
         def wrapped():
             try:
                 fn(cfg)
-            except Exception:
+            except Exception as e:
                 logging.getLogger(__name__).exception("[%s] failed", name)
+                alerter.send(f"⚠️ Scheduler job [{name}] failed: {e}")
         return wrapped
 
     hh, mm = map(int, s["morning_dashboard"].split(":"))

@@ -180,8 +180,15 @@ class TestEvaluateTimingForEntry:
             },
         }
 
-        # Create mock data: mid-range RSI, within VWAP threshold
-        df_5m = pd.DataFrame({"close": [100 + i * 0.1 for i in range(20)]})
+        # Create mock data: mid-range RSI (oscillating prices), within VWAP threshold
+        # Use oscillating prices to keep RSI near 50 (neutral)
+        prices = [100.0]
+        for i in range(20):
+            if i % 2 == 0:
+                prices.append(prices[-1] + 0.1)
+            else:
+                prices.append(prices[-1] - 0.1)
+        df_5m = pd.DataFrame({"close": prices})
         df_1d = pd.DataFrame(
             {
                 "open": [1000],
@@ -242,6 +249,11 @@ class TestEvaluateTimingForEntry:
         }
 
         nifty_df = pd.DataFrame({"close": [17000 + i * 10 for i in range(25)]})
+        # VIX data with spike: yesterday close 15, current 20 (33% spike > 5% threshold)
+        vix_df = pd.DataFrame(
+            {"close": [15.0, 20.0]}, 
+            index=pd.date_range("2024-01-01", periods=2, freq="B")
+        )
 
         result = timing_mod.evaluate_timing_for_entry(
             symbol="TEST",
@@ -253,6 +265,7 @@ class TestEvaluateTimingForEntry:
             vwap_5m=1000,
             ai_sentiment_current=None,
             market_breadth={"advances": 80, "declines": 200},  # Weak breadth
+            vix_df=vix_df,
         )
 
         # High exhaustion should activate event risk mode

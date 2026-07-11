@@ -9,7 +9,18 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
+from config.loader import load_config
 from data import feed
+
+
+def _get_deriv_thresholds() -> dict[str, float]:
+    """Load FII derivative thresholds from config with sensible defaults."""
+    cfg = load_config()
+    return cfg.get("fii_derivatives_thresholds", {
+        "index_futures_5d_cr": 1000.0,
+        "index_options_5d_cr": 2000.0,
+        "stock_futures_5d_cr": 2000.0,
+    })
 
 
 @dataclass
@@ -87,17 +98,19 @@ def fii_dii_5d_net() -> tuple[dict[str, float], bool]:
         return zero, True
 
     # Vectorized approach: 10-50x faster than iterrows
-    # Clean net column: handle string commas and convert to float
-    net_series = df[net_col].copy()
-    if net_series.dtype == object:
-        net_series = net_series.str.replace(",", "").astype(float)
-    net_series = net_series.fillna(0.0)
-    
+    # BUG-F01 FIX: Use pd.to_numeric with errors='coerce' to handle mixed-type
+    # columns where pandas may have inferred float64 but some rows contain
+    # string values with commas. The old dtype == object check would miss these.
+    net_series = pd.to_numeric(
+        df[net_col].astype(str).str.replace(",", "").str.strip(),
+        errors="coerce"
+    ).fillna(0.0)
+
     # Categorize using vectorized string operations
     cat_lower = df[cat_col].astype(str).str.strip().str.lower()
     is_fii = cat_lower.str.contains("fii|fpi", na=False, regex=True)
     is_dii = cat_lower.str.contains("dii", na=False)
-    
+
     out["fii"] = round(net_series[is_fii].sum(), 2)
     out["dii"] = round(net_series[is_dii].sum(), 2)
 
@@ -129,6 +142,9 @@ def fii_dii_2d_trend(days: int = 20) -> tuple[float, float, bool]:
 
     unique_dates = sorted(df["date"].unique())
     if len(unique_dates) < 5:
+        logging.getLogger(__name__).warning(
+            "fii_dii_2d_trend: fewer than 5 unique dates (%d), returning stale", len(unique_dates)
+        )
         return zero
 
     last2 = unique_dates[-2:]
@@ -140,11 +156,13 @@ def fii_dii_2d_trend(days: int = 20) -> tuple[float, float, bool]:
         if sub.empty:
             return 0.0
         
-        # Clean net column
-        net_series = sub[net_col].copy()
-        if net_series.dtype == object:
-            net_series = net_series.str.replace(",", "").astype(float)
-        net_series = net_series.fillna(0.0)
+        # BUG-F01 FIX: Use pd.to_numeric with errors='coerce' to handle mixed-type
+        # columns where pandas may have inferred float64 but some rows contain
+        # string values with commas. The old dtype == object check would miss these.
+        net_series = pd.to_numeric(
+            sub[net_col].astype(str).str.replace(",", "").str.strip(),
+            errors="coerce"
+        ).fillna(0.0)
         
         # Filter FII/FPI rows
         cat_lower = sub[cat_col].astype(str).str.strip().str.lower()
@@ -192,9 +210,9 @@ def pcr_and_max_pain(
     try:
         raw = feed.option_chain(symbol)
         data = raw.get("records", {}).get("data", [])
+        if not data:
+            return None, None, None
     except Exception:
-        return None, None, None
-    if not data:
         return None, None, None
 
     ce_oi = pe_oi = ce_vol = pe_vol = 0.0
@@ -217,17 +235,21 @@ def pcr_and_max_pain(
 
     max_pain = None
     if strike_ce_oi and strike_pe_oi:
-        strikes = sorted(set(strike_ce_oi) | set(strike_pe_oi))
-        pain = {}
-        for k in strikes:
-            p = 0.0
-            for s in strikes:
-                if s < k:
-                    p += strike_pe_oi.get(s, 0) * (k - s)
-                elif s > k:
-                    p += strike_ce_oi.get(s, 0) * (s - k)
-            pain[k] = p
-        max_pain = float(min(pain, key=pain.get))
+        # BUG-F03 FIX: Vectorized max-pain calculation replaces O(n²) nested loops
+        import numpy as np
+        strikes_arr = np.array(sorted(set(strike_ce_oi) | set(strike_pe_oi)), dtype=float)
+        pe_vals = np.array([strike_pe_oi.get(s, 0) for s in strikes_arr], dtype=float)
+        ce_vals = np.array([strike_ce_oi.get(s, 0) for s in strikes_arr], dtype=float)
+        # pain[k] = sum(pe_vals[strikes < k] * (k - strikes[strikes < k])) + sum(ce_vals[strikes > k] * (strikes[strikes > k] - k))
+        pain = np.zeros_like(strikes_arr)
+        for i, k in enumerate(strikes_arr):
+            lower_mask = strikes_arr < k
+            upper_mask = strikes_arr > k
+            if lower_mask.any():
+                pain[i] += np.sum(pe_vals[lower_mask] * (k - strikes_arr[lower_mask]))
+            if upper_mask.any():
+                pain[i] += np.sum(ce_vals[upper_mask] * (strikes_arr[upper_mask] - k))
+        max_pain = float(strikes_arr[np.argmin(pain)])
     return pcr_oi, pcr_vol, max_pain
 
 
@@ -309,25 +331,31 @@ def _bias(
 
     # --- FII Derivatives (only when fresh) ---
     if not derivatives_stale and derivatives is not None:
+        # Load thresholds from config (with fallback to defaults)
+        thresholds = _get_deriv_thresholds()
+        idx_fut_thresh = thresholds.get("index_futures_5d_cr", 1000.0)
+        idx_opt_thresh = thresholds.get("index_options_5d_cr", 2000.0)
+        stk_fut_thresh = thresholds.get("stock_futures_5d_cr", 2000.0)
+
         # FII Index Futures 5D Net (weight 2.0 — highest quality signal)
         idx_fut = derivatives.get("fii_index_futures_5d", 0.0)
-        if idx_fut > 1000:
+        if idx_fut > idx_fut_thresh:
             score += 2.0
-        elif idx_fut < -1000:
+        elif idx_fut < -idx_fut_thresh:
             score -= 2.0
 
         # FII Index Options 5D Net (weight 0.5 — noisy, low threshold)
         idx_opt = derivatives.get("fii_index_options_5d", 0.0)
-        if idx_opt > 2000:
+        if idx_opt > idx_opt_thresh:
             score += 0.5
-        elif idx_opt < -2000:
+        elif idx_opt < -idx_opt_thresh:
             score -= 0.5
 
         # FII Stock Futures 5D Net (weight 1.0)
         stk_fut = derivatives.get("fii_stock_futures_5d", 0.0)
-        if stk_fut > 2000:
+        if stk_fut > stk_fut_thresh:
             score += 1.0
-        elif stk_fut < -2000:
+        elif stk_fut < -stk_fut_thresh:
             score -= 1.0
 
     # --- AI Sentiment direction influence (weight 1.0, range (-5, 5)) ---
@@ -398,6 +426,7 @@ def snapshot(
     ai_sentiment = None
     try:
         from data import ai_scraper
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 
         # Build market context for richer sentiment analysis
         _market_ctx = {}
@@ -425,15 +454,22 @@ def snapshot(
         if top_out:
             _market_ctx["sector_outflow"] = [s for s, _ in top_out]
 
-        # Defensive: handle stale .pyc cache where market_context param is missing
+        # BUG-F04 FIX: Wrap AI sentiment call in ThreadPoolExecutor with timeout
+        # to prevent hanging the critical dashboard path.
         try:
-            ai_sentiment = ai_scraper.get_market_news_sentiment(
-                market_context=_market_ctx if _market_ctx else None
+            with ThreadPoolExecutor(max_workers=1) as ex:
+                future = ex.submit(
+                    ai_scraper.get_market_news_sentiment,
+                    market_context=_market_ctx if _market_ctx else None,
+                )
+                ai_sentiment = future.result(timeout=10)
+        except (FuturesTimeout, Exception):
+            ai_sentiment = None
+            logging.getLogger(__name__).warning(
+                "AI sentiment fetch timed out or failed; continuing without it"
             )
-        except TypeError:
-            ai_sentiment = ai_scraper.get_market_news_sentiment()
     except Exception as e:
-        print(f"[flows.snapshot] AI sentiment failed: {e}")
+        logging.getLogger(__name__).warning("AI sentiment setup failed: %s", e)
 
     # Trendlyne KPIs
     try:

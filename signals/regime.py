@@ -109,7 +109,7 @@ def _trend_score(close: pd.Series) -> int:
     score += _cmp(px, e200)
     score += _cmp(e20, e50)
     score += _cmp(e50, e200)
-    if len(close) > 20:
+    if len(close) >= 25:
         score += _cmp(e20, float(ema20.iloc[-5]))
         score += _cmp(e50, float(ema50.iloc[-5]))
         score += _cmp(px, float(close.iloc[-6]), neutral_band=0.003)
@@ -127,21 +127,9 @@ def breadth_pct_above_50dma(stock_data: dict[str, pd.DataFrame]) -> float | None
         if df is None or df.empty or len(df) < 50:
             continue
         try:
-            col_name = None
-            # BUG-09 FIX: Columns are always lowercased by _flatten_columns(),
-            # so checking "Close" (capital C) is dead code. Only check "close".
-            if "close" in df.columns:
-                col_name = "close"
-            elif isinstance(df.columns, pd.MultiIndex):
-                flat_cols = [c[0].lower() if isinstance(c, tuple) else str(c).lower() for c in df.columns]
-                if "close" in flat_cols:
-                    col_idx = flat_cols.index("close")
-                    col_name = df.columns[col_idx]
-            
-            if col_name is None:
+            if "close" not in df.columns:
                 continue
-                
-            close_series = df[col_name]
+            close_series = df["close"]
             sma50 = close_series.rolling(50).mean().iloc[-1]
             if pd.isna(sma50):
                 continue
@@ -155,7 +143,7 @@ def breadth_pct_above_50dma(stock_data: dict[str, pd.DataFrame]) -> float | None
 
 def classify(index_symbol: str = "NIFTY", stock_universe_data: dict | None = None) -> RegimeSnapshot:
     idx = feed.ohlc_cached(index_symbol, period="2y")
-    vix = feed.ohlc_cached("INDIAVIX", period="3mo")
+    vix = feed.ohlc_cached("INDIAVIX", period="1y")
 
     if idx is not None and not idx.empty:
         idx = idx.dropna(subset=["close"])
@@ -221,6 +209,8 @@ def classify(index_symbol: str = "NIFTY", stock_universe_data: dict | None = Non
         # where TREND_DOWN fired in essentially mixed-market conditions.
         regime = Regime.TREND_DOWN
     elif adx < 20 and vix_now < 14:
+        regime = Regime.RANGE_LOW_VOL
+    elif adx < 20 and 14 <= vix_now < 16:
         regime = Regime.RANGE_LOW_VOL
     elif adx < 20 and vix_now >= 16:
         regime = Regime.RANGE_HIGH_VOL
