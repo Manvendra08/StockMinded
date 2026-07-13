@@ -1984,6 +1984,10 @@
                             id="news-count"
                             style="font-size: 0.75rem; color: var(--text-muted)"
                         ></span>
+                        <span
+                            id="news-refreshed-ts"
+                            style="font-size: 0.68rem; color: var(--text-muted); white-space: nowrap;"
+                        ></span>
                         <button
                             class="btn btn-sm btn-ghost"
                             onclick="loadNews()"
@@ -3783,9 +3787,14 @@
                     const container = document.getElementById("news-list");
                     const empty = document.getElementById("news-empty");
                     const count = document.getElementById("news-count");
+                    const refreshedTs = document.getElementById("news-refreshed-ts");
                     const verdictContainer =
                         document.getElementById("news-verdict");
                     if (!container) return;
+
+                    if (refreshedTs) {
+                        refreshedTs.textContent = d.refreshed_at ? `  Refreshed: ${d.refreshed_at}` : "";
+                    }
 
                     // ── AI Sentiment Verdict ──
                     if (verdictContainer && d.verdict) {

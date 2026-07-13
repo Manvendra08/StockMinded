@@ -3586,10 +3586,13 @@ def api_news_headlines():
                 "Sentiment verdict fetch failed: %s", sent_err
             )
 
+        from datetime import datetime
+        refreshed_at_str = datetime.fromtimestamp(now).strftime('%d %b %Y, %H:%M')
         result = {
             "headlines": deduped[:100],  # cap at 100
             "total": len(deduped),
             "verdict": verdict,
+            "refreshed_at": refreshed_at_str,
         }
         _NEWS_CACHE = result
         _NEWS_CACHE_TS = now
