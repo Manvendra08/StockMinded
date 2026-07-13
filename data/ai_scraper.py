@@ -411,13 +411,26 @@ def _opencode_post(url, headers, json_payload, timeout):
     )
 
     class _Resp:
-        pass
+        ok: bool
+        status_code: int
+        headers: dict
+        text: str
+
+        def raise_for_status(self):
+            if not self.ok:
+                raise requests.exceptions.HTTPError(
+                    f"HTTP {self.status_code}", response=self
+                )
+
+        def json(self):
+            import json as _json
+            return _json.loads(self.text)
 
     r = _Resp()
+    r.ok = resp.status_code < 400
     r.status_code = resp.status_code
     r.headers = dict(resp.headers)
     r.text = resp.text
-    r.json = resp.json
     return r
 
 
