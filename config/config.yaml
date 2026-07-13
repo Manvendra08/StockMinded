@@ -103,6 +103,8 @@ data_sources:
     saas_api_key: "${SCRAPEGRAPHAI_API_KEY}"
     opencode_api_key: "${OPENCODE_API_KEY}"
     nvidia_api_key: "${NVIDIA_API_KEY}"
+    cf_api_token: "${CLOUDFLARE_API_TOKEN}"
+    cf_account_id: "${CLOUDFLARE_ACCOUNT_ID}"
 
 options:
   enabled: true

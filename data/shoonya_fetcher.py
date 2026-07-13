@@ -197,15 +197,24 @@ def _post_jdata(
                 last_exc = exc
                 error_str = str(exc)
                 is_dns_error = "Could not resolve host" in error_str or "DNSError" in error_str
+                is_socket_error = "curl: (7)" in error_str or "errno 10022" in error_str
                 if attempt < max_retries - 1:
-                    logger.warning("[shoony] POST %s attempt %d failed: %s, retrying...", url, attempt + 1, exc)
-                    time.sleep(1)
+                    # Socket corruption needs longer backoff for OS to reclaim resources
+                    wait = 3 if is_socket_error else 1
+                    logger.warning("[shoony] POST %s attempt %d failed: %s, retrying in %ds...", url, attempt + 1, exc, wait)
+                    time.sleep(wait)
                 else:
                     if is_dns_error:
                         logger.warning("[shoonya] POST %s (curl_cffi) DNS failed after %d retries: %s. Falling back to urllib.", url, max_retries, exc)
                     else:
                         logger.error("[shoonya] POST %s (curl_cffi) failed after %d retries: %s", url, max_retries, exc)
-                        if "curl: (28)" in error_str or "timeout" in error_str.lower() or "could not connect" in error_str.lower():
+                        # Activate cooldown on socket/transport errors to let OS reclaim resources
+                        if (
+                            "curl: (28)" in error_str  # timeout
+                            or "curl: (7)" in error_str  # getsockname errno 10022 — socket corruption
+                            or "timeout" in error_str.lower()
+                            or "could not connect" in error_str.lower()
+                        ):
                             _SHOONYA_API_FAILURE_TS = time.time()
                     break
     except ImportError:
@@ -450,7 +459,7 @@ class ShoonyaFetcher:
                         lambda r: captured_urls.append(r.url) if "code=" in r.url else None,
                     )
 
-                    page.goto(authorize_url, wait_until="commit")
+                    page.goto(authorize_url, wait_until="commit", timeout=60000)
                     # Reduced timeout from 60s to 45s; retry handles slow loads
                     page.wait_for_selector("#lgnusrid", state="visible", timeout=45000)
 

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
+import time
 from datetime import datetime, timezone, timedelta
 
 log = logging.getLogger(__name__)
@@ -29,20 +31,66 @@ _INTERVAL_MAP: dict[str, int] = {
     "SENSEX": 100,
 }
 
-_REQ_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+_REQ_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Origin": "https://web.sensibull.com",
+    "Referer": "https://web.sensibull.com/",
+}
+
+_SESSION_LOCK = threading.Lock()
+_SESSION = None
+_SESSION_TS = 0.0
+
+
+def _get_session():
+    """Get or initialize a persistent warmed-up session with platform identify."""
+    global _SESSION, _SESSION_TS
+    with _SESSION_LOCK:
+        now = time.time()
+        # Refresh session if it is older than 30 minutes
+        if _SESSION is None or (now - _SESSION_TS) > 1800:
+            try:
+                from curl_cffi import requests as curl_requests
+                session = curl_requests.Session(impersonate="chrome120")
+            except ImportError:
+                import requests
+                session = requests.Session()
+
+            session.headers.update(_REQ_HEADERS)
+            try:
+                # Warmed up request: hit platform identify first to set the HttpOnly access_token cookie
+                r = session.get("https://oxide.sensibull.com/v1/pluto/auth/web/session/a/platform/identify", timeout=15)
+                r.raise_for_status()
+                _SESSION = session
+                _SESSION_TS = now
+                log.info("[sensibull] session successfully warmed up")
+            except Exception as e:
+                log.warning("[sensibull] session warm-up failed: %s", e)
+                # Fallback to the session object anyway
+                _SESSION = session
+                _SESSION_TS = now
+        return _SESSION
 
 
 def _sensibull_get(url: str, timeout: int = 15) -> dict | None:
-    """GET request to Sensibull oxide API using curl_cffi with requests fallback."""
+    """GET request to Sensibull oxide API using persistent warmed-up session, with retry."""
+    global _SESSION
+    session = _get_session()
     try:
-        from curl_cffi import requests as curl_requests
-        session = curl_requests.Session(impersonate="chrome120")
-        resp = session.get(url, headers=_REQ_HEADERS, timeout=timeout)
+        resp = session.get(url, timeout=timeout)
         resp.raise_for_status()
         return resp.json()
-    except Exception:
-        import requests
-        resp = requests.get(url, headers=_REQ_HEADERS, timeout=timeout)
+    except Exception as e:
+        log.warning("[sensibull] GET request to %s failed: %s. Clearing session and retrying.", url, e)
+        # Clear the session so the next call to _get_session() warms up a new one
+        with _SESSION_LOCK:
+            _SESSION = None
+        
+        # Re-initialize and retry once
+        session = _get_session()
+        resp = session.get(url, timeout=timeout)
         resp.raise_for_status()
         return resp.json()
 

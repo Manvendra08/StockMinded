@@ -23,6 +23,11 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 try:
+    import httpx as _httpx
+except ImportError:
+    _httpx = None
+
+try:
     from scrapegraphai.graphs import SearchGraph, SmartScraperGraph
 except ImportError:
     SmartScraperGraph = None
@@ -394,6 +399,28 @@ def _print_llm(msg: str) -> None:
     print(f"[LLM] {msg}", flush=True)
 
 
+_OPENCODE_HOST = "opencode.ai"
+
+
+def _opencode_post(url, headers, json_payload, timeout):
+    """Fallback POST using httpx when requests/curl_cffi fails with SSL EOF."""
+    if _httpx is None:
+        raise ImportError("httpx required")
+    resp = _httpx.post(
+        url, headers=headers, json=json_payload, timeout=timeout, verify=False
+    )
+
+    class _Resp:
+        pass
+
+    r = _Resp()
+    r.status_code = resp.status_code
+    r.headers = dict(resp.headers)
+    r.text = resp.text
+    r.json = resp.json
+    return r
+
+
 def call_llm(
     prompt: str,
     system_prompt: str = "You are a professional Indian stock market strategist.",
@@ -438,9 +465,15 @@ def call_llm(
                         {"role": "user", "content": prompt},
                     ],
                     "response_format": {"type": "json_object"} if json_mode else None,
-                    "max_tokens": max_tokens,
+                    "max_tokens": max_tokens or 2048,
                 }
-                resp = session.post(url, headers=headers, json=payload, timeout=15)
+                # BUG: requests/urllib3 consistently fails TLS handshake against
+                # Cloudflare-protected opencode.ai with SSL EOF errors.
+                # httpx library connects fine — try it when available.
+                if _OPENCODE_HOST in url and _httpx is not None:
+                    resp = _opencode_post(url, headers, payload, 15)
+                else:
+                    resp = session.post(url, headers=headers, json=payload, timeout=15)
                 resp.raise_for_status()
                 text = resp.json()["choices"][0]["message"]["content"]
                 res_val = json.loads(text) if json_mode else text
@@ -555,13 +588,63 @@ def call_llm(
                     _print_llm(f"#2 HTTP {status}; marking dead. Trying Groq 8b.")
                     logger.warning("Nvidia NIM HTTP %s; marking dead %ss. Trying Groq 8b.", status, _DEAD_PROVIDER_TTL)
                 else:
-                    _print_llm(f"#2 failed: {e}. Trying Groq 8b.")
-                    logger.warning("Nvidia NIM failed: %s. Trying Groq 8b.", e)
+                    _print_llm(f"#2 failed: {e}. Trying Cloudflare.")
+                    logger.warning("Nvidia NIM failed: %s. Trying Cloudflare.", e)
             else:
-                _print_llm(f"#2 failed: {e}. Trying Groq 8b.")
-                logger.warning("Nvidia NIM failed: %s. Trying Groq 8b.", e)
+                _print_llm(f"#2 failed: {e}. Trying Cloudflare.")
+                logger.warning("Nvidia NIM failed: %s. Trying Cloudflare.", e)
 
-    # ── #3. Groq 8b (Fallback 3) ───────────────────────────────────────────
+    # ── #2.5. Cloudflare Workers AI (Fallback 2.5: free tier, no key needed) ───
+    if not is_dead("cloudflare") and config.get("cf_api_token") and config.get("cf_account_id"):
+        session, backend = _create_curl_cffi_llm_session()
+        try:
+            _print_llm(f"#2.5 trying qwen2.5-coder-32b-instruct [Cloudflare] (backend={backend})")
+            logger.info("LLM #2.5: qwen2.5-coder-32b-instruct [provider=Cloudflare]")
+            url = f"https://api.cloudflare.com/client/v4/accounts/{config['cf_account_id']}/ai/run/{_CF_MODEL_NAME}"
+            headers = {
+                "Authorization": f"Bearer {config['cf_api_token']}",
+                "Content-Type": "application/json",
+            }
+            payload = {
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt},
+                ],
+                "max_tokens": max_tokens or 2048,
+            }
+            resp = session.post(url, headers=headers, json=payload, timeout=30)
+            resp.raise_for_status()
+            res = resp.json()
+            if res.get("result", {}).get("response"):
+                text = res["result"]["response"]
+            elif res.get("result", {}).get("outputs"):
+                text = res["result"]["outputs"][0]
+            else:
+                raise ValueError("No response in Cloudflare result")
+            res_val = json.loads(text) if json_mode else text
+            _print_llm(f"#2.5 OK: qwen2.5-coder-32b-instruct [Cloudflare] (backend={backend})")
+            logger.info("LLM success: qwen2.5-coder-32b-instruct [Cloudflare] (backend=%s)", backend)
+            _log_llm_call(f"Cloudflare (qwen2.5-coder-32b-instruct)", resp, prompt=prompt, output=text)
+            return (res_val, f"Cloudflare (qwen2.5-coder-32b-instruct)") if return_provider else res_val
+        except Exception as e:
+            if _is_ssl_transport_error(e):
+                _dead_providers["cloudflare"] = time.time() + _DEAD_PROVIDER_TTL
+                _print_llm("#2.5 SSL error; marking dead. Trying Groq 70b.")
+                logger.warning("Cloudflare SSL error; marking dead. Trying Groq 70b.")
+            elif _is_http_error(e):
+                status = _get_http_status(e)
+                if status in (429, 500, 502, 503):
+                    _dead_providers["cloudflare"] = time.time() + _DEAD_PROVIDER_TTL
+                    _print_llm(f"#2.5 HTTP {status}; marking dead. Trying Groq 70b.")
+                    logger.warning("Cloudflare HTTP %s; marking dead %ss. Trying Groq 70b.", status, _DEAD_PROVIDER_TTL)
+                else:
+                    _print_llm(f"#2.5 failed: {e}. Trying Groq 70b.")
+                    logger.warning("Cloudflare failed: %s. Trying Groq 70b.", e)
+            else:
+                _print_llm(f"#2.5 failed: {e}. Trying Groq 70b.")
+                logger.warning("Cloudflare failed: %s. Trying Groq 70b.", e)
+
+    # ── #3. Groq 8b (Fallback 3: lighter model) ───────────────────────────────
     if not is_dead("groq_8b") and config.get("groq_api_key"):
         session, backend = _create_curl_cffi_llm_session()
         try:
