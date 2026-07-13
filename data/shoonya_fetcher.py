@@ -140,6 +140,25 @@ def _post_jdata(
                 if resp.status_code >= 200 and resp.status_code < 300:
                     _SHOONYA_API_FAILURE_TS = 0.0  # Reset on success
                     return resp.json()
+
+                # 5xx server errors (502, 503, 504) are transient — retry
+                if resp.status_code >= 500 and attempt < max_retries - 1:
+                    logger.warning(
+                        "[shoonya] POST %s -> HTTP %d (server error), retrying...",
+                        url, resp.status_code,
+                    )
+                    time.sleep(2 * (attempt + 1))
+                    continue
+
+                # Activate cooldown on 5xx to avoid hammering a dead server
+                if resp.status_code >= 500:
+                    _SHOONYA_API_FAILURE_TS = time.time()
+                    logger.error(
+                        "[shoonya] POST %s -> HTTP %d after %d retries: server unavailable",
+                        url, resp.status_code, max_retries,
+                    )
+                    return None
+
                 raw = resp.text
                 try:
                     parsed = json.loads(raw)
@@ -199,6 +218,13 @@ def _post_jdata(
         with urllib.request.urlopen(req, timeout=30) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
+        # 5xx server errors — activate cooldown
+        if e.code >= 500:
+            _SHOONYA_API_FAILURE_TS = time.time()
+            logger.error(
+                "[shoonya] POST %s -> HTTP %d (server unavailable via urllib)", url, e.code
+            )
+            return None
         raw = e.read().decode()
         try:
             parsed = json.loads(raw)

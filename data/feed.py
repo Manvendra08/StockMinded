@@ -573,7 +573,7 @@ def _dhan_fill_quotes(
                     "source": "dhan_quote",
                 }
     except Exception as e:
-        print(f"[dhan quote_batch] failed: {e}")
+        logging.getLogger(__name__).warning("[dhan quote_batch] failed: %s", e)
 
 
 def get_data_sources() -> dict:
@@ -1141,9 +1141,9 @@ def _get_r360_session() -> tuple[requests.Session | None, str | None]:
                         success = True
                         break
                     except Exception as e:
-                        print(
-                            f"[r360 session] attempt {attempt + 1} {base_url} failed: "
-                            f"{type(e).__name__}: {e}"
+                        logging.getLogger(__name__).warning(
+                            "[r360 session] attempt %d %s failed: %s: %s",
+                            attempt + 1, base_url, type(e).__name__, e,
                         )
                         time.sleep(2 * (attempt + 1))
                 if success:
@@ -1338,8 +1338,9 @@ def _option_chain_from_research360(symbol: str) -> dict:
             if last_error is not None:
                 raise last_error
         except Exception as e:
-            print(
-                f"[option_chain research360] attempt {attempt + 1} failed: {type(e).__name__}: {e}"
+            logging.getLogger(__name__).warning(
+                "[option_chain research360] attempt %d failed: %s: %s",
+                attempt + 1, type(e).__name__, e,
             )
             with _R360_SESSION_LOCK:
                 _R360_SESSION = None  # Force new session on next attempt
@@ -2059,7 +2060,7 @@ def get_pcr_max_pain_cached(
                 cache_data["ts"],
             )
     except Exception as e:
-        print(f"[get_pcr_max_pain_cached] live fetch failed: {e}")
+        logging.getLogger(__name__).warning("[get_pcr_max_pain_cached] live fetch failed: %s", e)
 
     # Fallback to cache
     if cache_file.exists():
@@ -2155,7 +2156,7 @@ def fii_dii_cash(days: int = 10) -> pd.DataFrame:
 
     raw_stockedge = None
     if need_fetch:
-        print("[feed.fii_dii_cash] Fetching FII/DII activities from StockEdge API...")
+        logging.getLogger(__name__).info("Fetching FII/DII activities from StockEdge API...")
         for attempt in range(3):
             try:
                 url = "https://api.stockedge.com/Api/FIIDashboardApi/GetLatestFIIActivities?lang=en"
@@ -2178,8 +2179,8 @@ def fii_dii_cash(days: int = 10) -> pd.DataFrame:
                     if raw_stockedge:
                         break
             except Exception as e:
-                print(
-                    f"[feed.fii_dii_cash] StockEdge API attempt {attempt + 1} failed: {e}"
+                logging.getLogger(__name__).warning(
+                    "[fii_dii_cash] StockEdge API attempt %d failed: %s", attempt + 1, e
                 )
                 time.sleep(1)
 
@@ -2221,10 +2222,10 @@ def fii_dii_cash(days: int = 10) -> pd.DataFrame:
             try:
                 _set_persistent_fii_dii_cache(cached_data, cached_stockedge, now)
             except Exception as e:
-                print(f"[feed.fii_dii_cash] Failed to cache StockEdge data: {e}")
+                logging.getLogger(__name__).warning("[fii_dii_cash] Failed to cache StockEdge data: %s", e)
         else:
-            print(
-                "[feed.fii_dii_cash] StockEdge API failed. Falling back to legacy/AI..."
+            logging.getLogger(__name__).warning(
+                "[fii_dii_cash] StockEdge API failed. Falling back to legacy/AI..."
             )
             # Fallback to legacy
             raw = None
@@ -2247,8 +2248,8 @@ def fii_dii_cash(days: int = 10) -> pd.DataFrame:
                         ):
                             break
                     except Exception as e:
-                        print(
-                            f"[feed.fii_dii_cash] legacy attempt {attempt + 1} failed: {e}"
+                        logging.getLogger(__name__).warning(
+                            "[fii_dii_cash] legacy attempt %d failed: %s", attempt + 1, e
                         )
                         time.sleep(2)
 
@@ -2261,7 +2262,7 @@ def fii_dii_cash(days: int = 10) -> pd.DataFrame:
                     if ai_raw:
                         raw = pd.DataFrame(ai_raw)
                 except Exception as e:
-                    print(f"[feed.fii_dii_cash] AI fallback failed: {e}")
+                    logging.getLogger(__name__).warning("[fii_dii_cash] AI fallback failed: %s", e)
 
             if raw is not None:
                 if isinstance(raw, pd.DataFrame):
@@ -2295,7 +2296,7 @@ def fii_dii_cash(days: int = 10) -> pd.DataFrame:
                             cached_data, cached_stockedge, now
                         )
                     except Exception as e:
-                        print(f"[feed.fii_dii_cash] Failed to cache FII/DII data: {e}")
+                        logging.getLogger(__name__).warning("[fii_dii_cash] Failed to cache FII/DII data: %s", e)
 
     if not cached_data:
         return pd.DataFrame()
@@ -2405,7 +2406,7 @@ def fii_dii_derivatives(days: int = 5) -> tuple[dict[str, float], bool]:
                     existing_data or [], cached_stockedge, time.time()
                 )
         except Exception as e:
-            print(f"[feed.fii_dii_derivatives] Failed to trigger fetch: {e}")
+            logging.getLogger(__name__).warning("[fii_dii_derivatives] Failed to trigger fetch: %s", e)
 
     if not cached_stockedge:
         return {
@@ -2690,7 +2691,7 @@ def universe_ohlc(tickers: list[str], period: str = "6mo") -> dict[str, pd.DataF
                     results[t] = sym_df
                     continue
             except Exception as e:
-                print(f"universe_ohlc dhan: {t} err: {type(e).__name__}: {e}")
+                logging.getLogger(__name__).warning("universe_ohlc dhan: %s err: %s: %s", t, type(e).__name__, e)
             dhan_failed.append(t)
             time.sleep(0.22)
         missing_tickers = dhan_failed
@@ -2736,7 +2737,7 @@ def universe_ohlc(tickers: list[str], period: str = "6mo") -> dict[str, pd.DataF
                 )
             time.sleep(1)  # rate limit spacing
         except Exception as e:
-            print(f"yfinance batch download failed, retrying once: {e}")
+            logging.getLogger(__name__).warning("yfinance batch download failed, retrying once: %s", e)
             time.sleep(2)
             try:
                 with _quiet:
@@ -2850,7 +2851,7 @@ def universe_ohlc(tickers: list[str], period: str = "6mo") -> dict[str, pd.DataF
                     failed += 1
                 tried += 1
 
-    print(f"universe_ohlc: fetched={fetched} failed={failed} skipped={skipped}")
+    logging.getLogger(__name__).info("universe_ohlc: fetched=%d failed=%d skipped=%d", fetched, failed, skipped)
     return results
 
 

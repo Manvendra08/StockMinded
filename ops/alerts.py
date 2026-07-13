@@ -81,34 +81,137 @@ class Alerter:
             return False
 
 
+def _badge_emoji(bias: str) -> str:
+    return {"LONG": "🟢", "SHORT": "🔴"}.get(bias, "⚪")
+
+
+def _regime_emoji(regime_val: str) -> str:
+    return {
+        "TREND_UP": "📈",
+        "TREND_DOWN": "📉",
+        "RANGE_LOW_VOL": "↔️",
+        "RANGE_HIGH_VOL": "〰️",
+        "VOL_EXPANSION": "💥",
+        "VOL_CONTRACTION": "🫧",
+    }.get(regime_val, "❓")
+
+
+def _format_sector_line(sectors: list[tuple[str, float]], emoji: str) -> str:
+    parts = [f"{s}({v:+.1f}%)" for s, v in sectors[:3]]
+    return f"  {emoji} " + "  ".join(parts)
+
+
+def _ai_sentiment_badge(ai_sentiment) -> str:
+    if ai_sentiment is None:
+        return ""
+    if isinstance(ai_sentiment, dict):
+        sent = str(ai_sentiment.get("overall_market_sentiment") or "").upper()
+        conf = str(ai_sentiment.get("confidence") or "LOW").upper()
+    else:
+        sent = str(ai_sentiment).upper()
+        conf = "MED"
+    icon = {"BULLISH": "🟢", "POSITIVE": "🟢", "BEARISH": "🔴", "NEGATIVE": "🔴"}.get(sent, "⚪")
+    return f"\n🤖 AI Sentiment: {icon} `{sent}` ({conf})"
+
+
 def format_dashboard(regime_snap, flow_snap, structure_plan, longs, shorts) -> str:
-    lines = []
-    lines.append("*📊 Morning Dashboard*")
-    lines.append("")
-    # Safe access for regime value (handles both Enum and string)
+    """Modern, scannable Telegram dashboard alert."""
+    from datetime import datetime, timezone, timedelta
+
     regime_val = regime_snap.regime.value if hasattr(regime_snap.regime, 'value') else regime_snap.regime
-    lines.append(f"*Regime:* `{regime_val}`")
-    lines.append(
-        f"  trend={regime_snap.trend_score:+d}  VIX={regime_snap.vix} ({regime_snap.vix_5d_change_pct:+.1f}% 5d)  ADX={regime_snap.adx}"
-    )
+    r_emoji = _regime_emoji(regime_val)
+    b_emoji = _badge_emoji(flow_snap.smart_money_bias)
+
+    # Timestamp
+    ist = timezone(timedelta(hours=5, minutes=30))
+    now_ist = datetime.now(ist)
+    ts_str = now_ist.strftime("%d %b, %H:%M IST")
+
+    lines = []
+
+    # ── Header ──
+    lines.append(f"📊 *StockMinded — Morning Brief*")
+    lines.append("")
+
+    # ── Regime block ──
+    lines.append(f"{r_emoji} *Regime:* `{regime_val}`")
+    parts = [f"Trend {regime_snap.trend_score:+d}"]
+    parts.append(f"VIX {regime_snap.vix}")
+    if regime_snap.vix_5d_change_pct:
+        parts.append(f"({regime_snap.vix_5d_change_pct:+.1f}% 5d)")
+    parts.append(f"ADX {regime_snap.adx}")
+    lines.append("  " + "  ·  ".join(parts))
     if regime_snap.breadth_pct_above_50dma is not None:
-        lines.append(f"  breadth>50DMA: {regime_snap.breadth_pct_above_50dma}%")
-    lines.append(f"  notes: {regime_snap.notes}")
+        lines.append(f"  Breadth {regime_snap.breadth_pct_above_50dma}% above 50-DMA")
+    if regime_snap.notes and regime_snap.notes != "ok":
+        lines.append(f"  _{regime_snap.notes}_")
     lines.append("")
-    lines.append(f"*Flows* — bias: `{flow_snap.smart_money_bias}`")
-    lines.append(f"  FII/DII 5d (₹Cr): {flow_snap.fii_dii_5d_net_cr}")
-    lines.append(f"  PCR OI={flow_snap.pcr_oi}  Vol={flow_snap.pcr_vol}  MaxPain={flow_snap.max_pain}")
-    if flow_snap.top_inflow_sectors:
-        lines.append(f"  🟢 in: {', '.join(f'{s}({v:+.1f}%)' for s, v in flow_snap.top_inflow_sectors)}")
-    if flow_snap.top_outflow_sectors:
-        lines.append(f"  🔴 out: {', '.join(f'{s}({v:+.1f}%)' for s, v in flow_snap.top_outflow_sectors)}")
+
+    # ── Smart Money block ──
+    lines.append(f"{b_emoji} *Smart Money:* `{flow_snap.smart_money_bias}`")
+    fii_dii = flow_snap.fii_dii_5d_net_cr or {}
+    fii_net = fii_dii.get("fii", 0)
+    dii_net = fii_dii.get("dii", 0)
+    lines.append(f"  FII {fii_net:+,.0f} Cr  ·  DII {dii_net:+,.0f} Cr  (5d cash)")
+
+    # FII derivatives if available
+    derivs = getattr(flow_snap, 'fii_derivatives_5d', {}) or {}
+    if derivs:
+        idx_fut = derivs.get("fii_index_futures_5d", 0)
+        if idx_fut:
+            lines.append(f"  FII Index Fut {idx_fut:+,.0f} Cr  (5d)")
     lines.append("")
-    if longs:
-        lines.append("*Leaders (A-grade long):* " + ", ".join(r.symbol for r in longs[:5]))
-    if shorts:
-        lines.append("*Laggards (A-grade short):* " + ", ".join(r.symbol for r in shorts[:5]))
+
+    # ── Options Pulse ──
+    lines.append("📈 *Options Pulse*")
+    pcr_parts = []
+    if flow_snap.pcr_oi is not None:
+        pcr_parts.append(f"PCR OI `{flow_snap.pcr_oi}`")
+    if flow_snap.pcr_vol is not None:
+        pcr_parts.append(f"PCR Vol `{flow_snap.pcr_vol}`")
+    if flow_snap.max_pain is not None:
+        pcr_parts.append(f"MaxPain `{flow_snap.max_pain:,.0f}`")
+    if pcr_parts:
+        lines.append("  " + "  ·  ".join(pcr_parts))
+    else:
+        lines.append("  _Option chain unavailable_")
     lines.append("")
-    lines.append(f"*Structure:* {structure_plan.primary}")
-    lines.append(f"  alt: {structure_plan.secondary}")
-    lines.append(f"  notes: {structure_plan.notes}")
+
+    # ── Sector Rotation ──
+    if flow_snap.top_inflow_sectors or flow_snap.top_outflow_sectors:
+        lines.append("🔄 *Sector Rotation*")
+        if flow_snap.top_inflow_sectors:
+            lines.append(_format_sector_line(flow_snap.top_inflow_sectors, "🟢"))
+        if flow_snap.top_outflow_sectors:
+            lines.append(_format_sector_line(flow_snap.top_outflow_sectors, "🔴"))
+        lines.append("")
+
+    # ── Playbook ──
+    lines.append(f"🎯 *Playbook:* `{regime_val}`")
+    lines.append(f"  {structure_plan.primary}")
+    if structure_plan.secondary:
+        lines.append(f"  _{structure_plan.secondary}_")
+    lines.append("")
+
+    # ── A-Grade Picks ──
+    if longs or shorts:
+        lines.append("📋 *A-Grade Picks*")
+        if longs:
+            syms = "  ".join(r.symbol for r in longs[:5])
+            lines.append(f"  ▲ {syms}")
+        if shorts:
+            syms = "  ".join(r.symbol for r in shorts[:5])
+            lines.append(f"  ▼ {syms}")
+        lines.append("")
+
+    # ── AI Sentiment (if available) ──
+    ai_line = _ai_sentiment_badge(getattr(flow_snap, 'ai_sentiment', None))
+    if ai_line:
+        lines.append(ai_line)
+        lines.append("")
+
+    # ── Footer ──
+    source = getattr(flow_snap, 'option_source', None) or "yfinance"
+    lines.append(f"⏰ {ts_str}  ·  Source: {source}")
+
     return "\n".join(lines)

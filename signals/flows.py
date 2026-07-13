@@ -77,7 +77,7 @@ def fii_dii_5d_net() -> tuple[dict[str, float], bool]:
     try:
         df = feed.fii_dii_cash(days=20)
     except Exception as e:
-        print(f"[flows] FII/DII fetch failed: {e}")
+        logging.getLogger(__name__).warning("FII/DII fetch failed: %s", e)
         return zero, True
 
     if df.empty:
@@ -398,7 +398,7 @@ def snapshot(
     try:
         fii_derivs, fii_derivs_stale = feed.fii_dii_derivatives(days=5)
     except Exception as e:
-        print(f"[flows.snapshot] FII derivatives fetch failed: {e}")
+        logging.getLogger(__name__).warning("FII derivatives fetch failed: %s", e)
         fii_derivs, fii_derivs_stale = {}, True
 
     rs = sector_relative_strength(sector_data, lookback=5)

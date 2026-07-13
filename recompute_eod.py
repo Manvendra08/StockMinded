@@ -88,7 +88,6 @@ if __name__ == '__main__':
     dates.add(date.today().isoformat())
 
     # Recompute summaries for all dates in sorted order
-    existing = {s['date']: s for s in db.get('daily_summaries', [])}
     new_summaries = []
     for d in sorted(dates):
         summary = calc_summary_for_day(all_trades, d)

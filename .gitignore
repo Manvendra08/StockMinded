@@ -21,3 +21,7 @@ data/*.sqlite
 scratch/
 r360.html
 r360_oc_response.json
+diff.txt
+dashboard_log.txt
+blackbox_mcp_settings.json
+nul

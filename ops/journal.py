@@ -93,26 +93,22 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     if current_version >= SCHEMA_VERSION:
         return
     
-    # Migration from v1 to v2: Add new columns to trades table
+    # Migration from v1 to v2: Add new columns to trades table.
+    # Use "IF NOT EXISTS" semantics via try/except because SCHEMA may
+    # already define these columns on a fresh database.
     if current_version < 2:
-        cursor.execute("""
-            ALTER TABLE trades ADD COLUMN source_regime TEXT
-        """)
-        cursor.execute("""
-            ALTER TABLE trades ADD COLUMN skip_reason TEXT
-        """)
-        cursor.execute("""
-            ALTER TABLE trades ADD COLUMN entry_quality TEXT
-        """)
-        cursor.execute("""
-            ALTER TABLE trades ADD COLUMN loss_root_cause TEXT
-        """)
-        cursor.execute("""
-            ALTER TABLE trades ADD COLUMN timing_snapshot JSON
-        """)
-        cursor.execute("""
-            ALTER TABLE trades ADD COLUMN event_risk_mode INTEGER DEFAULT 0
-        """)
+        for col_sql in (
+            "ALTER TABLE trades ADD COLUMN source_regime TEXT",
+            "ALTER TABLE trades ADD COLUMN skip_reason TEXT",
+            "ALTER TABLE trades ADD COLUMN entry_quality TEXT",
+            "ALTER TABLE trades ADD COLUMN loss_root_cause TEXT",
+            "ALTER TABLE trades ADD COLUMN timing_snapshot JSON",
+            "ALTER TABLE trades ADD COLUMN event_risk_mode INTEGER DEFAULT 0",
+        ):
+            try:
+                cursor.execute(col_sql)
+            except sqlite3.OperationalError:
+                pass  # column already exists
     
     # Migration from v2 to v3: Add new tables
     if current_version < 3:

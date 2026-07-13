@@ -440,7 +440,7 @@ def call_llm(
                     "response_format": {"type": "json_object"} if json_mode else None,
                     "max_tokens": max_tokens,
                 }
-                resp = session.post(url, headers=headers, json=payload, timeout=30)
+                resp = session.post(url, headers=headers, json=payload, timeout=15)
                 resp.raise_for_status()
                 text = resp.json()["choices"][0]["message"]["content"]
                 res_val = json.loads(text) if json_mode else text
@@ -456,7 +456,7 @@ def call_llm(
                     break
                 elif _is_http_error(e):
                     status = _get_http_status(e)
-                    if status in (429, 500, 502, 503):
+                    if status in (401, 403, 429, 500, 502, 503):
                         _dead_providers["opencode"] = time.time() + _DEAD_PROVIDER_TTL
                         _print_llm(f"#0 HTTP {status} on {model_id}; marking dead. Trying Groq 70b.")
                         logger.warning("OpenCode Zen HTTP %s on %s; marking dead %ss. Trying Groq 70b.", status, model_id, _DEAD_PROVIDER_TTL)
