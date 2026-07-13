@@ -61,6 +61,9 @@ LOCK_FILE = DATA_FILE.with_suffix(".json.lock")
 BAK_FILE = DATA_FILE.with_suffix(".json.bak")
 TMP_FILE = DATA_FILE.with_suffix(".json.tmp")
 
+# Thread-local storage for reentrant lock guard in atomic_db_update()
+_atomic_db_tls = threading.local()
+
 DEFAULT_SETTINGS = {
     "capital_per_trade": 500000.0,
     "capital_per_trade_stocks": 500000.0,
@@ -267,6 +270,16 @@ def atomic_db_update():
 
     # Phase 1: Acquire lock with retries
     lock_f = None
+
+    # Reentrant guard: if the current thread already holds the lock, skip
+    # acquisition to avoid OSError [Errno 36] Resource deadlock avoided.
+    _tls = _atomic_db_tls
+    if getattr(_tls, "held", False):
+        db = _load_db()
+        yield db
+        _save_db(db)
+        return
+
     try:
         LOCK_FILE.touch(exist_ok=True)
     except Exception as e:
@@ -281,8 +294,10 @@ def atomic_db_update():
             # to avoid PermissionError stamping on heavily contended files
             lock_mode = msvcrt.LK_NBLCK if attempt < 3 else msvcrt.LK_LOCK
             msvcrt.locking(lock_f.fileno(), lock_mode, 1)
+            _tls.held = True
             break  # Lock acquired
-        except PermissionError:
+        except (PermissionError, OSError) as lock_err:
+            # OSError [Errno 36] = EDEADLK: same thread already holds lock
             if lock_f:
                 try:
                     lock_f.close()
@@ -309,6 +324,9 @@ def atomic_db_update():
         )
         raise
     finally:
+        # Clear reentrant guard flag
+        if getattr(_tls, "held", False):
+            _tls.held = False
         # Release lock
         if lock_f:
             try:
