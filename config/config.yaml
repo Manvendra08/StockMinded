@@ -105,6 +105,7 @@ data_sources:
     nvidia_api_key: "${NVIDIA_API_KEY}"
     cf_api_token: "${CLOUDFLARE_API_TOKEN}"
     cf_account_id: "${CLOUDFLARE_ACCOUNT_ID}"
+    github_api_key: "${GITHUB_TOKEN}"
 
 options:
   enabled: true

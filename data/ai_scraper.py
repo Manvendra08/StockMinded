@@ -399,41 +399,6 @@ def _print_llm(msg: str) -> None:
     print(f"[LLM] {msg}", flush=True)
 
 
-_OPENCODE_HOST = "opencode.ai"
-
-
-def _opencode_post(url, headers, json_payload, timeout):
-    """Fallback POST using httpx when requests/curl_cffi fails with SSL EOF."""
-    if _httpx is None:
-        raise ImportError("httpx required")
-    resp = _httpx.post(
-        url, headers=headers, json=json_payload, timeout=timeout, verify=False
-    )
-
-    class _Resp:
-        ok: bool
-        status_code: int
-        headers: dict
-        text: str
-
-        def raise_for_status(self):
-            if not self.ok:
-                raise requests.exceptions.HTTPError(
-                    f"HTTP {self.status_code}", response=self
-                )
-
-        def json(self):
-            import json as _json
-            return _json.loads(self.text)
-
-    r = _Resp()
-    r.ok = resp.status_code < 400
-    r.status_code = resp.status_code
-    r.headers = dict(resp.headers)
-    r.text = resp.text
-    return r
-
-
 def call_llm(
     prompt: str,
     system_prompt: str = "You are a professional Indian stock market strategist.",
@@ -442,7 +407,7 @@ def call_llm(
     return_provider: bool = False,
 ) -> Any:
     """Universal LLM call with fallback:
-    OpenCode Zen -> Groq 70b -> Nvidia NIM -> Groq 8b -> Gemini -> Bedrock."""
+    Groq 70b -> GitHub Models -> Nvidia NIM -> Cloudflare -> Groq 8b -> Gemini -> Bedrock -> OpenCode Zen."""
     config = _get_ai_config()
     if not config:
         return (None, "None") if return_provider else None
@@ -453,73 +418,12 @@ def call_llm(
         dead_until = _dead_providers.get(provider)
         return bool(dead_until and time.time() < dead_until)
 
-    # ── #0. OpenCode Zen (PRIMARY: free models, OpenAI-compatible) ──────────
-    if not is_dead("opencode") and config.get("opencode_api_key"):
-        session, backend = _create_curl_cffi_llm_session()
-        _opencode_models = [
-            ("big-pickle", "big-pickle (coding/chat)"),
-            ("mimo-v2-pro-free", "mimo-v2-pro-free (logic/reasoning)"),
-            ("minimax-m2.5-free", "minimax-m2.5-free (large context)"),
-            ("nemotron-3-super-free", "nemotron-3-super-free (high-perf coding)"),
-        ]
-        for model_id, model_label in _opencode_models:
-            try:
-                _print_llm(f"#0 trying {model_label} [OpenCode Zen] (backend={backend})")
-                logger.info("LLM #0: %s [provider=OpenCode Zen] (backend=%s)", model_label, backend)
-                url = "https://opencode.ai/zen/v1/chat/completions"
-                headers = {
-                    "Authorization": f"Bearer {config['opencode_api_key']}",
-                    "Content-Type": "application/json",
-                }
-                payload = {
-                    "model": model_id,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": prompt},
-                    ],
-                    "response_format": {"type": "json_object"} if json_mode else None,
-                    "max_tokens": max_tokens or 2048,
-                }
-                # BUG: requests/urllib3 consistently fails TLS handshake against
-                # Cloudflare-protected opencode.ai with SSL EOF errors.
-                # httpx library connects fine — try it when available.
-                if _OPENCODE_HOST in url and _httpx is not None:
-                    resp = _opencode_post(url, headers, payload, 15)
-                else:
-                    resp = session.post(url, headers=headers, json=payload, timeout=15)
-                resp.raise_for_status()
-                text = resp.json()["choices"][0]["message"]["content"]
-                res_val = json.loads(text) if json_mode else text
-                _print_llm(f"#0 OK: {model_label} [OpenCode Zen] (backend={backend})")
-                logger.info("LLM success: %s [OpenCode Zen] (backend=%s)", model_label, backend)
-                _log_llm_call(f"OpenCode Zen ({model_label})", resp, prompt=prompt, output=text)
-                return (res_val, f"OpenCode Zen ({model_label})") if return_provider else res_val
-            except Exception as e:
-                if _is_ssl_transport_error(e):
-                    _dead_providers["opencode"] = time.time() + _DEAD_PROVIDER_TTL
-                    _print_llm(f"#0 SSL error on {model_id}; marking dead. Trying Groq 70b.")
-                    logger.warning("OpenCode Zen SSL error; marking dead. Trying Groq 70b.")
-                    break
-                elif _is_http_error(e):
-                    status = _get_http_status(e)
-                    if status in (401, 403, 429, 500, 502, 503):
-                        _dead_providers["opencode"] = time.time() + _DEAD_PROVIDER_TTL
-                        _print_llm(f"#0 HTTP {status} on {model_id}; marking dead. Trying Groq 70b.")
-                        logger.warning("OpenCode Zen HTTP %s on %s; marking dead %ss. Trying Groq 70b.", status, model_id, _DEAD_PROVIDER_TTL)
-                        break
-                    else:
-                        _print_llm(f"#0 failed on {model_id}: {e}. Trying next model.")
-                        logger.warning("OpenCode Zen %s failed: %s. Trying next model.", model_id, e)
-                else:
-                    _print_llm(f"#0 failed on {model_id}: {e}. Trying next model.")
-                    logger.warning("OpenCode Zen %s failed: %s. Trying next model.", model_id, e)
-
-    # ── #1. Groq 70b (Fallback 1) ──────────────────────────────────────────
+    # ── #0. Groq 70b (PRIMARY) ──────────────────────────────────────────
     if not is_dead("groq_70b") and config.get("groq_api_key"):
         session, backend = _create_curl_cffi_llm_session()
         try:
-            _print_llm(f"#1 trying llama-3.3-70b-versatile [Groq] (backend={backend})")
-            logger.info("LLM #1: llama-3.3-70b-versatile [provider=Groq]")
+            _print_llm(f"#0 trying llama-3.3-70b-versatile [Groq] (backend={backend})")
+            logger.info("LLM #0: llama-3.3-70b-versatile [provider=Groq]")
             url = "https://api.groq.com/openai/v1/chat/completions"
             headers = {
                 "Authorization": f"Bearer {config['groq_api_key']}",
@@ -532,33 +436,75 @@ def call_llm(
                     {"role": "user", "content": prompt},
                 ],
                 "response_format": {"type": "json_object"} if json_mode else None,
-                "max_tokens": max_tokens,
+                "max_tokens": max_tokens or 2048,
             }
             resp = session.post(url, headers=headers, json=payload, timeout=15)
             resp.raise_for_status()
             text = resp.json()["choices"][0]["message"]["content"]
             res_val = json.loads(text) if json_mode else text
-            _print_llm(f"#1 OK: llama-3.3-70b-versatile [Groq] (backend={backend})")
+            _print_llm(f"#0 OK: llama-3.3-70b-versatile [Groq] (backend={backend})")
             logger.info("LLM success: llama-3.3-70b-versatile [Groq] (backend=%s)", backend)
             _log_llm_call("Groq (llama-3.3-70b-versatile)", resp, prompt=prompt, output=text)
             return (res_val, "Groq (llama-3.3-70b-versatile)") if return_provider else res_val
         except Exception as e:
             if _is_ssl_transport_error(e):
                 _dead_providers["groq_70b"] = time.time() + _DEAD_PROVIDER_TTL
-                _print_llm("#1 SSL error; marking dead. Trying Nvidia NIM.")
-                logger.warning("Groq 70b SSL error; marking dead. Trying Nvidia NIM.")
+                _print_llm("#0 SSL error; marking dead. Trying GitHub Models.")
+                logger.warning("Groq 70b SSL error; marking dead. Trying GitHub Models.")
             elif _is_http_error(e):
                 status = _get_http_status(e)
                 if status in (429, 500, 502, 503):
                     _dead_providers["groq_70b"] = time.time() + _DEAD_PROVIDER_TTL
-                    _print_llm(f"#1 HTTP {status}; marking dead. Trying Nvidia NIM.")
-                    logger.warning("Groq 70b HTTP %s; marking dead %ss. Trying Nvidia NIM.", status, _DEAD_PROVIDER_TTL)
+                    _print_llm(f"#0 HTTP {status}; marking dead. Trying GitHub Models.")
+                    logger.warning("Groq 70b HTTP %s; marking dead %ss. Trying GitHub Models.", status, _DEAD_PROVIDER_TTL)
                 else:
-                    _print_llm(f"#1 failed: {e}. Trying Nvidia NIM.")
-                    logger.warning("Groq 70b failed: %s. Trying Nvidia NIM.", e)
+                    _print_llm(f"#0 failed: {e}. Trying GitHub Models.")
+                    logger.warning("Groq 70b failed: %s. Trying GitHub Models.", e)
             else:
-                _print_llm(f"#1 failed: {e}. Trying Nvidia NIM.")
-                logger.warning("Groq 70b failed: %s. Trying Nvidia NIM.", e)
+                _print_llm(f"#0 failed: {e}. Trying GitHub Models.")
+                logger.warning("Groq 70b failed: %s. Trying GitHub Models.", e)
+
+    # ── #1. GitHub Models (Fallback 1: OpenAI-compatible, GitHub token) ─────
+    _GITHUB_API_BASE = "https://models.inference.ai.azure.com"
+    _GITHUB_MODELS = [
+        {"id": "gpt-4o-mini", "name": "GPT-4o-mini", "provider": "OpenAI"},
+        {"id": "gpt-4o", "name": "GPT-4o", "provider": "OpenAI"},
+        {"id": "Phi-3.5-MoE-instruct", "name": "Phi-3.5-MoE", "provider": "Microsoft"},
+    ]
+    if not is_dead("github") and config.get("github_api_key"):
+        session, backend = _create_curl_cffi_llm_session()
+        for model_info in _GITHUB_MODELS:
+            model_id = model_info["id"]
+            model_name = model_info["name"]
+            try:
+                _print_llm(f"#1 trying {model_name} [{model_info['provider']} via GitHub] (backend={backend})")
+                logger.info("LLM #1: %s [provider=GitHub/%s]", model_name, model_info["provider"])
+                url = f"{_GITHUB_API_BASE}/chat/completions"
+                headers = {
+                    "Authorization": f"Bearer {config['github_api_key']}",
+                    "Content-Type": "application/json",
+                }
+                payload = {
+                    "model": model_id,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "response_format": {"type": "json_object"} if json_mode else None,
+                    "max_tokens": max_tokens or 2048,
+                }
+                resp = session.post(url, headers=headers, json=payload, timeout=30)
+                resp.raise_for_status()
+                text = resp.json()["choices"][0]["message"]["content"]
+                res_val = json.loads(text) if json_mode else text
+                _print_llm(f"#1 OK: {model_name} [{model_info['provider']} via GitHub] (backend={backend})")
+                logger.info("LLM success: %s [provider=GitHub/%s] (backend=%s)", model_name, model_info["provider"], backend)
+                _log_llm_call(f"GitHub ({model_name})", resp, prompt=prompt, output=text)
+                return (res_val, f"GitHub ({model_name})") if return_provider else res_val
+            except Exception as e:
+                continue
+        _print_llm("#1 all GitHub models failed; marking dead. Trying Nvidia NIM.")
+        _dead_providers["github"] = time.time() + _DEAD_PROVIDER_TTL
 
     # ── #2. Nvidia NIM (Fallback 2: free tier, OpenAI-compatible, 40 RPM) ───
     if not is_dead("nvidia") and config.get("nvidia_api_key"):
@@ -592,14 +538,14 @@ def call_llm(
         except Exception as e:
             if _is_ssl_transport_error(e):
                 _dead_providers["nvidia"] = time.time() + _DEAD_PROVIDER_TTL
-                _print_llm("#2 SSL error; marking dead. Trying Groq 8b.")
-                logger.warning("Nvidia NIM SSL error; marking dead. Trying Groq 8b.")
+                _print_llm("#2 SSL error; marking dead. Trying Cloudflare.")
+                logger.warning("Nvidia NIM SSL error; marking dead. Trying Cloudflare.")
             elif _is_http_error(e):
                 status = _get_http_status(e)
                 if status in (429, 500, 502, 503):
                     _dead_providers["nvidia"] = time.time() + _DEAD_PROVIDER_TTL
-                    _print_llm(f"#2 HTTP {status}; marking dead. Trying Groq 8b.")
-                    logger.warning("Nvidia NIM HTTP %s; marking dead %ss. Trying Groq 8b.", status, _DEAD_PROVIDER_TTL)
+                    _print_llm(f"#2 HTTP {status}; marking dead. Trying Cloudflare.")
+                    logger.warning("Nvidia NIM HTTP %s; marking dead %ss. Trying Cloudflare.", status, _DEAD_PROVIDER_TTL)
                 else:
                     _print_llm(f"#2 failed: {e}. Trying Cloudflare.")
                     logger.warning("Nvidia NIM failed: %s. Trying Cloudflare.", e)
@@ -607,7 +553,7 @@ def call_llm(
                 _print_llm(f"#2 failed: {e}. Trying Cloudflare.")
                 logger.warning("Nvidia NIM failed: %s. Trying Cloudflare.", e)
 
-    # ── #2.5. Cloudflare Workers AI (Fallback 2.5: free tier, no key needed) ───
+    # ── #2.5. Cloudflare Workers AI (Fallback 2.5: free tier) ────────────────
     if not is_dead("cloudflare") and config.get("cf_api_token") and config.get("cf_account_id"):
         session, backend = _create_curl_cffi_llm_session()
         try:
@@ -642,20 +588,20 @@ def call_llm(
         except Exception as e:
             if _is_ssl_transport_error(e):
                 _dead_providers["cloudflare"] = time.time() + _DEAD_PROVIDER_TTL
-                _print_llm("#2.5 SSL error; marking dead. Trying Groq 70b.")
-                logger.warning("Cloudflare SSL error; marking dead. Trying Groq 70b.")
+                _print_llm("#2.5 SSL error; marking dead. Trying Groq 8b.")
+                logger.warning("Cloudflare SSL error; marking dead. Trying Groq 8b.")
             elif _is_http_error(e):
                 status = _get_http_status(e)
                 if status in (429, 500, 502, 503):
                     _dead_providers["cloudflare"] = time.time() + _DEAD_PROVIDER_TTL
-                    _print_llm(f"#2.5 HTTP {status}; marking dead. Trying Groq 70b.")
-                    logger.warning("Cloudflare HTTP %s; marking dead %ss. Trying Groq 70b.", status, _DEAD_PROVIDER_TTL)
+                    _print_llm(f"#2.5 HTTP {status}; marking dead. Trying Groq 8b.")
+                    logger.warning("Cloudflare HTTP %s; marking dead %ss. Trying Groq 8b.", status, _DEAD_PROVIDER_TTL)
                 else:
-                    _print_llm(f"#2.5 failed: {e}. Trying Groq 70b.")
-                    logger.warning("Cloudflare failed: %s. Trying Groq 70b.", e)
+                    _print_llm(f"#2.5 failed: {e}. Trying Groq 8b.")
+                    logger.warning("Cloudflare failed: %s. Trying Groq 8b.", e)
             else:
-                _print_llm(f"#2.5 failed: {e}. Trying Groq 70b.")
-                logger.warning("Cloudflare failed: %s. Trying Groq 70b.", e)
+                _print_llm(f"#2.5 failed: {e}. Trying Groq 8b.")
+                logger.warning("Cloudflare failed: %s. Trying Groq 8b.", e)
 
     # ── #3. Groq 8b (Fallback 3: lighter model) ───────────────────────────────
     if not is_dead("groq_8b") and config.get("groq_api_key"):
@@ -675,7 +621,7 @@ def call_llm(
                     {"role": "user", "content": prompt},
                 ],
                 "response_format": {"type": "json_object"} if json_mode else None,
-                "max_tokens": max_tokens,
+                "max_tokens": max_tokens or 2048,
             }
             resp = session.post(url, headers=headers, json=payload, timeout=15)
             resp.raise_for_status()
@@ -764,7 +710,7 @@ def call_llm(
                 _print_llm(f"#4 failed on {model_name}: {e}. Trying Bedrock.")
                 logger.warning("Gemini failed: %s. Trying Bedrock.", e)
 
-    # ── #5. Amazon Bedrock (Last Fallback) ──────────────────────────────────
+    # ── #5. NVIDIA Bedrock (Fallback 5) ─────────────────────────────────────
     _BEDROCK_API_BASE = "https://integrate.api.nvidia.com/v1"
     _BEDROCK_MODELS = [
         {"id": "nvidia/nemotron-3-super-120b-a12b", "name": "Nemotron-3-Super-120B", "provider": "Nvidia"},
@@ -805,12 +751,105 @@ def call_llm(
                 return (res_val, f"Bedrock ({model_name})") if return_provider else res_val
             except Exception as e:
                 continue
-        _print_llm("#5 all Bedrock models failed; marking dead")
+        _print_llm("#5 all Bedrock models failed; marking dead. Trying OpenCode Zen.")
         _dead_providers["bedrock"] = time.time() + _DEAD_PROVIDER_TTL
+
+    # ── #6. OpenCode Zen (LAST FALLBACK) ──────────────────────────────────
+    if not is_dead("opencode") and config.get("opencode_api_key"):
+        session, backend = _create_curl_cffi_llm_session()
+        _opencode_models = [
+            ("big-pickle", "big-pickle (coding/chat)"),
+            ("mimo-v2-pro-free", "mimo-v2-pro-free (logic/reasoning)"),
+            ("minimax-m2.5-free", "minimax-m2.5-free (large context)"),
+            ("nemotron-3-super-free", "nemotron-3-super-free (high-perf coding)"),
+        ]
+        for model_id, model_label in _opencode_models:
+            try:
+                _print_llm(f"#6 trying {model_label} [OpenCode Zen] (backend={backend})")
+                logger.info("LLM #6: %s [provider=OpenCode Zen] (backend=%s)", model_label, backend)
+                url = "https://opencode.ai/zen/v1/chat/completions"
+                headers = {
+                    "Authorization": f"Bearer {config['opencode_api_key']}",
+                    "Content-Type": "application/json",
+                }
+                payload = {
+                    "model": model_id,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "response_format": {"type": "json_object"} if json_mode else None,
+                    "max_tokens": max_tokens or 2048,
+                }
+                if _httpx is not None:
+                    resp = _opencode_post(url, headers, payload, 15)
+                else:
+                    resp = session.post(url, headers=headers, json=payload, timeout=15)
+                resp.raise_for_status()
+                text = resp.json()["choices"][0]["message"]["content"]
+                res_val = json.loads(text) if json_mode else text
+                _print_llm(f"#6 OK: {model_label} [OpenCode Zen] (backend={backend})")
+                logger.info("LLM success: %s [OpenCode Zen] (backend=%s)", model_label, backend)
+                _log_llm_call(f"OpenCode Zen ({model_label})", resp, prompt=prompt, output=text)
+                return (res_val, f"OpenCode Zen ({model_label})") if return_provider else res_val
+            except Exception as e:
+                if _is_ssl_transport_error(e):
+                    _dead_providers["opencode"] = time.time() + _DEAD_PROVIDER_TTL
+                    _print_llm(f"#6 SSL error on {model_id}; marking dead.")
+                    logger.warning("OpenCode Zen SSL error; marking dead.")
+                    break
+                elif _is_http_error(e):
+                    status = _get_http_status(e)
+                    if status in (401, 403, 429, 500, 502, 503):
+                        _dead_providers["opencode"] = time.time() + _DEAD_PROVIDER_TTL
+                        _print_llm(f"#6 HTTP {status} on {model_id}; marking dead.")
+                        logger.warning("OpenCode Zen HTTP %s on %s; marking dead %ss.", status, model_id, _DEAD_PROVIDER_TTL)
+                        break
+                    else:
+                        _print_llm(f"#6 failed on {model_id}: {e}. Trying next model.")
+                        logger.warning("OpenCode Zen %s failed: %s. Trying next model.", model_id, e)
+                else:
+                    _print_llm(f"#6 failed on {model_id}: {e}. Trying next model.")
+                    logger.warning("OpenCode Zen %s failed: %s. Trying next model.", model_id, e)
 
     _print_llm("ALL PROVIDERS EXHAUSTED")
     logger.warning("LLM scan exhausted: all providers failed")
     return (None, "None") if return_provider else None
+
+
+_OPENCODE_HOST = "opencode.ai"
+
+
+def _opencode_post(url, headers, json_payload, timeout):
+    """Fallback POST using httpx when requests/curl_cffi fails with SSL EOF."""
+    if _httpx is None:
+        raise ImportError("httpx required")
+    resp = _httpx.post(
+        url, headers=headers, json=json_payload, timeout=timeout, verify=False
+    )
+
+    class _Resp:
+        ok: bool
+        status_code: int
+        headers: dict
+        text: str
+
+        def raise_for_status(self):
+            if not self.ok:
+                raise requests.exceptions.HTTPError(
+                    f"HTTP {self.status_code}", response=self
+                )
+
+        def json(self):
+            import json as _json
+            return _json.loads(self.text)
+
+    r = _Resp()
+    r.ok = resp.status_code < 400
+    r.status_code = resp.status_code
+    r.headers = dict(resp.headers)
+    r.text = resp.text
+    return r
 
 
 def test_llm_providers():
@@ -825,6 +864,7 @@ def test_llm_providers():
     print("DEBUG CONFIG SAMBANOVA KEY:", repr(config.get("sambanova_api_key")))
     print("DEBUG CONFIG GROQ KEY:", repr(config.get("groq_api_key")))
     print("DEBUG CONFIG OPENROUTER KEY:", repr(config.get("openrouter_api_key")))
+    print("DEBUG CONFIG GITHUB KEY:", repr(config.get("github_api_key")))
 
     test_prompt = "Say 'Integration Successful'"
     results = {}
@@ -885,7 +925,31 @@ def test_llm_providers():
     else:
         results["Nvidia NIM"] = "Not Configured"
 
-    # 1. Test SambaNova
+    # 1. Test GitHub Models
+    if config.get("github_api_key"):
+        try:
+            print(f"Testing GitHub Models (Key: {mask_key(config['github_api_key'])})...")
+            url = "https://models.inference.ai.azure.com/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {config['github_api_key']}",
+                "Content-Type": "application/json",
+            }
+            payload = {
+                "model": "gpt-4o-mini",
+                "messages": [{"role": "user", "content": test_prompt}],
+                "max_tokens": 10,
+            }
+            resp = requests.post(url, headers=headers, json=payload, timeout=30)
+            print("GitHub Models Raw Status:", resp.status_code)
+            print("GitHub Models Raw Text:", resp.text[:200])
+            resp.raise_for_status()
+            results["GitHub Models"] = "OK"
+        except Exception as e:
+            results["GitHub Models"] = f"Error: {type(e).__name__}: {str(e)}"
+    else:
+        results["GitHub Models"] = "Not Configured"
+
+    # 2. Test SambaNova
     if config.get("sambanova_api_key"):
         try:
             print(

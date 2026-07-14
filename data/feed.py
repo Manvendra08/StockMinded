@@ -688,19 +688,11 @@ def quote_batch_public(symbols: list[str]) -> dict[str, dict]:
                 "Chrome/120.0.0.0 Safari/537.36"
             )
         }
-        try:
-            from curl_cffi import requests as curl_requests
-            session = curl_requests.Session(impersonate="chrome120")
-            r = session.get(
-                "https://dhan.co/futures-stocks-list/",
-                timeout=10,
-            )
-        except ImportError:
-            r = requests.get(
-                "https://dhan.co/futures-stocks-list/",
-                headers=headers,
-                timeout=10,
-            )
+        r = requests.get(
+            "https://dhan.co/futures-stocks-list/",
+            headers=headers,
+            timeout=10,
+        )
         if r.status_code != 200:
             return out
 
