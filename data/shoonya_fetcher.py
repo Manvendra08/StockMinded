@@ -111,155 +111,99 @@ def _post_jdata(
 ) -> dict | None:
     """POST jData= encoded payload, return parsed JSON or None.
 
-    Uses curl_cffi (libcurl-based, robust TLS) with fallback to stdlib urllib.
+    Uses stdlib urllib with IP-based fallback, matching the robust NSEBOT implementation.
     """
+    import socket
     global _SHOONYA_API_FAILURE_TS, _SHOONYA_API_COOLDOWN
+
+    if _SHOONYA_API_FAILURE_TS > 0 and (time.time() - _SHOONYA_API_FAILURE_TS) < _SHOONYA_API_COOLDOWN:
+        logger.warning("[shoonya] API in cooldown due to recent timeout. Skipping POST.")
+        return None
+
     body_str = "jData=" + json.dumps(payload, separators=(",", ":"))
     if access_token:
         body_str += f"&jKey={access_token}"
+    body = body_str.encode("utf-8")
     headers: dict[str, str] = {
         "Content-Type": "application/x-www-form-urlencoded",
         "User-Agent": "Mozilla/5.0",
     }
 
-    # curl_cffi path — works around Windows SSL/TLS issues
-    try:
-        from curl_cffi import requests as curl_requests
+    _TRANSIENT_5XX = {502, 503, 504}
+    _MAX_RETRIES = 2
+    _BACKOFF_BASE = 1.5  # seconds
+    _SHOONYA_IPS = ["13.202.119.185"]
 
-        if _SHOONYA_API_FAILURE_TS > 0 and (time.time() - _SHOONYA_API_FAILURE_TS) < _SHOONYA_API_COOLDOWN:
-            logger.warning("[shoonya] API in cooldown due to recent timeout. Skipping POST.")
-            return None
-
-        max_retries = 2
-        last_exc = None
-        for attempt in range(max_retries):
-            try:
-                resp = curl_requests.post(
-                    url, data=body_str, headers=headers, timeout=30, impersonate="chrome120"
-                )
-                if resp.status_code >= 200 and resp.status_code < 300:
-                    _SHOONYA_API_FAILURE_TS = 0.0  # Reset on success
-                    return resp.json()
-
-                # 5xx server errors (502, 503, 504) are transient — retry
-                if resp.status_code >= 500 and attempt < max_retries - 1:
-                    logger.warning(
-                        "[shoonya] POST %s -> HTTP %d (server error), retrying...",
-                        url, resp.status_code,
-                    )
-                    time.sleep(2 * (attempt + 1))
-                    continue
-
-                # Activate cooldown on 5xx to avoid hammering a dead server
-                if resp.status_code >= 500:
-                    _SHOONYA_API_FAILURE_TS = time.time()
-                    logger.error(
-                        "[shoonya] POST %s -> HTTP %d after %d retries: server unavailable",
-                        url, resp.status_code, max_retries,
-                    )
-                    return None
-
-                raw = resp.text
-                try:
-                    parsed = json.loads(raw)
-                except Exception:
-                    logger.error(
-                        "[shoonya] POST %s -> HTTP %s: %s",
-                        url,
-                        resp.status_code,
-                        raw[:200],
-                    )
-                    return None
-                if _is_session_expired_response(parsed):
-                    logger.info(
-                        "[shoonya] POST %s -> HTTP %s: session expired",
-                        url,
-                        resp.status_code,
-                    )
-                else:
-                    emsg = str(parsed.get("emsg") or parsed.get("Emsg") or "")
-                    if "no data" in emsg.lower():
-                        logger.debug(
-                            "[shoonya] POST %s -> HTTP %s: %s",
-                            url,
-                            resp.status_code,
-                            emsg[:100],
-                        )
-                    else:
-                        logger.error(
-                            "[shoonya] POST %s -> HTTP %s: %s",
-                            url,
-                            resp.status_code,
-                            raw[:200],
-                        )
-                return parsed
-            except Exception as exc:
-                last_exc = exc
-                error_str = str(exc)
-                is_dns_error = "Could not resolve host" in error_str or "DNSError" in error_str
-                is_socket_error = "curl: (7)" in error_str or "errno 10022" in error_str
-                if attempt < max_retries - 1:
-                    # Socket corruption needs longer backoff for OS to reclaim resources
-                    wait = 3 if is_socket_error else 1
-                    logger.warning("[shoony] POST %s attempt %d failed: %s, retrying in %ds...", url, attempt + 1, exc, wait)
-                    time.sleep(wait)
-                else:
-                    if is_dns_error:
-                        logger.warning("[shoonya] POST %s (curl_cffi) DNS failed after %d retries: %s. Falling back to urllib.", url, max_retries, exc)
-                    else:
-                        logger.error("[shoonya] POST %s (curl_cffi) failed after %d retries: %s", url, max_retries, exc)
-                        # Activate cooldown on socket/transport errors to let OS reclaim resources
-                        if (
-                            "curl: (28)" in error_str  # timeout
-                            or "curl: (7)" in error_str  # getsockname errno 10022 — socket corruption
-                            or "timeout" in error_str.lower()
-                            or "could not connect" in error_str.lower()
-                        ):
-                            _SHOONYA_API_FAILURE_TS = time.time()
-                    break
-    except ImportError:
-        pass
-
-    # Fallback: stdlib urllib
-    try:
-        body = body_str.encode("utf-8")
+    for attempt in range(1, _MAX_RETRIES + 2):  # attempts: 1, 2, 3
         req = urllib.request.Request(url, data=body, headers=headers)
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        # 5xx server errors — activate cooldown
-        if e.code >= 500:
-            _SHOONYA_API_FAILURE_TS = time.time()
-            logger.error(
-                "[shoonya] POST %s -> HTTP %d (server unavailable via urllib)", url, e.code
-            )
-            return None
-        raw = e.read().decode()
         try:
-            parsed = json.loads(raw)
-        except Exception:
-            logger.error("[shoonya] POST %s -> HTTP %s: %s", url, e.code, raw[:200])
-            return None
-        if _is_session_expired_response(parsed):
-            logger.info("[shoonya] POST %s -> HTTP %s: session expired", url, e.code)
-        else:
-            emsg = str(parsed.get("emsg") or parsed.get("Emsg") or "")
-            if "no data" in emsg.lower():
-                logger.debug(
-                    "[shoonya] POST %s -> HTTP %s: %s",
-                    url,
-                    e.code,
-                    emsg[:100],
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                _SHOONYA_API_FAILURE_TS = 0.0  # Reset on success
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            raw = e.read().decode()
+            if e.code in _TRANSIENT_5XX and attempt <= _MAX_RETRIES:
+                wait = _BACKOFF_BASE * attempt
+                logger.warning(
+                    "[shoonya] POST %s -> HTTP %s (transient), retry %d/%d in %.1fs",
+                    url, e.code, attempt, _MAX_RETRIES, wait,
                 )
+                time.sleep(wait)
+                continue
+            if e.code >= 500:
+                _SHOONYA_API_FAILURE_TS = time.time()
+                logger.error("[shoonya] POST %s -> HTTP %s (server unavailable)", url, e.code)
+                return None
+            if "Session Expired" in raw or "session expired" in raw.lower():
+                logger.info("[shoonya] POST %s -> Session Expired (HTTP %s)", url, e.code)
             else:
                 logger.error("[shoonya] POST %s -> HTTP %s: %s", url, e.code, raw[:200])
-        return parsed
-    except Exception as exc:
-        logger.error("[shoonya] POST %s failed: %s", url, exc)
-        error_str = str(exc).lower()
-        if "timeout" in error_str or "timed out" in error_str or "winerror 10060" in error_str:
-            _SHOONYA_API_FAILURE_TS = time.time()
-        return None
+            try:
+                return json.loads(raw)
+            except Exception:
+                return None
+        except (urllib.error.URLError, socket.gaierror, socket.timeout, TimeoutError, ConnectionError) as exc:
+            exc_str = str(exc).lower()
+            is_dns = isinstance(exc, socket.gaierror) or "getaddrinfo failed" in exc_str or "name or service not known" in exc_str
+            is_timeout = isinstance(exc, (socket.timeout, TimeoutError)) or "timed out" in exc_str or "winerror 10060" in exc_str
+            is_transient_conn = isinstance(exc, ConnectionError) or "connection reset" in exc_str or "connection refused" in exc_str
+
+            if (is_dns or is_timeout or is_transient_conn) and attempt <= _MAX_RETRIES:
+                logger.warning(
+                    "[shoonya] Network error %s for %s (attempt %d/%d): %s",
+                    "DNS" if is_dns else "Timeout/Conn", url, attempt, _MAX_RETRIES + 1, exc
+                )
+
+                # Try IP-based fallback on last DNS/timeout retry
+                if (is_dns or is_timeout) and attempt == _MAX_RETRIES and _SHOONYA_IPS:
+                    for ip in _SHOONYA_IPS:
+                        try:
+                            ip_url = url.replace("api.shoonya.com", ip)
+                            req_fallback = urllib.request.Request(
+                                ip_url, data=body, headers={**headers, "Host": "api.shoonya.com"}
+                            )
+                            with urllib.request.urlopen(req_fallback, timeout=10) as resp:
+                                logger.info("[shoonya] DNS/Timeout fallback succeeded via IP %s", ip)
+                                _SHOONYA_API_FAILURE_TS = 0.0  # Reset on success
+                                return json.loads(resp.read().decode("utf-8"))
+                        except Exception as ip_exc:
+                            logger.debug("[shoonya] IP fallback %s failed: %s", ip, ip_exc)
+                            continue
+
+                wait = _BACKOFF_BASE * attempt
+                time.sleep(wait)
+                continue
+
+            logger.error("[shoonya] POST %s failed: %s", url, exc)
+            if is_timeout:
+                _SHOONYA_API_FAILURE_TS = time.time()
+            return None
+        except Exception as exc:
+            logger.error("[shoonya] POST %s failed: %s", url, exc)
+            return None
+
+    return None
+
 
 
 def _is_session_expired_response(response: dict | None) -> bool:
