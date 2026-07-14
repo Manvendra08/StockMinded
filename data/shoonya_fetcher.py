@@ -325,35 +325,21 @@ class ShoonyaFetcher:
                 time.sleep(0.05)
 
     def _verify_token(self) -> bool:
-        """Quick lightweight check: does the cached token still work?
+        """Return True if a cached access token exists — skip network check.
 
-        BUG-03 FIX: Use NSE exchange with a known equity symbol (RELIANCE)
-        instead of NFO/NIFTY. NIFTY is an index and doesn't exist as a scrip
-        on NFO, so SearchScrip always returned empty → token always 'failed'.
+        The token is managed externally by NSEBOT which writes a fresh token
+        to the shared JSON file.  Relying on that, we avoid any network probe
+        here because:
+          - A live token works without verification.
+          - A stale token triggers "Session Expired" in `_api_call()`, which
+            reloads from the shared file and, as a last resort, re-authenticates.
+          - `api.shoonya.com` is often unreachable; a network probe would
+            block for ~30 s per attempt.
         """
-        import urllib.parse
-
-        payload = {
-            "uid": self.user_id,
-            "exch": "NSE",
-            "stext": urllib.parse.quote_plus("RELIANCE"),
-        }
-        res = _post_jdata(
-            f"{_API_BASE}/SearchScrip",
-            payload,
-            self.access_token,
-        )
-        if res and res.get("stat") == "Ok":
-            logger.debug("[shoonya] cached token is still valid")
-            return True
-        if _is_session_expired_response(res):
-            logger.info("[shoonya] cached token expired — will re-authenticate")
-        else:
-            logger.info(
-                "[shoonya] cached token rejected — will re-authenticate: %s", res
-            )
-        self._clear_cached_token()
-        return False
+        if not self.access_token:
+            return False
+        logger.debug("[shoonya] trusting cached token — no network check")
+        return True
 
     # -- OAuth Login ------------------------------------------------------
 
@@ -453,7 +439,13 @@ class ShoonyaFetcher:
 
     def _exchange_for_token(self, auth_code: str) -> str | None:
         checksum = _sha256(self.vendor_code + self.secret_code + auth_code)
-        payload = {"uid": self.user_id, "code": auth_code, "checksum": checksum}
+        payload = {
+            "uid": self.user_id,
+            "code": auth_code,
+            "checksum": checksum,
+            "source": "API",
+            "imei": "127.0.0.1",
+        }
         res = _post_jdata(_TOKEN_URL, payload)
         if not res:
             return None
@@ -476,6 +468,19 @@ class ShoonyaFetcher:
         global _SHOONYA_LOGIN_FAILURE_TS
 
         with _LOGIN_LOCK:
+            if force:
+                self._clear_cached_token()
+
+            # Load from shared cache first — this may contain a fresh token
+            # written by NSEBOT even while we are in login cooldown.
+            self._load_cached_token()
+
+            if self.access_token and self._verify_token():
+                logger.info("[shoonya] reused cached token \u2014 skipping OAuth")
+                # Reset cooldown since the token is live
+                _SHOONYA_LOGIN_FAILURE_TS = 0.0
+                return True
+
             if (
                 _SHOONYA_LOGIN_FAILURE_TS
                 and (time.time() - _SHOONYA_LOGIN_FAILURE_TS) < _SHOONYA_LOGIN_COOLDOWN
@@ -488,17 +493,6 @@ class ShoonyaFetcher:
                     ),
                 )
                 return False
-
-            if force:
-                self._clear_cached_token()
-
-            # Load from shared cache first to see if another process updated it
-            self._load_cached_token()
-
-            if self.access_token:
-                if self._verify_token():
-                    logger.info("[shoonya] reused cached token \u2014 skipping OAuth")
-                    return True
 
             missing = [
                 k
