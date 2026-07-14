@@ -403,9 +403,9 @@ class ShoonyaFetcher:
                         lambda r: captured_urls.append(r.url) if "code=" in r.url else None,
                     )
 
-                    page.goto(authorize_url, wait_until="commit", timeout=60000)
-                    # Reduced timeout from 60s to 45s; retry handles slow loads
-                    page.wait_for_selector("#lgnusrid", state="visible", timeout=45000)
+                    page.goto(authorize_url, wait_until="domcontentloaded", timeout=60000)
+                    # Increased timeout to 60s for slow UI rendering
+                    page.wait_for_selector("#lgnusrid", state="visible", timeout=60000)
 
                     totp = pyotp.TOTP(self.totp_key).now()
                     page.locator("#lgnusrid").fill(self.user_id)
@@ -434,6 +434,15 @@ class ShoonyaFetcher:
                         )
             except Exception as exc:
                 logger.warning("[shoonya] Playwright OAuth attempt %d failed: %s", attempt + 1, exc)
+                try:
+                    import os
+                    os.makedirs("data", exist_ok=True)
+                    screenshot_path = "data/shoonya_login_error.png"
+                    if 'page' in locals() and not page.is_closed():
+                        page.screenshot(path=screenshot_path)
+                        logger.warning("[shoonya] Saved login failure screenshot to %s", screenshot_path)
+                except Exception as ss_err:
+                    logger.warning("[shoonya] Could not save login failure screenshot: %s", ss_err)
                 continue
 
             if auth_code:
