@@ -889,8 +889,10 @@ def _generate_trade_alerts(data: dict) -> list[dict]:
     # 2. Entry Window Tightening:
     # Avoid equity entries after 15:15 IST (EOD volatility). Options use their own
     # window from config (is_within_entry_window) which allows until 14:30.
+    # Reuses the shared seconds-precision predicate from paper_trader.
+    from dashboard.paper_trader import is_within_equity_entry_window as _in_eq_window
     now_ist = datetime.now(timezone(timedelta(hours=5, minutes=30)))
-    if (now_ist.hour, now_ist.minute) > (15, 15):
+    if not _in_eq_window(now_ist):
         allow_longs = False
         allow_shorts = False
         # Do NOT block can_trade_options here — options entry window handles this
