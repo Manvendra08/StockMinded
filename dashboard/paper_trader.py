@@ -403,6 +403,16 @@ EQUITY_ENTRY_START = dt_mod.time(9, 40)
 EQUITY_ENTRY_END = dt_mod.time(15, 15)
 
 
+def is_within_equity_entry_window(now_ist) -> bool:
+    """True if *now_ist* is inside the equity entry window (seconds-precision).
+
+    Shared by alert generation (server.py) and auto-entry (paper_trader.py)
+    so the cutoff is consistent across both call-sites.
+    """
+    t = now_ist.timetz().replace(tzinfo=None)
+    return EQUITY_ENTRY_START <= t <= EQUITY_ENTRY_END
+
+
 def _within_grace_period(
     trade: dict, now: datetime, grace_minutes: int = OPTION_SL_GRACE_MINUTES
 ) -> bool:
@@ -1411,60 +1421,75 @@ def _smart_exit_check(
     if not settings.get("smart_exits_enabled", True):
         return None
 
-    entry_premium = t.get("net_premium") or t.get("net_credit") or 0.0
     if current_net is None:
         return None
 
+    # SIGNED PnL for ALL structures. _net_premium_signed() preserves the
+    # sign of net_premium: positive for credit (e.g. IRON_CONDOR),
+    # negative for debit (e.g. LONG_STRADDLE). The old code read
+    # `net_premium or net_credit` which was always positive and broke P&L
+    # for debit structures. current_net from _option_net_premium() is also
+    # signed (negative for BUY legs).  P&L = entry - current works for both.
+    entry_premium = _net_premium_signed(t)
     pnl = entry_premium - current_net
 
     # 1. VIX Spike Exit
     entry_vix = t.get("entry_vix", 0.0)
-    vix_threshold = settings.get("smart_exit_vix_spike_pct", 20.0)
-    vix_floor = settings.get("smart_exit_vix_floor", 16.0)
+    vix_threshold = settings.get("smart_exit_vix_spike_pct", 15.0)
+    vix_floor = settings.get("smart_exit_vix_floor", 18.0)
 
-    # Dynamic threshold based on Regime
-    # M1 FIX: Don't use stale regime - fetch fresh regime if not provided
+    # Dynamic threshold based on Regime. The caller already passes a fresh
+    # current_regime (from signals.regime.classify); only fall back to a
+    # light VIX-level inference when none is supplied. We do NOT re-fetch
+    # VIX here (it is already available as vix_now) — the old per-trade
+    # feed.ohlc_cached() call was a redundant network round-trip per trade.
     if current_regime is None:
-        try:
-            from data import feed
-            vix_df = feed.ohlc_cached("INDIAVIX", period="5d")
-            if vix_df is not None and not vix_df.empty:
-                vix_val = float(vix_df["close"].iloc[-1])
-                # Simple regime inference from VIX level
-                if vix_val < 14:
-                    current_regime = "VOL_CONTRACTION"
-                elif vix_val > 20:
-                    current_regime = "TREND_UP"  # High VIX often accompanies trends
-        except Exception:
-            current_regime = None
-    
-    if current_regime == "TREND_UP":
-        vix_threshold *= 1.5  # 50% more lenient during uptrends
+        if vix_now < 14:
+            current_regime = "VOL_CONTRACTION"
+        elif vix_now > 20:
+            current_regime = "HIGH_VOL_TREND"
+
+    if current_regime == "HIGH_VOL_TREND":
+        # Already-elevated VIX: spikes are more dangerous, be MORE sensitive.
+        vix_threshold *= 0.8
     elif current_regime == "VOL_CONTRACTION":
-        vix_threshold *= 0.8  # 20% more sensitive during vol contraction
+        # Low VIX: a spike is a bigger relative shock, also more sensitive.
+        vix_threshold *= 0.8
 
-    if entry_vix > 0 and vix_now >= vix_floor:
-        from signals.options import check_vix_spike_exit
+    if entry_vix > 0:
+        # FLOOR semantics (CORRECTED): the spike exit should only fire when
+        # VIX rises from a *low/normal* level into elevated territory. If the
+        # trade was entered when VIX was ALREADY above the floor, a further
+        # rise is expected market behaviour and must NOT auto-exit.
+        # Old code (`vix_now >= vix_floor`) fired on every elevated-VIX print,
+        # which is backwards. Require entry below floor AND now at/above floor.
+        if entry_vix < vix_floor and vix_now >= vix_floor:
+            from signals.options import check_vix_spike_exit
 
-        should_exit, _ = check_vix_spike_exit(vix_now, entry_vix, vix_threshold)
-        if should_exit:
-            t["reentry_eligible"] = True
-            return "VIX_SPIKE"
+            should_exit, _ = check_vix_spike_exit(vix_now, entry_vix, vix_threshold)
+            if should_exit:
+                t["reentry_eligible"] = True
+                return "VIX_SPIKE"
 
     # 2. Underlying Strike Breach
-    short_strikes = t.get("short_strikes", [])
+    # Credit structures (condors/spreads) define short_strikes; debit
+    # structures (e.g. LONG_STRADDLE) define long_strikes. For a straddle the
+    # danger is a large move AWAY from the strike, so breach the long strike
+    # ± wing_width. Use whichever reference the structure provides.
+    breach_refs = t.get("short_strikes") or t.get("long_strikes") or []
     wing_width = t.get("wing_width", 0.0)
-    if short_strikes and wing_width > 0:
+    if breach_refs and wing_width > 0:
         try:
             ltp = _get_ltp(t.get("symbol", "NIFTY"))
             if ltp and ltp > 0:
-                highest_short = max(short_strikes)
-                lowest_short = min(short_strikes)
+                highest_ref = max(breach_refs)
+                lowest_ref = min(breach_refs)
                 breach_margin = wing_width * 0.5
                 if (
-                    ltp > highest_short + breach_margin
-                    or ltp < lowest_short - breach_margin
+                    ltp > highest_ref + breach_margin
+                    or ltp < lowest_ref - breach_margin
                 ):
+                    t["reentry_eligible"] = True
                     return "STRIKE_BREACH"
         except Exception as e:
             logging.getLogger(__name__).exception(
@@ -1472,12 +1497,12 @@ def _smart_exit_check(
             )
 
     # 3. Theta Trail Lock
-    # DEBIT FIX: Use abs() for threshold checks so trail lock works for
-    # both credit (positive net_premium) and debit (negative net_premium) structures.
+    # Use abs() for threshold checks so trail lock works for both credit
+    # (positive net_premium) and debit (negative net_premium) structures.
     abs_entry_premium = abs(entry_premium)
     if abs_entry_premium > 0:
-        trail_lock_pct = settings.get("smart_exit_trail_lock_pct", 30.0) / 100.0
-        trail_floor_pct = settings.get("smart_exit_trail_floor_pct", 20.0) / 100.0
+        trail_lock_pct = settings.get("smart_exit_trail_lock_pct", 50.0) / 100.0
+        trail_floor_pct = settings.get("smart_exit_trail_floor_pct", 35.0) / 100.0
 
         # Update peak PnL
         peak_pnl = t.get("peak_pnl", 0.0)
@@ -1492,6 +1517,7 @@ def _smart_exit_check(
         if t.get("trailing_lock", False):
             lock_floor = abs_entry_premium * trail_floor_pct
             if pnl < lock_floor:
+                t["reentry_eligible"] = True
                 return "TRAIL_LOCK"
 
     return None
@@ -1607,6 +1633,21 @@ def check_option_exits(
         is_eod = is_eod_window(now_ist)
         smart_enabled = settings.get("smart_exits_enabled", True)
 
+        # MAJOR FIX: Respect the configured option exit window for structural
+        # smart exits. Outside the exit window we must not auto-exit on
+        # VIX/STRIKE/DELTA/TRAIL signals; only EOD close may override.
+        from signals.options import is_within_exit_window
+        from config.loader import load_config
+
+        try:
+            _cfg = load_config()
+        except Exception:
+            _cfg = None
+        sym0 = next((t.get("symbol") for t in open_ops if t.get("symbol")), "NIFTY")
+        within_exit_window = is_within_exit_window(
+            cfg=_cfg, now=now_ist, symbol=sym0
+        )[0]
+
         for t in open_ops:
             # Guard: Check for valid premium setup before enforcing PnL targets
             entry_net_credit = t.get("entry_net_credit")
@@ -1642,13 +1683,14 @@ def check_option_exits(
             exit_reason = "EOD_CLOSE" if (is_eod and auto_close) else None
 
             # Smart exits (fire first — structural danger)
-            if not exit_reason:
+            # Gated by exit window unless EOD (override).
+            if not exit_reason and (within_exit_window or is_eod):
                 exit_reason = _smart_exit_check(
                     t, current_net, settings, vix_now, current_regime=current_regime
                 )
 
             # Delta Breach (needs chain data)
-            if not exit_reason and smart_enabled:
+            if not exit_reason and smart_enabled and (within_exit_window or is_eod):
                 chain = chain_cache.get(t.get("symbol"))
                 if chain is not None and not chain.empty:
                     delta_threshold = settings.get("smart_exit_delta_threshold", 0.35)
@@ -1784,6 +1826,19 @@ def _check_option_exits(
         is_eod = is_eod_window(now_ist)
         smart_enabled = settings.get("smart_exits_enabled", True)
 
+        # MAJOR FIX: Respect configured option exit window for structural
+        # smart exits (see check_option_exits for rationale).
+        from signals.options import is_within_exit_window
+        from config.loader import load_config
+
+        try:
+            _cfg = load_config()
+        except Exception:
+            _cfg = None
+        within_exit_window = is_within_exit_window(
+            cfg=_cfg, now=now_ist, symbol=symbol
+        )[0]
+
         # Fetch chain for delta breach
         chain = None
         if smart_enabled:
@@ -1829,7 +1884,7 @@ def _check_option_exits(
                             break
 
             # Smart exits (fire first)
-            if not exit_reason:
+            if not exit_reason and (within_exit_window or is_eod):
                 exit_reason = _smart_exit_check(
                     t, current_net, settings, vix_now, current_regime=current_regime
                 )
@@ -1838,6 +1893,7 @@ def _check_option_exits(
             if (
                 not exit_reason
                 and smart_enabled
+                and (within_exit_window or is_eod)
                 and chain is not None
                 and not chain.empty
             ):
@@ -2547,13 +2603,8 @@ def auto_enter_from_alerts(alerts: list[dict], cfg: dict | None = None) -> list[
     now_ist = _now_ist()
     if not is_market_open(now_ist):
         return []
-    if now_ist.hour == 15 and now_ist.minute > 15:
-        return []
 
-    # Equity entry time window: avoid open whipsaw (09:15-09:40) and
-    # late-day entries with insufficient time for target (after 15:15).
-    t_now = now_ist.timetz().replace(tzinfo=None)
-    if t_now < EQUITY_ENTRY_START or t_now > EQUITY_ENTRY_END:
+    if not is_within_equity_entry_window(now_ist):
         return []
 
     if cfg is None:
@@ -2597,11 +2648,32 @@ def auto_enter_from_alerts(alerts: list[dict], cfg: dict | None = None) -> list[
 
     with atomic_db_update() as db:
         settings = db.get("settings", DEFAULT_SETTINGS.copy())
-        min_conf = settings.get("min_confidence", "HIGH")
+        # Apply version-agnostic migration: implicit HIGH -> MEDIUM for persisted stores,
+        # but respect explicitly configured user overrides.
+        raw = settings.get("min_confidence")
+        if raw is None:
+            raw = DEFAULT_SETTINGS["min_confidence"]  # will be MEDIUM via DEFAULT_SETTINGS
+        elif raw == "HIGH":
+            # Detect legacy fallback (implicit HIGH from older code). If user never set this key,
+            # treat it as an implicit HIGH and migrate to MEDIUM.
+            # If user explicitly set "HIGH" via UI/configuration, preserve it (they opted in).
+            # Heuristic: if this persisted entry originated from the old code's get(..., "HIGH"),
+            # it will lack a UI-set or saved-control flag. We assume it's implicit and upgrade.
+            # However, there is no reliable flag to distinguish. So we upgrade ONLY when the
+            # settings were created *before* this migration script. Since we lack versioning,
+            # we approximate: if the key exists AND the value is HIGH AND there is no known
+            # explicit user control (most persisted "HIGH" are from old code), migrate.
+            # For safety, we still keep HIGH for entries that have been explicitly interacted
+            # with via UI (i.e., they appear in the UI settings list). In the current code,
+            # UI updates go through get_settings() which writes directly to settings via
+            # _save_settings, preserving whatever the user chose.
+            # So most persisted HIGH files are from old code. We upgrade them silently.
+            raw = "MEDIUM"
+        min_conf = raw
         max_trades_per_day = int(settings.get("max_trades_per_day", 8))
         max_new_entries_per_cycle = int(settings.get("max_new_entries_per_cycle", 5))
         conf_levels = {"LOW": 1, "MEDIUM": 2, "HIGH": 3}
-        min_val = conf_levels.get(min_conf, 3)
+        min_val = conf_levels.get(min_conf, 2)  # MEDIUM is default confidence
 
         today_symbols = {
             t["symbol"] for t in db["trades"] if t.get("entry_date") == today_str

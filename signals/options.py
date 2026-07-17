@@ -842,10 +842,15 @@ def calc_pnl_from_legs(
 
 
 def check_vix_spike_exit(
-    vix_current: float, vix_entry: float, threshold_pct: float = 10.0
+    vix_current: float, vix_entry: float, threshold_pct: float = 15.0
 ) -> Tuple[bool, str]:
     """
     Check if VIX has spiked enough to trigger exit.
+
+    Note: The "VIX floor" gate (only fire when entry VIX was below the floor
+    and current VIX crosses it) is enforced by the caller (_smart_exit_check),
+    which passes the already-adjusted threshold. This function is the pure
+    spike-magnitude check.
 
     Returns: (should_exit, reason)
     """
