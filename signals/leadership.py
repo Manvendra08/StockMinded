@@ -17,31 +17,44 @@ def _projected_volume_multiplier() -> float:
     Active market hours: 09:15 to 15:30 IST (375 minutes).
     Returns a multiplier >= 1.0 to scale today's partial volume.
     If the market is closed or not yet open, returns 1.0.
+
+    NOTE: Early-session volume is NOT a reliable proxy for full-day volume. A
+    naive 1/elapsed_fraction projection massively inflates RVOL in the first
+    hour (e.g. a 2x multiplier before 10:00), which then manufactures false
+    Q4/Q5 breakout quintiles. To avoid that, we only apply projection once a
+    meaningful part of the session has elapsed; before that we return 1.0 so
+    the raw (partial) volume is used and the stock simply does not qualify for
+    a volume-confirmed quintile until volume is real.
     """
     ist = timezone(timedelta(hours=5, minutes=30))
     now_ist = dt.datetime.now(ist)
-    
-    # Check if it's a weekday (Monday-Friday)
+
     if now_ist.weekday() >= 5:  # Saturday or Sunday
         return 1.0
-        
+
     market_start = now_ist.replace(hour=9, minute=15, second=0, microsecond=0)
     market_end = now_ist.replace(hour=15, minute=30, second=0, microsecond=0)
-    
+
     if now_ist < market_start:
         return 1.0
     if now_ist >= market_end:
         return 1.0
-        
+
     elapsed_minutes = (now_ist - market_start).total_seconds() / 60.0
     if elapsed_minutes <= 0:
         return 1.0
-        
+
     total_minutes = 375.0
     elapsed_fraction = elapsed_minutes / total_minutes
-    # BUG-18 FIX: Increased minimum clamp from 0.05 to 0.15.
-    # At 0.05 (≈2 min after open), multiplier was 20x causing false Q5 signals.
-    # At 0.15 (≈56 min after open), max multiplier is ~6.7x which is reasonable.
+
+    # Only project once at least 50% of the session has elapsed. Before that,
+    # the partial-day volume is not a reliable full-day sample, so we keep the
+    # raw volume (multiplier = 1.0) rather than extrapolating upward.
+    if elapsed_fraction < 0.5:
+        return 1.0
+
+    # BUG-18 FIX preserved: clamp the elapsed fraction so the multiplier stays
+    # bounded (max ~6.7x at the 0.15 floor), preventing runaway RVOL spikes.
     elapsed_fraction = max(0.15, min(1.0, elapsed_fraction))
     return 1.0 / elapsed_fraction
 

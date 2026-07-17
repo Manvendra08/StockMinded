@@ -13,6 +13,7 @@ dashboard/paper_trades.json
 .gemini/
 .roo/
 .cursor/
+.kilo/
 .planning/
 data/*.sqlite
 *.jpg

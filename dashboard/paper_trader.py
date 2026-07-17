@@ -197,13 +197,34 @@ def get_futures_expiry(now_dt: datetime = None) -> str:
 
 
 def _load_db() -> dict:
-    """Load the full trade database (Read Only)."""
+    """Load the full trade database (Read Only).
+
+    H7 FIX: Log a warning when falling back to empty DB or BAK file,
+    so silent data loss is visible in logs.
+    """
+    import logging as _log_mod
+    _logger = _log_mod.getLogger(__name__)
+
     for path in [DATA_FILE, BAK_FILE]:
         if path.exists():
             try:
-                return json.loads(path.read_text(encoding="utf-8"))
-            except Exception:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if path == BAK_FILE:
+                    _logger.warning(
+                        "[_load_db] Loaded from BACKUP file %s — main file may be corrupted",
+                        path,
+                    )
+                return data
+            except Exception as e:
+                _logger.warning("[_load_db] Failed to parse %s: %s", path, e)
                 continue
+
+    _logger.error(
+        "[_load_db] NO database file found (neither %s nor %s). "
+        "Returning empty DB — any subsequent save will overwrite backups with empty data!",
+        DATA_FILE,
+        BAK_FILE,
+    )
     return {
         "trades": [],
         "option_trades": [],
@@ -215,21 +236,40 @@ def _load_db() -> dict:
 
 
 def _save_db(db: dict) -> None:
-    """Save the trade database to disk."""
+    """Save the trade database to disk with Windows rename retries."""
+    import shutil
+    import logging as _log_mod
+    _logger = _log_mod.getLogger(__name__)
+
     DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(TMP_FILE, "w", encoding="utf-8") as f:
         json.dump(db, f, indent=2, default=str)
         f.flush()
         os.fsync(f.fileno())
 
-    # Create backup before replacing
-    if DATA_FILE.exists():
-        if BAK_FILE.exists():
-            os.remove(BAK_FILE)
-        os.rename(DATA_FILE, BAK_FILE)
+    # Windows: os.replace/rename fails if the destination file is open by another thread/process.
+    # Concurrent dashboard page-loads call _load_db() which briefly opens the file.
+    # We use shutil.copy2 (which opens the file in read-shared mode) for backup,
+    # and retry os.replace with exponential backoff up to 10 times to bypass transient locks.
+    max_retries = 10
+    base_delay = 0.05
+    for attempt in range(max_retries):
+        try:
+            # Create backup before replacing
+            if DATA_FILE.exists():
+                try:
+                    shutil.copy2(DATA_FILE, BAK_FILE)
+                except Exception as bak_err:
+                    _logger.warning("[_save_db] Backup creation failed: %s", bak_err)
 
-    # Atomic rename
-    os.rename(TMP_FILE, DATA_FILE)
+            # Atomic replace (works on Windows & Unix, replaces destination if it exists)
+            os.replace(TMP_FILE, DATA_FILE)
+            return
+        except PermissionError as e:
+            if attempt < max_retries - 1:
+                time.sleep(base_delay * (attempt + 1))
+                continue
+            raise
 
 
 @contextlib.contextmanager
@@ -756,17 +796,32 @@ def enter_option_structure(
         if len(open_ops) >= max_ops:
             return {"error": f"Max concurrent options structures ({max_ops}) reached"}
 
-        # Prevent SL infinite loops: max 1 entry per structure per symbol per day
+        # Re-entry guard: block only if the prior same-structure trade today is
+        # still open or was stopped out. A profitable/target/manual/expiry close
+        # frees the slot for a fresh entry.
         today_str = _now_ist().date().isoformat()
-        todays_trades = [
+        same_struct = [
             t
             for t in db["option_trades"]
             if t.get("symbol") == underlying
             and t.get("structure") == structure_name
             and t.get("entry_date") == today_str
         ]
-        if todays_trades:
-            return {"error": f"Already traded {structure_name} for {underlying} today"}
+        if same_struct:
+            latest = max(same_struct, key=lambda t: str(t.get("entry_time", "")))
+            if latest.get("status") == "OPEN":
+                return {"error": f"Already traded {structure_name} for {underlying} today"}
+            _STOP_REASONS = {
+                "SL_HIT",
+                "STOP_LOSS",
+                "DELTA_BREACH",
+                "STRIKE_BREACH",
+                "SL_HIT_NET",
+            }
+            if latest.get("exit_reason") in _STOP_REASONS:
+                return {
+                    "error": f"Already traded {structure_name} for {underlying} today (stopped out)"
+                }
 
         # Validate each leg has a genuine positive premium (reject corrupted 0.0 data)
         zero_prem_legs = [
@@ -792,9 +847,15 @@ def enter_option_structure(
             (leg.premium * leg.lots * leg.lot_size) * (1 if leg.side == "SELL" else -1)
             for leg in resolved_legs
         )
-        if net_premium <= 0:
+        all_buy = all(leg.side == "BUY" for leg in resolved_legs)
+        is_debit = all_buy and net_premium < 0
+        if not is_debit and net_premium <= 0:
             return {
                 "error": "Non-credit structure (0 premium likely due to missing LTP data)"
+            }
+        if is_debit and abs(net_premium) <= 0:
+            return {
+                "error": "Debit structure with zero premium"
             }
         # Smart exit metadata
         short_strikes = [l.strike for l in resolved_legs if l.side == "SELL"]
@@ -879,8 +940,9 @@ def enter_option_structure(
                 for l in resolved_legs
             ],
             "net_premium": round(net_premium, 2),
-            "net_credit": round(net_premium, 2),
-            "entry_net_credit": round(net_premium, 2),
+            "net_credit": round(max(net_premium, 0.0), 2),
+            "entry_net_credit": round(max(net_premium, 0.0), 2),
+            "entry_net_debit": round(max(-net_premium, 0.0), 2),
             "max_loss_rupees": round(max_loss, 2),
             "is_defined_risk": is_defined_risk,
             "entry_time": _now_ist().strftime("%Y-%m-%d %H:%M:%S"),
@@ -979,17 +1041,33 @@ def _enter_option_structure(
         if len(open_sym) > 0:
             return {"error": f"{symbol} option structure already open"}
 
-        # Prevent SL infinite loops: max 1 entry per structure today
+        # Re-entry guard: prevent the same structure being entered again the same
+        # day ONLY when the prior trade is still open or was stopped out. A
+        # profitable/target/manual/expiry close frees the slot for a fresh entry
+        # (the open_sym check above already blocks a second OPEN structure).
         today_str = now_ist.date().isoformat()
-        todays_trades = [
+        same_struct = [
             t
             for t in db["option_trades"]
             if t.get("symbol") == symbol
             and t.get("structure") == setup.strategy
             and t.get("entry_date") == today_str
         ]
-        if todays_trades:
-            return {"error": f"Already traded {setup.strategy} for {symbol} today"}
+        if same_struct:
+            latest = max(same_struct, key=lambda t: str(t.get("entry_time", "")))
+            if latest.get("status") == "OPEN":
+                return {"error": f"Already traded {setup.strategy} for {symbol} today"}
+            _STOP_REASONS = {
+                "SL_HIT",
+                "STOP_LOSS",
+                "DELTA_BREACH",
+                "STRIKE_BREACH",
+                "SL_HIT_NET",
+            }
+            if latest.get("exit_reason") in _STOP_REASONS:
+                return {
+                    "error": f"Already traded {setup.strategy} for {symbol} today (stopped out)"
+                }
 
         # Validate each leg has a genuine positive premium (reject corrupted 0.0 data)
         zero_prem_legs = [
@@ -1025,7 +1103,29 @@ def _enter_option_structure(
             (l.premium * l.lots * l.lot_size) * (1 if l.side == "SELL" else -1)
             for l in resolved_legs
         )
-        if net_credit <= 0:
+
+        # Determine if this is a debit structure (all BUY legs, e.g. LONG_STRADDLE).
+        # For debit structures, net_credit is negative by design — the gate below
+        # should check that premiums are positive, not that credit is positive.
+        all_buy = all(l.side == "BUY" for l in resolved_legs)
+        is_debit = all_buy and net_credit < 0
+
+        if is_debit:
+            # Debit structure: just verify we're paying a positive amount (premiums valid)
+            net_debit = abs(net_credit)
+            if net_debit <= 0:
+                journal.log_skipped_trade(
+                    symbol,
+                    "NEUTRAL",
+                    "MED",
+                    "CORRUPT_PREMIUM",
+                    "UNKNOWN",
+                    "NEUTRAL",
+                    "options_gate",
+                    "Debit structure with zero net debit",
+                )
+                return {"error": f"{symbol} blocked: debit structure with zero premium"}
+        elif net_credit <= 0:
             journal.log_skipped_trade(
                 symbol,
                 "NEUTRAL",
@@ -1039,15 +1139,23 @@ def _enter_option_structure(
             return {"error": f"{symbol} blocked: non-credit"}
 
         lot_size = resolved_legs[0].lot_size if resolved_legs else 1
-        struct_type = (
-            "iron_condor"
-            if "IRON_CONDOR" in setup.strategy
-            else (
-                "bull_put_spread"
-                if "BULL_PUT" in setup.strategy
-                else "bear_call_spread"
-            )
-        )
+        # DEBIT FIX: Properly classify structure type for all strategies.
+        # Previously defaulted to "bear_call_spread" for unrecognized strategies,
+        # which caused incorrect max_loss calculation for debit structures like LONG_STRADDLE.
+        if "IRON_CONDOR" in setup.strategy:
+            struct_type = "iron_condor"
+        elif "BULL_PUT" in setup.strategy:
+            struct_type = "bull_put_spread"
+        elif "BEAR_CALL" in setup.strategy:
+            struct_type = "bear_call_spread"
+        elif "STRADDLE" in setup.strategy:
+            struct_type = "long_straddle"
+        elif "STRANGLE" in setup.strategy:
+            struct_type = "long_strangle"
+        elif is_debit:
+            struct_type = "debit_spread"
+        else:
+            struct_type = "unknown"
         underlying_spot = setup.spot if hasattr(setup, "spot") and setup.spot else None
         num_lots = max(l.lots for l in resolved_legs) if resolved_legs else 1
         max_loss = calc_structure_max_loss(
@@ -1078,11 +1186,11 @@ def _enter_option_structure(
                 }
                 for l in resolved_legs
             ],
-            "net_credit": round(net_credit, 2),
+            "net_credit": round(net_credit, 2) if not is_debit else 0.0,
             "net_premium": round(net_credit, 2),
             "max_loss_rupees": round(max_loss, 2),
-            "entry_net_credit": round(net_credit, 2),
-            "entry_net_debit": 0.0,
+            "entry_net_credit": round(net_credit, 2) if not is_debit else 0.0,
+            "entry_net_debit": round(abs(net_credit), 2) if is_debit else 0.0,
             "entry_time": now_ist.strftime("%Y-%m-%d %H:%M:%S"),
             "entry_date": today_str,
             "status": "OPEN",
@@ -1359,7 +1467,10 @@ def _smart_exit_check(
             )
 
     # 3. Theta Trail Lock
-    if entry_premium > 0:
+    # DEBIT FIX: Use abs() for threshold checks so trail lock works for
+    # both credit (positive net_premium) and debit (negative net_premium) structures.
+    abs_entry_premium = abs(entry_premium)
+    if abs_entry_premium > 0:
         trail_lock_pct = settings.get("smart_exit_trail_lock_pct", 30.0) / 100.0
         trail_floor_pct = settings.get("smart_exit_trail_floor_pct", 20.0) / 100.0
 
@@ -1369,12 +1480,12 @@ def _smart_exit_check(
             t["peak_pnl"] = pnl
             peak_pnl = pnl
 
-        lock_threshold = abs(entry_premium) * trail_lock_pct
+        lock_threshold = abs_entry_premium * trail_lock_pct
         if peak_pnl >= lock_threshold:
             t["trailing_lock"] = True
 
         if t.get("trailing_lock", False):
-            lock_floor = abs(entry_premium) * trail_floor_pct
+            lock_floor = abs_entry_premium * trail_floor_pct
             if pnl < lock_floor:
                 return "TRAIL_LOCK"
 
@@ -1395,6 +1506,45 @@ def _entry_premium(trade: dict) -> float:
         val = trade.get(key)
         if val is not None and val > 0:
             return float(val)
+    return 0.0
+
+
+def _net_premium_signed(trade: dict) -> float:
+    """Return signed net premium for correct P&L calculation.
+
+    BUG FIX: The original `_entry_premium()` always returns a POSITIVE value,
+    which breaks P&L calculation for debit structures (e.g., LONG_STRADDLE).
+
+    For credit structures (SELL legs):
+      - net_premium is positive (credit received)
+      - current_net is positive (cost to buy back)
+      - P&L = net_premium - current_net
+
+    For debit structures (BUY legs, e.g., LONG_STRADDLE):
+      - net_premium is NEGATIVE (debit paid, stored as negative)
+      - current_net is NEGATIVE (value of position, sign=-1 for BUY)
+      - P&L = net_premium - current_net = (-debit) - (-current_value)
+            = current_value - debit  ← CORRECT!
+
+    Using the signed net_premium ensures the formula works for BOTH
+    credit and debit structures.
+
+    Returns:
+        Signed net premium: positive for credit, negative for debit.
+    """
+    # net_premium preserves the sign: negative for debit, positive for credit
+    val = trade.get("net_premium")
+    if val is not None and val != 0:
+        return float(val)
+    # Fallback to net_credit (always positive, assumes credit structure)
+    val = trade.get("net_credit")
+    if val is not None and val != 0:
+        return float(val)
+    # Fallback: entry_net_credit - entry_net_debit (preserves sign)
+    credit = trade.get("entry_net_credit", 0) or 0
+    debit = trade.get("entry_net_debit", 0) or 0
+    if credit > 0 or debit > 0:
+        return float(credit) - float(debit)
     return 0.0
 
 
@@ -1505,9 +1655,12 @@ def check_option_exits(
 
             # Flat SL/TGT backup (skip during grace period to avoid bid-ask jitter exits)
             if not exit_reason and not _within_grace_period(t, now_ist):
-                # C2 FIX: Use unified _entry_premium() helper for consistent field access
-                entry_prem = _entry_premium(t)
-                pnl = entry_prem - current_net
+                # DEBIT FIX: Use signed net premium for correct P&L on both
+                # credit and debit structures.  _entry_premium() always returns
+                # a POSITIVE value, which breaks P&L for debit structures
+                # (e.g. LONG_STRADDLE) where net_premium is stored negative.
+                net_prem = _net_premium_signed(t)
+                pnl = net_prem - current_net
 
                 # M2 FIX: SANITY BOUND - Changed multiplier from 1.1 to 1.0.
                 # For defined-risk structures (Iron Condor, credit spreads), P&L should
@@ -1533,10 +1686,22 @@ def check_option_exits(
 
                 sl_limit = settings.get("options_sl_pct", 125.0) / 100.0
                 tgt_limit = settings.get("options_tgt_pct", 50.0) / 100.0
-                if entry_prem > 0:
-                    if pnl <= -abs(entry_prem) * sl_limit:
+                abs_prem = abs(net_prem)
+                if abs_prem > 0:
+                    # Risk-relative stop: for defined-risk credit spreads the
+                    # max loss is (wing − credit), which can be many multiples
+                    # of the credit received. A stop expressed purely as a
+                    # fraction of premium (e.g. 125% of credit) could either
+                    # never trigger (if it exceeds max loss) or be absurdly
+                    # loose. Cap the stop at the structure's own max_loss so it
+                    # always fires at/before the theoretical boundary. Target
+                    # stays premium-based (book X% of credit received).
+                    sl_pnl = abs_prem * sl_limit
+                    if t.get("is_defined_risk", True) and max_loss_rupees > 0:
+                        sl_pnl = min(sl_pnl, max_loss_rupees)
+                    if pnl <= -sl_pnl:
                         exit_reason = "SL_HIT"
-                    elif pnl >= abs(entry_prem) * tgt_limit:
+                    elif pnl >= abs_prem * tgt_limit:
                         exit_reason = "TGT_HIT"
 
             if exit_reason:
@@ -1550,8 +1715,8 @@ def check_option_exits(
                     key = (leg["strike"], leg["expiry"], leg["type"])
                     price = price_map.get(key) if price_map else None
                     leg["exit_premium"] = price
-                # C2 FIX: Use unified _entry_premium() for final PnL
-                final_pnl = round(_entry_premium(t) - current_net, 2)
+                # DEBIT FIX: Use signed net premium for final P&L
+                final_pnl = round(_net_premium_signed(t) - current_net, 2)
                 # M2 FIX: Re-apply sanity bound on final P&L — now using strict 1.0x
                 # instead of 1.1x. Defined-risk structures cannot exceed max_loss.
                 max_loss_rupees = t.get("max_loss_rupees", 0.0)
@@ -1679,9 +1844,12 @@ def _check_option_exits(
 
             # Flat SL/TGT backup (skip during grace period to avoid bid-ask jitter exits)
             if not exit_reason and not _within_grace_period(t, now_ist):
-                # C2 FIX: Use unified _entry_premium() helper for consistent field access
-                entry_prem = _entry_premium(t)
-                pnl = entry_prem - current_net
+                # DEBIT FIX: Use signed net premium for correct P&L on both
+                # credit and debit structures.  _entry_premium() always returns
+                # a POSITIVE value, which breaks P&L for debit structures
+                # (e.g. LONG_STRADDLE) where net_premium is stored negative.
+                net_prem = _net_premium_signed(t)
+                pnl = net_prem - current_net
 
                 # M2 FIX: SANITY BOUND - Changed multiplier from 1.1 to 1.0.
                 # For defined-risk structures (Iron Condor, credit spreads), P&L should
@@ -1707,10 +1875,11 @@ def _check_option_exits(
 
                 sl_limit = settings.get("options_sl_pct", 125.0) / 100.0
                 tgt_limit = settings.get("options_tgt_pct", 50.0) / 100.0
-                if entry_prem > 0:
-                    if pnl >= entry_prem * tgt_limit:
+                abs_prem = abs(net_prem)
+                if abs_prem > 0:
+                    if pnl >= abs_prem * tgt_limit:
                         exit_reason = "PROFIT_TAKEN"
-                    elif pnl <= -entry_prem * sl_limit:
+                    elif pnl <= -abs_prem * sl_limit:
                         exit_reason = "STOP_LOSS"
 
             if exit_reason:
@@ -1724,8 +1893,8 @@ def _check_option_exits(
                     key = (leg["strike"], leg["expiry"], leg["type"])
                     price = price_map.get(key) if price_map else None
                     leg["exit_premium"] = price
-                # C2 FIX: Use unified _entry_premium() for final PnL
-                final_pnl = round(_entry_premium(t) - current_net, 2)
+                # DEBIT FIX: Use signed net premium for final P&L
+                final_pnl = round(_net_premium_signed(t) - current_net, 2)
                 # M2 FIX: Re-apply sanity bound on final P&L — now using strict 1.0x
                 # instead of 1.1x. Defined-risk structures cannot exceed max_loss.
                 max_loss_rupees = t.get("max_loss_rupees", 0.0)
@@ -2201,63 +2370,114 @@ def check_and_close_trades() -> list[dict]:
 
 
 def close_trade_manual(trade_id: int, reason: str = "MANUAL") -> dict | None:
-    """Manually close a specific trade at current LTP."""
+    """Manually close a specific trade at current LTP (handles both JSON and SQLite trades)."""
     now_ist = _now_ist()
+    
+    # 1. Try to find and close in JSON database first
     with atomic_db_update() as db:
         trade = next(
             (
                 t
-                for t in db["trades"]
+                for t in db.get("trades", [])
                 if t["id"] == trade_id and t.get("status") == "OPEN"
             ),
             None,
         )
-        if not trade:
-            return None
+        if trade:
+            ltp = _get_ltp(trade["symbol"])
+            if ltp is None:
+                return {"error": f"Could not fetch LTP for {trade['symbol']}"}
 
-        ltp = _get_ltp(trade["symbol"])
-        if ltp is None:
-            return {"error": f"Could not fetch LTP for {trade['symbol']}"}
+            trade["exit_price"] = ltp
+            trade["exit_time"] = now_ist.strftime("%Y-%m-%d %H:%M:%S")
+            trade["exit_reason"] = reason
+            trade["status"] = "CLOSED"
 
-        trade["exit_price"] = ltp
-        trade["exit_time"] = now_ist.strftime("%Y-%m-%d %H:%M:%S")
-        trade["exit_reason"] = reason
-        trade["status"] = "CLOSED"
-
-        try:
-            entry_dt = datetime.strptime(
-                trade["entry_time"], "%Y-%m-%d %H:%M:%S"
-            ).replace(tzinfo=IST)
-            trade["hold_minutes"] = int((now_ist - entry_dt).total_seconds() / 60)
-        except Exception as e:
-            logging.getLogger(__name__).warning(
-                "[close_trade_manual] hold_minutes calc failed for trade %s: %s",
-                trade_id,
-                e,
-            )
-
-        direction = trade["direction"]
-        if direction == "LONG":
-            pnl = (ltp - trade["entry_price"]) * trade["qty"]
-            pnl_pct = 100 * (ltp - trade["entry_price"]) / trade["entry_price"]
-        else:
-            pnl = (trade["entry_price"] - ltp) * trade["qty"]
-            pnl_pct = 100 * (trade["entry_price"] - ltp) / trade["entry_price"]
-
-        trade["pnl"] = round(pnl, 2)
-        trade["pnl_pct"] = round(pnl_pct, 2)
-
-        # Sync manual exit with Journal
-        jid = trade.get("journal_id")
-        if jid:
             try:
-                cfg = load_config()
-                journal = Journal(cfg["paths"]["journal_db"])
-                journal.close_trade(jid, ltp, trade["pnl"])
+                entry_dt = datetime.strptime(
+                    trade["entry_time"], "%Y-%m-%d %H:%M:%S"
+                ).replace(tzinfo=IST)
+                trade["hold_minutes"] = int((now_ist - entry_dt).total_seconds() / 60)
             except Exception as e:
-                print(f"⚠️ Journal close sync failed for trade {jid}: {e}")
+                logging.getLogger(__name__).warning(
+                    "[close_trade_manual] hold_minutes calc failed for trade %s: %s",
+                    trade_id,
+                    e,
+                )
 
-        return trade
+            direction = trade["direction"]
+            if direction == "LONG":
+                pnl = (ltp - trade["entry_price"]) * trade["qty"]
+                pnl_pct = 100 * (ltp - trade["entry_price"]) / trade["entry_price"]
+            else:
+                pnl = (trade["entry_price"] - ltp) * trade["qty"]
+                pnl_pct = 100 * (trade["entry_price"] - ltp) / trade["entry_price"]
+
+            trade["pnl"] = round(pnl, 2)
+            trade["pnl_pct"] = round(pnl_pct, 2)
+
+            jid = trade.get("journal_id")
+            if jid:
+                try:
+                    cfg = load_config()
+                    journal = Journal(cfg["paths"]["journal_db"])
+                    journal.close_trade(jid, ltp, trade["pnl"])
+                except Exception as e:
+                    print(f"⚠️ Journal close sync failed for trade {jid}: {e}")
+
+            return trade
+
+    # 2. If not found in JSON, search and close in SQLite journal database (Stock trades)
+    try:
+        cfg = load_config()
+        db_path = cfg["paths"]["journal_db"]
+        import sqlite3
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute("SELECT * FROM trades WHERE id=? AND closed_at IS NULL", (trade_id,)).fetchone()
+            if not row:
+                return None
+            trade_data = dict(row)
+        finally:
+            conn.close()
+
+        symbol = trade_data["symbol"]
+        ltp = _get_ltp(symbol)
+        if ltp is None:
+            return {"error": f"Could not fetch LTP for {symbol}"}
+
+        qty = trade_data["qty"]
+        entry = float(trade_data["entry"])
+        side = trade_data["side"]  # 'LONG' or 'SHORT'
+
+        if side == "SHORT":
+            pnl = (entry - ltp) * qty
+            pnl_pct = 100 * (entry - ltp) / entry
+        else:
+            pnl = (ltp - entry) * qty
+            pnl_pct = 100 * (ltp - entry) / entry
+
+        # Close in SQLite Journal
+        journal = Journal(db_path)
+        journal.close_trade(trade_id, ltp, round(pnl, 2))
+
+        return {
+            "id": trade_id,
+            "symbol": symbol,
+            "direction": side,
+            "entry_price": entry,
+            "exit_price": ltp,
+            "qty": qty,
+            "pnl": round(pnl, 2),
+            "pnl_pct": round(pnl_pct, 2),
+            "status": "CLOSED",
+            "exit_reason": reason,
+            "exit_time": now_ist.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+    except Exception as e:
+        logging.getLogger(__name__).exception("Failed to manually close SQLite trade %d: %s", trade_id, e)
+        return {"error": str(e)}
 
 
 def close_option_trade_manual(trade_id: int, reason: str = "MANUAL") -> dict | None:
@@ -2292,15 +2512,17 @@ def close_option_trade_manual(trade_id: int, reason: str = "MANUAL") -> dict | N
             leg["exit_premium"] = price
 
         # Compute PnL
-        entry_net = trade.get("net_premium") or trade.get("net_credit") or 0.0
+        # DEBIT FIX: Use signed net premium for correct P&L on both
+        # credit and debit structures.
+        net_prem = _net_premium_signed(trade)
         if current_net is not None:
-            trade["pnl"] = round(entry_net - current_net, 2)
+            trade["pnl"] = round(net_prem - current_net, 2)
         else:
             trade["pnl"] = 0.0
 
         # SANITY BOUND: Clamp P&L to theoretical max loss
         max_loss_rupees = trade.get("max_loss_rupees", 0.0)
-        if max_loss_rupees > 0 and abs(trade["pnl"]) > max_loss_rupees * 1.1:
+        if max_loss_rupees > 0 and abs(trade["pnl"]) > max_loss_rupees:
             logging.getLogger(__name__).error(
                 "Manual close trade %s %s: P&L %s exceeds theoretical max loss %s - clamping.",
                 trade.get("id"),
@@ -3189,12 +3411,43 @@ def cleanup_db(
     - full_reset: Clears ALL trades and summaries.
     - purge_churn: Removes trades with 0 P&L (spam entries).
     - from_date/to_date: Removes ALL trades in this range (inclusive).
+
+    H7 FIX: Creates timestamped snapshot backup before ANY destructive operation.
+    H7 FIX: Logs audit trail for every cleanup call.
     """
     import sqlite3
+    import logging as _log_mod
+    from datetime import datetime as _dt
+
+    _logger = _log_mod.getLogger(__name__)
+
+    # H7: Snapshot backup before any destructive operation
+    _snapshot_dir = DATA_FILE.parent / "backups"
+    _snapshot_dir.mkdir(parents=True, exist_ok=True)
+    _ts = _dt.now().strftime("%Y%m%d_%H%M%S")
+    _snapshot = _snapshot_dir / f"paper_trades_{_ts}.json"
+
+    try:
+        import shutil
+        if DATA_FILE.exists():
+            shutil.copy2(DATA_FILE, _snapshot)
+            _logger.warning(
+                "[cleanup_db] SNAPSHOT saved to %s before destructive operation "
+                "(full_reset=%s, purge_churn=%s, from=%s, to=%s)",
+                _snapshot, full_reset, purge_churn, from_date, to_date,
+            )
+    except Exception as e:
+        _logger.error("[cleanup_db] Failed to create snapshot backup: %s", e)
 
     db = _load_db()
 
     if full_reset:
+        _logger.warning(
+            "[cleanup_db] FULL RESET requested — wiping %d trades, %d options, %d summaries",
+            len(db.get("trades", [])),
+            len(db.get("option_trades", [])),
+            len(db.get("daily_summaries", [])),
+        )
         db["trades"] = []
         db["option_trades"] = []
         db["daily_summaries"] = []
@@ -3345,6 +3598,18 @@ def cleanup_db(
         conn.close()
     except Exception as e:
         print(f"⚠️ Failed to clean journal SQLite db range: {e}")
+
+    # H7: Audit log — who called cleanup, what was deleted
+    _logger.warning(
+        "[cleanup_db] AUDIT: removed=%d, remaining=%d, "
+        "purge_churn=%s, from=%s, to=%s, snapshot=%s",
+        removed_count,
+        len(db.get("trades", [])) + len(db.get("option_trades", [])),
+        purge_churn,
+        from_date,
+        to_date,
+        str(_snapshot) if _snapshot.exists() else "NONE",
+    )
 
     return {
         "original_count": original_count,

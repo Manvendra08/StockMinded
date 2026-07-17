@@ -112,24 +112,14 @@ def build_trade_verdict(data: dict) -> CombinedVerdict:
     breadth = _num(regime.get("breadth_pct_above_50dma"), 50.0)
 
     # --- AI Sentiment Extraction (dict + legacy string-safe) ---
+    from signals.flows import sentiment_confidence, sentiment_overall
+
     ai_sentiment = flows.get("ai_sentiment")
-    ai_overall = "NEUTRAL"
-    ai_conf_lbl = "LOW"
+    ai_overall = sentiment_overall(ai_sentiment)
+    ai_conf_lbl = sentiment_confidence(ai_sentiment)
     ai_score_raw = 0.0
     if isinstance(ai_sentiment, dict):
-        ai_overall = str(
-            ai_sentiment.get("overall_market_sentiment") or "NEUTRAL"
-        ).upper()
-        ai_conf_lbl = str(ai_sentiment.get("confidence") or "LOW").upper()
         ai_score_raw = _num(ai_sentiment.get("sentiment_score"), 0.0)
-    elif isinstance(ai_sentiment, str):
-        s = ai_sentiment.strip().upper()
-        if s in ("BULLISH", "POSITIVE", "LONG"):
-            ai_overall = "BULLISH"
-        elif s in ("BEARISH", "NEGATIVE", "SHORT"):
-            ai_overall = "BEARISH"
-        else:
-            ai_overall = "NEUTRAL"
 
     # AI direction score: +1 BULLISH, -1 BEARISH, else sign(sentiment_score) fallback
     if ai_overall == "BULLISH":
@@ -215,7 +205,7 @@ def build_trade_verdict(data: dict) -> CombinedVerdict:
                         f"Nifty heavyweight momentum bullish ({nifty_momentum:+.2f}%) aligns with longs"
                     )
             stock_strategy = "Long A-Grade leaders with RS Slope > 50."
-        elif regime_name == "TREND_DOWN" and trend <= -3 and breadth <= 55:
+        elif regime_name == "TREND_DOWN" and trend <= -3 and breadth <= 45:
             stock_action = "SHORT_ONLY"
             stock_tone = "bear"
             stock_can_trade = True

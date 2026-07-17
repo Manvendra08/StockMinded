@@ -12,6 +12,52 @@ import pandas as pd
 from config.loader import load_config
 from data import feed
 
+# Single source of truth for AI sentiment field names.
+# The AI scraper emits `overall_market_sentiment` (used by the flow snapshot),
+# while the timing/flip modules historically read `overall`. This accessor
+# unifies both so every consumer sees the same sentiment regardless of which
+# key the producer happened to emit.
+_SENTIMENT_OVERALL_KEYS = ("overall_market_sentiment", "overall", "sentiment")
+_BULL_WORDS = ("BULLISH", "POSITIVE", "LONG")
+_BEAR_WORDS = ("BEARISH", "NEGATIVE", "SHORT")
+
+
+def sentiment_overall(ai_sentiment) -> str:
+    """Return a normalized (upper-case) sentiment label from a dict or string.
+
+    Reads the first available key among the known aliases. Falls back to
+    NEUTRAL. Returns one of BULLISH / BEARISH / NEUTRAL.
+    """
+    if ai_sentiment is None:
+        return "NEUTRAL"
+    if isinstance(ai_sentiment, dict):
+        raw = None
+        for key in _SENTIMENT_OVERALL_KEYS:
+            if ai_sentiment.get(key) not in (None, ""):
+                raw = str(ai_sentiment[key])
+                break
+    elif isinstance(ai_sentiment, str):
+        raw = ai_sentiment
+    else:
+        return "NEUTRAL"
+    if not raw:
+        return "NEUTRAL"
+    raw_u = raw.strip().upper()
+    if raw_u in _BULL_WORDS:
+        return "BULLISH"
+    if raw_u in _BEAR_WORDS:
+        return "BEARISH"
+    return "NEUTRAL"
+
+
+def sentiment_confidence(ai_sentiment) -> str:
+    """Return a normalized (upper-case) confidence label: HIGH / MEDIUM / LOW."""
+    if isinstance(ai_sentiment, dict):
+        raw = ai_sentiment.get("confidence")
+        if raw not in (None, ""):
+            return str(raw).strip().upper()
+    return "LOW"
+
 
 def _get_deriv_thresholds() -> dict[str, float]:
     """Load FII derivative thresholds from config with sensible defaults."""
@@ -364,15 +410,10 @@ def _bias(
     # The verdict engine also uses AI independently, so this is a secondary influence.
     if ai_sentiment is not None and -5.0 < score < 5.0:
         # ai_sentiment may arrive as a full dict (from get_market_news_sentiment)
-        # or as a plain string. Extract the relevant field when it's a dict.
-        if isinstance(ai_sentiment, dict):
-            _sentiment_str = str(
-                ai_sentiment.get("overall_market_sentiment") or ""
-            ).upper()
-            _ai_conf = str(ai_sentiment.get("confidence") or "LOW").upper()
-        else:
-            _sentiment_str = str(ai_sentiment).upper()
-            _ai_conf = "MEDIUM"
+        # or as a plain string. Use the unified accessor so both key spellings
+        # (overall_market_sentiment / overall) resolve identically.
+        _sentiment_str = sentiment_overall(ai_sentiment)
+        _ai_conf = sentiment_confidence(ai_sentiment)
         # Scale weight by confidence: HIGH=1.0, MEDIUM=0.6, LOW=0.3
         _conf_mult = {"HIGH": 1.0, "MEDIUM": 0.6, "LOW": 0.3}.get(_ai_conf, 0.3)
         _ai_weight = 1.0 * _conf_mult

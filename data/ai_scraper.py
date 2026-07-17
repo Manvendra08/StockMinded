@@ -1940,8 +1940,54 @@ def _fetch_and_parse_rss(query: str, recency_cutoff: float) -> list[tuple[str, s
     return headlines
 
 
+def _parse_icici_date(date_str: str) -> str:
+    """Parse ICICI Direct date string (e.g. 'Jul 17, 2026 09:37') to UTC ISO format."""
+    try:
+        from datetime import datetime, timezone as dt_timezone, timedelta
+        dt = datetime.strptime(date_str.strip(), "%b %d, %Y %H:%M")
+        # ICICI Direct publishes in IST (UTC+5:30)
+        ist = dt_timezone(timedelta(hours=5, minutes=30))
+        dt_ist = dt.replace(tzinfo=ist)
+        return dt_ist.astimezone(dt_timezone.utc).isoformat()
+    except Exception:
+        from datetime import datetime, timezone as dt_timezone
+        return datetime.now(dt_timezone.utc).isoformat()
+
+
+def _parse_mint_date(date_text: str) -> str:
+    """Parse Livemint date text (e.g. '3 min read09:51 AM IST') to UTC ISO format."""
+    try:
+        from datetime import datetime, timezone as dt_timezone, timedelta
+        now_ist = datetime.now(dt_timezone(timedelta(hours=5, minutes=30)))
+        
+        # Check for time (e.g. "09:51 AM IST")
+        time_match = re.search(r'(\d{2}:\d{2}\s*(?:AM|PM))\s*IST', date_text, re.I)
+        if time_match:
+            time_str = time_match.group(1)
+            dt_time = datetime.strptime(time_str, "%I:%M %p").time()
+            dt = datetime.combine(now_ist.date(), dt_time)
+            ist = dt_timezone(timedelta(hours=5, minutes=30))
+            dt_ist = dt.replace(tzinfo=ist)
+            return dt_ist.astimezone(dt_timezone.utc).isoformat()
+            
+        # Check for date (e.g. "16 Jul 2026")
+        date_match = re.search(r'(\d{1,2})\s+([a-zA-Z]{3})\s+(\d{4})', date_text)
+        if date_match:
+            day, month_str, year = date_match.groups()
+            dt = datetime.strptime(f"{day} {month_str} {year}", "%d %b %Y")
+            ist = dt_timezone(timedelta(hours=5, minutes=30))
+            dt_ist = dt.replace(tzinfo=ist)
+            return dt_ist.astimezone(dt_timezone.utc).isoformat()
+            
+        # Fallback to 1 day ago
+        return (datetime.now(dt_timezone.utc) - timedelta(days=1)).isoformat()
+    except Exception:
+        from datetime import datetime, timezone as dt_timezone
+        return datetime.now(dt_timezone.utc).isoformat()
+
+
 def _fetch_icicidirect_news() -> list[tuple[str, str]]:
-    """Fetch recent headlines from ICICI Direct market commentary."""
+    """Fetch recent headlines from ICICI Direct market commentary with parsed publication timestamps."""
     url = "https://www.icicidirect.com/share-market-today/market-news-commentary"
     headlines = []
     try:
@@ -1959,19 +2005,23 @@ def _fetch_icicidirect_news() -> list[tuple[str, str]]:
 
         resp.raise_for_status()
 
-        # Extract headlines from h2-h4 tags which contain commentary titles
-        titles = re.findall(
-            r"<h[2-4][^>]*>(.*?)</h[2-4]>", resp.text, re.DOTALL | re.IGNORECASE
+        # Match blocks containing class="news_title" and class="date-time"
+        blocks = re.findall(
+            r'<h[2-4][^>]*class="news_title">.*?<a[^>]*class="link">(.*?)</a>.*?<div[^>]*class="date-time">Published on\s*(.*?)\s*</div>',
+            resp.text,
+            re.DOTALL | re.IGNORECASE
         )
-        for title in titles[:15]:
-            clean = re.sub(r"<[^>]+>", "", title).strip()
+
+        for title_html, date_str in blocks[:15]:
+            title = re.sub(r"<[^>]+>", "", title_html).strip()
             if (
-                clean
-                and len(clean) > 15
-                and not _is_noise_headline(clean)
-                and not _is_low_value_headline(clean)
+                title
+                and len(title) > 15
+                and not _is_noise_headline(title)
+                and not _is_low_value_headline(title)
             ):
-                headlines.append((clean, datetime.now(timezone.utc).isoformat()))
+                pub_time = _parse_icici_date(date_str)
+                headlines.append((title, pub_time))
 
         logger.info(
             f"Successfully extracted {len(headlines)} headlines from ICICI Direct"
@@ -1982,7 +2032,7 @@ def _fetch_icicidirect_news() -> list[tuple[str, str]]:
 
 
 def _fetch_livemint_news() -> list[tuple[str, str]]:
-    """Fetch recent headlines from Livemint's market news section."""
+    """Fetch recent headlines from Livemint's market news section with parsed publication timestamps."""
     url = "https://www.livemint.com/market/stock-market-news"
     headlines = []
     try:
@@ -1996,19 +2046,39 @@ def _fetch_livemint_news() -> list[tuple[str, str]]:
             resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
 
         resp.raise_for_status()
-        # Match headlines inside h2 tags which are common for Livemint's listing page
-        titles = re.findall(
-            r"<h2[^>]*>.*?<a[^>]*>(.*?)</a>", resp.text, re.DOTALL | re.IGNORECASE
-        )
-        for title in titles[:15]:
-            clean = re.sub(r"<[^>]+>", "", title).strip()
-            if (
-                clean
-                and len(clean) > 20
-                and not _is_noise_headline(clean)
-                and not _is_low_value_headline(clean)
-            ):
-                headlines.append((clean, datetime.now(timezone.utc).isoformat()))
+
+        # Find spans with class "dateNew" and look backward to find the nearest H2 title link
+        span_matches = list(re.finditer(r'<span[^>]*class="dateNew"[^>]*>(.*?)</span>', resp.text, re.I | re.DOTALL))
+        for m in span_matches:
+            date_text = re.sub(r"<[^>]+>", "", m.group(1)).strip()
+            before_text = resp.text[max(0, m.start() - 1500): m.start()]
+            titles = re.findall(r'<h2[^>]*>.*?<a[^>]*>(.*?)</a>', before_text, re.I | re.DOTALL)
+            if titles:
+                title = re.sub(r"<[^>]+>", "", titles[-1]).strip()
+                if (
+                    title
+                    and len(title) > 20
+                    and not _is_noise_headline(title)
+                    and not _is_low_value_headline(title)
+                ):
+                    pub_time = _parse_mint_date(date_text)
+                    headlines.append((title, pub_time))
+
+        # Fallback to direct H2 extraction if span class is modified
+        if not headlines:
+            logger.info("Livemint span-based parsing yielded 0 items. Falling back to direct H2 tags extraction.")
+            titles = re.findall(
+                r"<h2[^>]*>.*?<a[^>]*>(.*?)</a>", resp.text, re.DOTALL | re.IGNORECASE
+            )
+            for title in titles[:15]:
+                clean = re.sub(r"<[^>]+>", "", title).strip()
+                if (
+                    clean
+                    and len(clean) > 20
+                    and not _is_noise_headline(clean)
+                    and not _is_low_value_headline(clean)
+                ):
+                    headlines.append((clean, datetime.now(timezone.utc).isoformat()))
 
         logger.info(f"Successfully extracted {len(headlines)} headlines from Livemint")
     except Exception as e:
@@ -2017,7 +2087,7 @@ def _fetch_livemint_news() -> list[tuple[str, str]]:
 
 
 def _fetch_moneycontrol_news() -> list[tuple[str, str]]:
-    """Fetch recent headlines from Moneycontrol Business/Markets section."""
+    """Fetch recent headlines from Moneycontrol Business/Markets section with relative timestamps."""
     url = "https://www.moneycontrol.com/news/business/markets/"
     headlines = []
     try:
@@ -2035,8 +2105,6 @@ def _fetch_moneycontrol_news() -> list[tuple[str, str]]:
 
         resp.raise_for_status()
 
-        # Moneycontrol headlines are typically in h2 tags within a specific list structure
-        # We look for the 'title' attribute or the inner text of anchors within h2
         titles = re.findall(
             r'<h2[^>]*>.*?<a[^>]*title="([^"]*)"', resp.text, re.DOTALL | re.IGNORECASE
         )
@@ -2045,7 +2113,8 @@ def _fetch_moneycontrol_news() -> list[tuple[str, str]]:
                 r"<h2[^>]*>.*?<a[^>]*>(.*?)</a>", resp.text, re.DOTALL | re.IGNORECASE
             )
 
-        for title in titles[:15]:
+        now = datetime.now(timezone.utc)
+        for idx, title in enumerate(titles[:15]):
             clean = re.sub(r"<[^>]+>", "", title).strip()
             if (
                 clean
@@ -2053,7 +2122,10 @@ def _fetch_moneycontrol_news() -> list[tuple[str, str]]:
                 and not _is_noise_headline(clean)
                 and not _is_low_value_headline(clean)
             ):
-                headlines.append((clean, datetime.now(timezone.utc).isoformat()))
+                # Preserving strict chronological ordering: newest (index 0) gets now,
+                # and each subsequent item gets 2 minutes subtracted.
+                pub_time = (now - timedelta(minutes=2 * idx)).isoformat()
+                headlines.append((clean, pub_time))
 
         logger.info(
             f"Successfully extracted {len(headlines)} headlines from Moneycontrol"
@@ -2120,6 +2192,10 @@ def get_market_news_sentiment(market_context: dict | None = None) -> Optional[di
     # Verification step: Filter for Indian market relevance
     original_count = len(headlines)
     headlines = [h for h in headlines if _is_relevant_to_indian_market(h[0])]
+    
+    # Sort headlines chronologically: newest (largest ISO date string) first
+    headlines.sort(key=lambda h: h[1], reverse=True)
+
     if original_count > 0 and len(headlines) < original_count:
         logger.info(
             f"Relevance filter: {len(headlines)}/{original_count} headlines passed Indian market verification."

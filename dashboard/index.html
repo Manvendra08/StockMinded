@@ -299,29 +299,33 @@
                   }
                 }
 
-                /* ── INDEX BAR ───────────────────────────────────────────────── */
-                .index-bar {
-                  display: flex;
-                  flex-wrap: wrap;
-                  gap: 12px;
-                  padding: 12px 24px;
-                  background: var(--bg-secondary);
-                  border-bottom: 1px solid var(--glass-border);
+                /* ── TOP BAR ──────────────────────────────────────────────────── */
+                .top-bar {
                   position: sticky;
                   top: 0;
                   z-index: 1000;
+                  background: var(--bg-secondary);
+                  border-bottom: 1px solid var(--glass-border);
                   backdrop-filter: blur(12px);
                   -webkit-backdrop-filter: blur(12px);
+                }
+
+                .top-bar-indices {
+                  display: flex;
+                  align-items: center;
+                  gap: 10px;
+                  padding: 8px 24px;
+                  flex-wrap: wrap;
                 }
 
                 .index-chip {
                   background: var(--glass);
                   border: 1px solid var(--glass-border);
                   border-radius: var(--radius-xs);
-                  padding: 8px 14px;
+                  padding: 6px 14px;
                   display: flex;
                   align-items: center;
-                  gap: 12px;
+                  gap: 10px;
                   transition: all var(--transition);
                 }
 
@@ -329,8 +333,12 @@
                   background: var(--glass-border);
                 }
 
+                .index-chip.primary {
+                  padding: 8px 16px;
+                }
+
                 .index-chip .label {
-                  font-size: 0.65rem;
+                  font-size: 0.62rem;
                   font-weight: 700;
                   text-transform: uppercase;
                   letter-spacing: 0.5px;
@@ -345,56 +353,62 @@
 
                 .index-chip .value {
                   font-family: var(--mono);
-                  font-size: 1rem;
+                  font-size: 0.92rem;
                   font-weight: 700;
+                }
+
+                .index-chip.primary .value {
+                  font-size: 1.05rem;
                 }
 
                 .index-chip .change {
                   font-family: var(--mono);
-                  font-size: 0.75rem;
+                  font-size: 0.72rem;
                   font-weight: 600;
                 }
 
-                .index-chip .subline {
-                  font-size: 0.6rem;
-                  color: var(--text-muted);
-                  border-left: 1px solid var(--glass-border);
-                  padding-left: 10px;
-                }
-
-
-                .mini-live-dot {
+                .index-chip .live-dot-sm {
                   width: 6px;
                   height: 6px;
                   border-radius: 50%;
                   background: var(--accent-green);
-                  display: inline-block;
                   animation: pulse-glow 2s ease-in-out infinite;
+                  flex-shrink: 0;
                 }
 
-                .freshness-line {
-                                  margin: -6px 0 24px;
-                                  font-size: 0.78rem;
-                                  color: var(--text-muted);
-                                }
-                                .src-badge {
-                                  display: inline-block;
-                                  padding: 1px 7px;
-                                  border-radius: 4px;
-                                  font-size: 0.7rem;
-                                  font-weight: 600;
-                                  margin-left: 6px;
-                                  background: var(--glass);
-                                  border: 1px solid var(--glass-border);
-                                  color: var(--text-muted);
-                                }
-                                .src-shoonya { background: rgba(59,130,246,0.12); border-color: rgba(59,130,246,0.3); color: #60a5fa; }
-                                                                .src-dhan { background: rgba(16,185,129,0.12); border-color: rgba(16,185,129,0.3); color: #34d399; }
-                                                                .src-yfinance { background: rgba(251,191,36,0.12); border-color: rgba(251,191,36,0.3); color: #fbbf24; }
-                                                                .src-cache { background: rgba(139,149,168,0.12); border-color: rgba(139,149,168,0.3); color: #8b95a8; }
-                                                                .src-research360 { background: rgba(139,92,246,0.12); border-color: rgba(139,92,246,0.3); color: #a78bfa; }
-                                                                .src-ai { background: rgba(6,182,212,0.12); border-color: rgba(6,182,212,0.3); color: #22d3ee; }
-                                                                .src-local { background: rgba(245,158,11,0.12); border-color: rgba(245,158,11,0.3); color: #fbbf24; }
+                .top-bar-spacer {
+                  flex: 1;
+                }
+
+                .market-pill {
+                  display: flex;
+                  align-items: center;
+                  gap: 6px;
+                  padding: 5px 12px;
+                  border-radius: var(--radius-xs);
+                  font-size: 0.65rem;
+                  font-weight: 700;
+                  text-transform: uppercase;
+                  letter-spacing: 0.8px;
+                  background: var(--glass);
+                  border: 1px solid var(--glass-border);
+                }
+
+                .market-pill .pill-dot {
+                  width: 7px;
+                  height: 7px;
+                  border-radius: 50%;
+                  flex-shrink: 0;
+                }
+
+                .market-pill.open .pill-dot {
+                  background: var(--accent-green);
+                  box-shadow: 0 0 6px var(--accent-green-glow);
+                }
+
+                .market-pill.closed .pill-dot {
+                  background: var(--accent-red);
+                }
 
                 .up {
                   color: var(--accent-green);
@@ -1141,8 +1155,8 @@
                     padding: 16px;
                   }
 
-                  .index-bar {
-                    grid-template-columns: 1fr 1fr;
+                  .top-bar-indices {
+                    gap: 6px;
                   }
 
                   .flow-stats {
@@ -1575,64 +1589,6 @@
                   }
                 }
 
-                /* ── INDEX BAR ENHANCED ─────────────────────────────────────── */
-                .index-chip .value {
-                  font-size: 1.5rem; /* Increased size for anchor */
-                }
-
-                .index-chip .label {
-                  font-size: 0.75rem;
-                  letter-spacing: 1px;
-                }
-
-                /* ── TICKER ENHANCEMENTS ────────────────────────────────────── */
-                .ticker-inner {
-                  gap: 64px; /* More horizontal padding */
-                }
-
-                .ticker-item {
-                  position: relative;
-                  padding: 6px 0;
-                }
-
-                .ticker-item:not(:last-child)::after {
-                  content: '';
-                  position: absolute;
-                  right: -32px;
-                  top: 50%;
-                  transform: translateY(-50%);
-                  width: 1px;
-                  height: 16px;
-                  background: var(--glass-border);
-                  opacity: 0.4;
-                }
-
-                  gap: 48px;
-                  padding: 0 24px;
-                }
-
-                .ticker-item {
-                  position: relative;
-                  cursor: pointer;
-                  padding: 4px 0;
-                  transition: opacity var(--transition);
-                }
-
-                .ticker-item:not(:last-child)::after {
-                  content: '';
-                  position: absolute;
-                  right: -24px;
-                  top: 50%;
-                  transform: translateY(-50%);
-                  width: 1px;
-                  height: 14px;
-                  background: var(--glass-border);
-                }
-
-                .ticker-item:hover {
-                  opacity: 0.75;
-                }
-
                 /* ── TABLE VISUALIZATIONS ───────────────────────────────────── */
                 .sparkline-svg {
                   width: 50px;
@@ -1811,29 +1767,12 @@
                   margin-bottom: 32px;
                 }
 
-                .ticker-strip {
+                .top-bar-indices {
                   display: flex;
-                  overflow: hidden;
-                  background: rgba(255, 255, 255, 0.02);
-                  border: 1px solid var(--glass-border);
-                  border-radius: var(--radius-sm);
-                  padding: 10px 0;
-                  margin-bottom: 20px;
-                  position: relative;
-                }
-
-                .index-bar {
-                  display: flex;
+                  align-items: center;
+                  gap: 10px;
+                  padding: 8px 24px;
                   flex-wrap: wrap;
-                  gap: 12px;
-                  padding: 10px 24px;
-                  background: var(--bg-secondary);
-                  border-bottom: 1px solid var(--glass-border);
-                  position: sticky;
-                  top: 0;
-                  z-index: 1001;
-                  backdrop-filter: blur(12px);
-                  -webkit-backdrop-filter: blur(12px);
                 }
 
                 .index-chip {
@@ -1873,37 +1812,12 @@
                   font-weight: 600;
                 }
 
-                .index-chip .subline {
-                  font-size: 0.58rem;
-                  color: var(--text-muted);
-                  border-left: 1px solid var(--glass-border);
-                  padding-left: 8px;
-                }
-
-                .mini-live-dot {
-                  width: 6px;
-                  height: 6px;
-                  border-radius: 50%;
-                  background: var(--accent-green);
-                  display: inline-block;
-                  animation: pulse-glow 2s ease-in-out infinite;
-                }
-
-                @keyframes pulse-glow {
-                  0%, 100% { opacity: 0.6; transform: scale(1); }
-                  50% { opacity: 1; transform: scale(1.2); }
-                }
 
                 .ticker-strip {
-                  background: var(--bg-secondary);
-                  border-bottom: 1px solid var(--glass-border);
-                  padding: 8px 0;
+                  background: rgba(255,255,255,0.015);
+                  border-top: 1px solid var(--glass-border);
+                  padding: 6px 0;
                   overflow: hidden;
-                  position: sticky;
-                  top: 52px; /* Height of index-bar */
-                  z-index: 1000;
-                  backdrop-filter: blur(12px);
-                  -webkit-backdrop-filter: blur(12px);
                 }
 
                 .ticker-inner {
@@ -1930,7 +1844,21 @@
                   align-items: center;
                   gap: 8px;
                   font-family: var(--mono);
-                  font-size: 0.8rem;
+                  font-size: 0.78rem;
+                  cursor: pointer;
+                  transition: opacity var(--transition);
+                }
+
+                .ticker-item:hover {
+                  opacity: 0.75;
+                }
+
+                .ticker-item:not(:last-child)::after {
+                  content: '';
+                  width: 1px;
+                  height: 12px;
+                  background: var(--glass-border);
+                  margin-left: 24px;
                 }
 
                 .ticker-sym {
@@ -1943,20 +1871,8 @@
                 }
 
                 .ticker-chg {
-                  font-size: 0.72rem;
+                  font-size: 0.7rem;
                 }
-
-                .ticker-range-dot {
-                  width: 9px;
-                  height: 9px;
-                  border-radius: 999px;
-                  display: inline-block;
-                  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08);
-                }
-
-                .ticker-range-dot.low { background: var(--accent-red); }
-                .ticker-range-dot.mid { background: var(--text-muted); }
-                .ticker-range-dot.high { background: var(--accent-green); }
 
                 .intra-grid {
                   display: grid;
@@ -2343,12 +2259,12 @@
         <!-- Notification Toast for Data Issues -->
         <div id="notification-toast"></div>
 
-        <!-- Index bar (Moved to top) -->
-        <div class="index-bar" id="index-bar"></div>
-
-        <!-- Global Ticker (Moved to top) -->
-        <div class="ticker-strip" id="ticker-strip">
-            <div class="ticker-inner" id="ticker-inner">Loading Ticker…</div>
+        <!-- Top Bar: indices + ticker -->
+        <div class="top-bar" id="top-bar">
+            <div class="top-bar-indices" id="index-bar"></div>
+            <div class="ticker-strip" id="ticker-strip">
+                <div class="ticker-inner" id="ticker-inner">Loading Ticker…</div>
+            </div>
         </div>
 
         <!-- Dashboard -->
@@ -2456,9 +2372,6 @@
                     </button>
                 </div>
             </header>
-
-            <!-- Freshness line (clean, no inline errors) -->
-            <div class="freshness-line" id="freshness-line">—</div>
 
             <!-- ═══ BENTO GRID LAYOUT ═══ -->
             <div class="bento-grid">
@@ -3023,94 +2936,61 @@
 
             function renderIndexBar(d) {
                 const marketOpen = !!d.market_open;
-                const subline = marketOpen
-                    ? '<span class="mini-live-dot"></span>'
-                    : "";
 
                 const nifty = d.nifty || { close: null, change_pct: null };
                 const bn = d.banknifty || { close: null, change_pct: null };
                 const regime = d.regime || {
                     vix: null,
                     vix_5d_change_pct: null,
-                    adx: null,
                 };
 
-                const items = [
-                    {
-                        label: "NIFTY 50",
-                        value: fmt(nifty.close),
-                        change: nifty.change_pct,
-                    },
-                    {
-                        label: "BANK NIFTY",
-                        value: fmt(bn.close),
-                        change: bn.change_pct,
-                    },
-                    {
-                        label: "INDIA VIX",
-                        value: fmt(regime.vix),
-                        change: regime.vix_5d_change_pct,
-                        suffix: " (5d)",
-                    },
-                    { label: "ADX", value: fmt(regime.adx), change: null },
-                ];
-                document.getElementById("index-bar").innerHTML = items
-                    .map(
-                        (i) => `
-    <div class="index-chip">
-      <div class="label">${i.label}</div>
-      <div class="value-wrap">
-        <span class="value">${i.value}</span>
-        ${i.change != null ? `<span class="change ${changeClass(i.change)}">${i.change > 0 ? "+" : ""}${fmt(i.change)}%${i.suffix || ""}</span>` : ""}
-      </div>
-      ${subline ? `<div class="subline">${subline}</div>` : ""}
-    </div>
-  `,
-                    )
-                    .join("");
-            }
+                const changeHtml = (val, suffix) => {
+                    if (val == null) return "";
+                    const cls = changeClass(val);
+                    const sign = val > 0 ? "+" : "";
+                    return `<span class="change ${cls}">${sign}${fmt(val)}%${suffix || ""}</span>`;
+                };
 
-            function renderFreshnessLine(d) {
-                const ts = d.signals_computed_at || d.ts || "—";
-                const ds = d.data_sources || {};
-                let srcParts = [];
-                // Show overall primary source prominently
-                if (ds.primary)
-                    srcParts.push(
-                        `<span class="src-badge src-${ds.primary}">Primary: ${ds.primary.toUpperCase()}</span>`,
-                    );
-                if (ds.quotes)
-                    srcParts.push(
-                        `<span class="src-badge src-${ds.quotes}">Quotes: ${ds.quotes.toUpperCase()}</span>`,
-                    );
-                if (ds.ohlc)
-                    srcParts.push(
-                        `<span class="src-badge src-${ds.ohlc}">OHLC: ${ds.ohlc.toUpperCase()}</span>`,
-                    );
-                if (ds.option_chain)
-                    srcParts.push(
-                        `<span class="src-badge src-${ds.option_chain}">Options: ${ds.option_chain.toUpperCase()}</span>`,
-                    );
-                const srcHtml = srcParts.length
-                    ? `<span style="margin-left:12px">📡 ${srcParts.join(" ")}</span>`
+                const liveDot = marketOpen
+                    ? '<span class="live-dot-sm"></span>'
                     : "";
 
-                let html = `Data as of: ${ts} · Market: ${d.market_status || "—"}${srcHtml}`;
+                const chips = [
+                    { label: "NIFTY 50", value: fmt(nifty.close), change: nifty.change_pct, primary: true },
+                    { label: "BANK NIFTY", value: fmt(bn.close), change: bn.change_pct, primary: true },
+                    { label: "VIX", value: fmt(regime.vix), change: regime.vix_5d_change_pct, suffix: " (5d)" },
+                ];
 
+                const chipsHtml = chips.map(c => `
+                    <div class="index-chip${c.primary ? " primary" : ""}">
+                        <div class="label">${c.label}</div>
+                        <div class="value-wrap">
+                            <span class="value">${c.value}</span>
+                            ${changeHtml(c.change, c.suffix)}
+                        </div>
+                        ${liveDot}
+                    </div>
+                `).join("");
+
+                const statusCls = marketOpen ? "open" : "closed";
+                const statusText = marketOpen ? "OPEN" : "CLOSED";
+                const pill = `<div class="market-pill ${statusCls}"><span class="pill-dot"></span>${statusText}</div>`;
+
+                document.getElementById("index-bar").innerHTML = chipsHtml + `<div class="top-bar-spacer"></div>` + pill;
+
+                // Health toast logic (was in renderFreshnessLine)
                 const healthBtn = document.getElementById("system-health-btn");
                 const healthDot = document.getElementById("health-dot");
-
-                if (d.source_errors && d.source_errors.length > 0) {
-                    healthBtn.classList.add("has-issues");
-                    healthDot.className = "health-dot error";
-                    // Auto-show health toast if there are new errors
-                    showHealthToast(d.source_errors);
-                } else {
-                    healthBtn.classList.remove("has-issues");
-                    healthDot.className = "health-dot ok";
+                if (healthBtn && healthDot) {
+                    if (d.source_errors && d.source_errors.length > 0) {
+                        healthBtn.classList.add("has-issues");
+                        healthDot.className = "health-dot error";
+                        showHealthToast(d.source_errors);
+                    } else {
+                        healthBtn.classList.remove("has-issues");
+                        healthDot.className = "health-dot ok";
+                    }
                 }
-
-                document.getElementById("freshness-line").innerHTML = html;
             }
 
             function showHealthToast(errors) {
@@ -3939,7 +3819,6 @@
                     dotEl.style.animation = data.market_open ? "" : "none";
                 }
                 renderIndexBar(data);
-                renderFreshnessLine(data);
                 renderDecisionCard(data);
                 renderRegime(data);
                 renderFlows(data);
@@ -4372,37 +4251,10 @@
                     .map((r) => {
                         const cls = (r.chg_pct || 0) >= 0 ? "up" : "down";
                         const sign = (r.chg_pct || 0) >= 0 ? "+" : "";
-                        const used =
-                            r.high != null &&
-                            r.low != null &&
-                            r.ltp != null &&
-                            r.high !== r.low
-                                ? Math.max(
-                                      0,
-                                      Math.min(
-                                          100,
-                                          ((r.ltp - r.low) / (r.high - r.low)) *
-                                              100,
-                                      ),
-                                  )
-                                : null;
-                        const bucket =
-                            used == null
-                                ? "mid"
-                                : used < 30
-                                  ? "low"
-                                  : used < 70
-                                    ? "mid"
-                                    : "high";
-                        const title =
-                            used == null
-                                ? "Day range used: —"
-                                : `Day range used: ${fmt(used, 1)}% | H: ${fmt(r.high)} L: ${fmt(r.low)}`;
                         return `<span class="ticker-item" onclick="handleTickerClick('${r.symbol}')">
       <span class="ticker-sym">${r.symbol}</span>
       <span class="ticker-price ${cls}">${fmt(r.ltp)}</span>
       <span class="ticker-chg ${cls}">${sign}${fmt(r.chg_pct)}%</span>
-      <span class="ticker-range-dot ${bucket}" title="${title}"></span>
     </span>`;
                     })
                     .join("");

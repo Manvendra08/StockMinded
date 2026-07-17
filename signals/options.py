@@ -198,9 +198,12 @@ def iv_rank(symbol, current_iv, db_path):
             (symbol, today, current_iv),
         )
         conn.commit()
+    # Compute the rank against PRIOR history only (exclude today's freshly
+    # inserted value) so the rank is a true historical percentile and doesn't
+    # include itself or drift intraday as today's row is overwritten.
     c.execute(
-        "SELECT atm_iv FROM iv_history WHERE symbol=? ORDER BY date DESC LIMIT 252",
-        (symbol,),
+        "SELECT atm_iv FROM iv_history WHERE symbol=? AND date < ? ORDER BY date DESC LIMIT 252",
+        (symbol, today),
     )
     rows = c.fetchall()
     conn.close()
@@ -348,8 +351,12 @@ def chain_snapshot(symbol, target_expiries=None, target_strikes=None) -> pd.Data
 
         ce = rec.get("CE", {})
         pe = rec.get("PE", {})
-        ce_iv = (ce.get("impliedVolatility") or 0.0) / 100.0
-        pe_iv = (pe.get("impliedVolatility") or 0.0) / 100.0
+        ce_iv = ce.get("impliedVolatility") or 0.0
+        pe_iv = pe.get("impliedVolatility") or 0.0
+        if ce_iv > 1.0:
+            ce_iv /= 100.0
+        if pe_iv > 1.0:
+            pe_iv /= 100.0
         ce_ltp = ce.get("lastPrice") or 0.0
         pe_ltp = pe.get("lastPrice") or 0.0
         ce_delta = 0.0
@@ -633,12 +640,16 @@ def calc_structure_max_loss(
 
     Iron Condor / Credit spread: max_loss = (wing_width * lot_size * lots) - net_credit
     Credit Spread: max_loss = (spread_width * lot_size * lots) - net_credit
+    Debit structures (Long Straddle/Strangle/Spread): max_loss = debit paid = abs(net_credit)
     naked_short kwargs: underlying_spot, naked_loss_pct (default 0.20), naked_loss_cap (default 250_000)
     """
-    # BUG-19 FIX: For debit spreads (net_credit <= 0), max loss is the debit paid,
+    # DEBIT FIX: For debit spreads (net_credit <= 0), max loss is the debit paid,
     # not the wing width. Wing width applies only to credit spreads.
+    # This handles LONG_STRADDLE, LONG_STRANGLE, and other debit structures.
+    # NOTE: net_credit is already the TOTAL premium (premium × lots × lot_size)
+    # from all callers, so we must NOT multiply by lot_size × lots again.
     if net_credit <= 0:
-        return max(0, abs(net_credit) * lot_size * lots)
+        return max(0, abs(net_credit))
 
     if structure_type == "iron_condor":
         return max(0, (wing_width * lot_size * lots) - net_credit)
@@ -646,6 +657,10 @@ def calc_structure_max_loss(
         return max(0, (wing_width * lot_size * lots) - net_credit)
     elif structure_type == "credit_spread":
         return max(0, (wing_width * lot_size * lots) - net_credit)
+    elif structure_type in ("long_straddle", "long_strangle", "debit_spread"):
+        # Debit structure: max loss is the debit paid (already handled above
+        # by the net_credit <= 0 check, but included for explicit clarity)
+        return max(0, abs(net_credit))
     elif structure_type == "naked_short":
         # C3 FIX: Naked short has theoretically unlimited risk.  The previous
         # formula (spot * 0.20) underestimated max loss by 2-3× for gap-risk

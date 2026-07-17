@@ -3,6 +3,20 @@
 WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
  * Running on all addresses (0.0.0.0)
  * Running on http://127.0.0.1:5050
- * Running on http://172.20.10.2:5050
+ * Running on http://192.168.1.6:5050
 Press CTRL+C to quit
-127.0.0.1 - - [26/Jun/2026 20:01:59] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [16/Jul/2026 11:29:13] "GET /api/refresh HTTP/1.1" 200 -
+[shoonya] POST https://api.shoonya.com/NorenWClientAPI/SearchScrip -> HTTP 400: {"stat":"Not_Ok","emsg":"Invalid Input :  jData is not valid json object"}
+127.0.0.1 - - [16/Jul/2026 11:29:17] "GET /api/option-chain?symbol=NIFTY HTTP/1.1" 200 -
+[shoonya] POST https://api.shoonya.com/NorenWClientAPI/SearchScrip -> HTTP 400: {"stat":"Not_Ok","emsg":"Invalid Input :  jData is not valid json object"}
+127.0.0.1 - - [16/Jul/2026 11:30:27] "GET /api/refresh HTTP/1.1" 200 -
+127.0.0.1 - - [16/Jul/2026 11:30:29] "GET /api/option-chain?symbol=NIFTY HTTP/1.1" 200 -
+[preamble] Engine warm-up failed: name 'nifty_df' is not defined
+127.0.0.1 - - [16/Jul/2026 11:31:40] "GET /api/refresh HTTP/1.1" 200 -
+127.0.0.1 - - [16/Jul/2026 11:31:43] "GET /api/option-chain?symbol=NIFTY HTTP/1.1" 200 -
+[shoonya] POST https://api.shoonya.com/NorenWClientAPI/SearchScrip -> HTTP 400: {"stat":"Not_Ok","emsg":"Invalid Input :  jData is not valid json object"}
+[shoonya] POST https://api.shoonya.com/NorenWClientAPI/SearchScrip -> HTTP 400: {"stat":"Not_Ok","emsg":"Invalid Input :  jData is not valid json object"}
+127.0.0.1 - - [16/Jul/2026 11:32:47] "GET /api/refresh HTTP/1.1" 200 -
+127.0.0.1 - - [16/Jul/2026 11:32:48] "GET /api/option-chain?symbol=NIFTY HTTP/1.1" 200 -
+127.0.0.1 - - [16/Jul/2026 11:33:28] "GET /api/telegram/status HTTP/1.1" 200 -
+127.0.0.1 - - [16/Jul/2026 11:33:31] "GET /api/dashboard HTTP/1.1" 200 -

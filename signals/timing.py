@@ -419,8 +419,10 @@ def review_timing_with_llm(
     # Build prompt
     sentiment_desc = "N/A"
     if ai_sentiment:
-        sentiment_desc = ai_sentiment.get("overall", "NEUTRAL")
-        confidence = ai_sentiment.get("confidence", "MEDIUM")
+        from signals.flows import sentiment_confidence, sentiment_overall
+
+        sentiment_desc = sentiment_overall(ai_sentiment)
+        confidence = sentiment_confidence(ai_sentiment)
         sentiment_desc = f"{sentiment_desc} ({confidence})"
 
     prompt = f"""Entry Timing Review:
@@ -740,8 +742,10 @@ def detect_sentiment_flip(
         }
 
     # Extract sentiments
-    prev_overall = (previous_sentiment.get("overall") or "NEUTRAL").upper()
-    curr_overall = (current_sentiment.get("overall") or "NEUTRAL").upper()
+    from signals.flows import sentiment_overall
+
+    prev_overall = sentiment_overall(previous_sentiment)
+    curr_overall = sentiment_overall(current_sentiment)
 
     # Detect direction flip
     if prev_overall != curr_overall:

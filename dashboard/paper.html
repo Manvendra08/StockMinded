@@ -2999,19 +2999,31 @@
             }
 
             async function purgeDB(btn) {
-                if (
-                    !confirm(
-                        "Are you sure? This will delete trade records based on filters.",
-                    )
-                )
+                const from = document.getElementById("purge-from").value;
+                const to = document.getElementById("purge-to").value;
+                const churn = document.getElementById("purge-churn").checked;
+
+                // H7: Build a clear warning message showing what will be deleted
+                let warnMsg = "⚠️ TRADE DELETION — This cannot be undone.\n\n";
+                if (churn) {
+                    warnMsg += "🔴 PURGE CHURN: Will delete ALL closed trades with ₹0 P&L (id > 5).\n";
+                    warnMsg += "   This includes legitimate trades that broke even.\n\n";
+                }
+                if (from || to) {
+                    warnMsg += `📅 DATE RANGE: ${from || '...'} to ${to || '...'}\n`;
+                    warnMsg += "   All trades in this range will be deleted.\n\n";
+                }
+                if (!churn && !from && !to) {
+                    warnMsg += "No filters selected — nothing will be deleted.\n";
                     return;
+                }
+                warnMsg += "A snapshot backup will be saved to data/backups/ before deletion.\n\n";
+                warnMsg += "Proceed with deletion?";
+
+                if (!confirm(warnMsg)) return;
+                if (churn && !confirm("ARE YOU ABSOLUTELY SURE? Zero-P&L trades include legitimate breakeven exits.")) return;
 
                 await btnAction(btn, async () => {
-                    const from = document.getElementById("purge-from").value;
-                    const to = document.getElementById("purge-to").value;
-                    const churn =
-                        document.getElementById("purge-churn").checked;
-
                     const r = await fetch("/api/paper/cleanup", {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },

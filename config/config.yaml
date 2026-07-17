@@ -148,7 +148,7 @@ nifty_options:
   vol_expansion_threshold: 5.0 # % VIX change to block entry
   # Exit rules
   profit_take_pct: 0.50 # Book profit at 50% of max credit
-  stop_loss_mult: 1.0 # Stop loss at 1.0x credit received
+  stop_loss_mult: 1.25 # Stop loss at 1.25x credit received (matches banknifty; defined-risk credit spreads)
   vix_spike_exit_pct: 10.0 # Close if VIX jumps >10% intraday
   # Minimum short-leg premium (per share): skip strikes where premium < this
   #   (walk TOWARDS ATM to get adequate credit; reject if ATM also below floor)
@@ -181,12 +181,6 @@ banknifty_options:
 
 # FII Derivatives Thresholds (₹Cr) for bias scoring
 # Normalized by 5-day rolling average volume in future enhancement
-fii_derivatives_thresholds:
-  index_futures_5d_cr: 1000
-  index_options_5d_cr: 2000
-  stock_futures_5d_cr: 2000
-
-# FII Derivatives Thresholds (₹Cr) - configurable to normalize across expiry weeks
 fii_derivatives_thresholds:
   index_futures_5d_cr: 1000.0
   index_options_5d_cr: 2000.0

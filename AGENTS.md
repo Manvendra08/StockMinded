@@ -60,7 +60,7 @@ Follow below instructions before starting work:
 
 5. **NO SHORTCUTS** — Provide full, runnable code blocks. No placeholders like `// implement here`.
 
-6. **Use Required MCP** before starting any work.
+6. **Use all necessary MCP servers before starting any work.
 
 7. **Review previous code line-by-line** for deprecated methods, unhandled edge cases, or logic bugs before fixing.
 

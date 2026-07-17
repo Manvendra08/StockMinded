@@ -451,7 +451,7 @@ def quote_batch(symbols: list[str]) -> dict[str, dict]:
     # (SearchScrip + GetQuotes), so we throttle at 0.5s per symbol to stay safe.
     _SHOONYA_CALL_DELAY = 0.5  # seconds between symbols
     try:
-        from data.shoonya_fetcher import get_shoonya
+        from data.shoonya_fetcher import get_shoonya, _INDEX_SPOT_NAMES
 
         shoonya = get_shoonya()
         if shoonya and shoonya.login():
@@ -462,15 +462,18 @@ def quote_batch(symbols: list[str]) -> dict[str, dict]:
                 if not _first:
                     time.sleep(_SHOONYA_CALL_DELAY)
                 _first = False
+                base = sym.upper().split()[0]
                 try:
-                    # Try NFO futures quote first (gives full OHLC+OI for F&O stocks)
-                    q = shoonya.fetch_fno_quote(sym)
-                    if q and q.get("ltp"):
-                        out[sym] = q
-                        out[sym]["source"] = "shoonya_fno"
-                        with _SOURCE_LOCK:
-                            _QUOTE_SOURCE[sym] = "shoonya"
-                        continue
+                    # Indices have no FUTSTK on NFO — skip fetch_fno_quote to avoid
+                    # unnecessary SearchScrip 404s and use fetch_quote directly.
+                    if base not in _INDEX_SPOT_NAMES:
+                        q = shoonya.fetch_fno_quote(sym)
+                        if q and q.get("ltp"):
+                            out[sym] = q
+                            out[sym]["source"] = "shoonya_fno"
+                            with _SOURCE_LOCK:
+                                _QUOTE_SOURCE[sym] = "shoonya"
+                            continue
                 except Exception as e:
                     logging.getLogger(__name__).warning(
                         "[quote_batch] shoonya fetch_fno_quote failed for %s: %s",
@@ -1663,7 +1666,7 @@ def option_chain(symbol: str = "NIFTY", _skip_atm_filter: bool = False) -> dict:
         return base_data
 
     def _try_shoonya() -> dict:
-        """Fetch option chain via Shoonya API (primary source)."""
+        """Fetch option chain via Shoonya API (secondary source)."""
         try:
             from data.shoonya_fetcher import get_shoonya
 
@@ -1760,18 +1763,7 @@ def option_chain(symbol: str = "NIFTY", _skip_atm_filter: bool = False) -> dict:
                 )
         return {"records": {"data": []}}
 
-    # 0. Shoonya (PRIMARY: OAuth authenticated, has full data including LTPs).
-    try:
-        data = _try_shoonya()
-        if data and data.get("records", {}).get("data"):
-            data = _patch_zero_ltps_from_public_dhan(data)
-            return _save_chain(data)
-    except Exception as e:
-        logging.getLogger(__name__).warning(
-            "[option_chain shoonya] failed for %s: %s", symbol, e
-        )
-
-    # 1. Sensibull oxide API (free, no auth, live derivatives prices + greeks).
+    # 0. Sensibull (PRIMARY: free, no auth, fast, live derivatives prices + greeks).
     try:
         from data.sensibull_fetcher import fetch_option_chain as _sensibull_fetch
         raw_sb = _sensibull_fetch(symbol)
@@ -1821,6 +1813,17 @@ def option_chain(symbol: str = "NIFTY", _skip_atm_filter: bool = False) -> dict:
     except Exception as e:
         logging.getLogger(__name__).warning(
             "[option_chain sensibull] failed for %s: %s", symbol, e
+        )
+
+    # 1. Shoonya (SECONDARY: OAuth authenticated, full data but slow when unreachable).
+    try:
+        data = _try_shoonya()
+        if data and data.get("records", {}).get("data"):
+            data = _patch_zero_ltps_from_public_dhan(data)
+            return _save_chain(data)
+    except Exception as e:
+        logging.getLogger(__name__).warning(
+            "[option_chain shoonya] failed for %s: %s", symbol, e
         )
 
     # 2. Direct NSE/nsepython (fallback 2: direct API + nsepython library).
@@ -3019,3 +3022,108 @@ def fetch_shoonya_market_quote(exchange: str, token: str) -> dict | None:
     except Exception as e:
         logging.getLogger(__name__).debug("Shoonya market quote fetch failed: %s", e)
     return None
+
+
+def fetch_index_quotes() -> dict[str, dict]:
+    """Fetch live LTP (Shoonya) + prev_close (NSE API) for NIFTY and BANKNIFTY.
+
+    Returns:
+        {"NIFTY": {"ltp": 24191, "prev_close": 24052, "change_pct": 0.58},
+         "BANKNIFTY": {"ltp": 58051, "prev_close": 57462, "change_pct": 1.02}}
+    """
+    result: dict[str, dict] = {}
+    _log = logging.getLogger(__name__)
+
+    # ── 1. NSE API for prev_close (reliable, no auth) ──
+    nse_prev: dict[str, dict] = {}
+    try:
+        import requests as _req
+        session = _req.Session()
+        session.headers.update({
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Accept": "application/json",
+        })
+        # Warm up session cookies
+        session.get("https://www.nseindia.com", timeout=5)
+        resp = session.get("https://www.nseindia.com/api/allIndices", timeout=8)
+        if resp.status_code == 200:
+            data = resp.json()
+            for idx in data.get("data", []):
+                sym = idx.get("index", "")
+                if sym in ("NIFTY 50", "NIFTY BANK", "INDIA VIX"):
+                    key_map = {"NIFTY 50": "NIFTY", "NIFTY BANK": "BANKNIFTY", "INDIA VIX": "INDIAVIX"}
+                    key = key_map[sym]
+                    nse_prev[key] = {
+                        "prev_close": idx.get("previousClose"),
+                        "ltp": idx.get("last"),
+                        "open": idx.get("open"),
+                    }
+    except Exception as e:
+        _log.debug("[fetch_index_quotes] NSE API failed: %s", e)
+
+    # ── 2. Shoonya GetQuotes for live LTP ──
+    shoonya_ltp: dict[str, float] = {}
+    try:
+        from data.shoonya_fetcher import get_shoonya, _INDEX_NSE_TOKENS
+        shoonya = get_shoonya()
+        if shoonya and shoonya.login():
+            for name in ("NIFTY", "BANKNIFTY"):
+                token = _INDEX_NSE_TOKENS.get(name)
+                if token:
+                    q = shoonya._get_quotes("NSE", token)
+                    if q and q.get("stat") == "Ok":
+                        lp = q.get("lp")
+                        if lp:
+                            shoonya_ltp[name] = float(lp)
+    except Exception as e:
+        _log.debug("[fetch_index_quotes] Shoonya LTP failed: %s", e)
+
+    # ── 3. Fallback LTP from yfinance if Shoonya unavailable ──
+    for name in ("NIFTY", "BANKNIFTY"):
+        if name not in shoonya_ltp or shoonya_ltp[name] <= 0:
+            try:
+                yf_sym = YF_SYMBOL.get(name, f"{name}.NS")
+                tk = _yf().Ticker(yf_sym)
+                info = tk.fast_info
+                ltp = getattr(info, "last_price", None) or getattr(info, "last_price", None)
+                if ltp is None:
+                    hist = tk.history(period="1d")
+                    if not hist.empty:
+                        ltp = float(hist["Close"].iloc[-1])
+                if ltp:
+                    shoonya_ltp[name] = float(ltp)
+            except Exception as e:
+                _log.debug("[fetch_index_quotes] yfinance fallback for %s failed: %s", name, e)
+
+    # ── 3b. INDIAVIX from NSE API (already fetched above) or yfinance fallback ──
+    vix_ltp = nse_prev.get("INDIAVIX", {}).get("ltp")
+    if not vix_ltp:
+        try:
+            tk = _yf().Ticker("^INDIAVIX")
+            hist = tk.history(period="1d")
+            if not hist.empty:
+                vix_ltp = float(hist["Close"].iloc[-1])
+        except Exception as e:
+            _log.debug("[fetch_index_quotes] yfinance INDIAVIX failed: %s", e)
+
+    # ── 4. Combine ──
+    for name in ("NIFTY", "BANKNIFTY"):
+        ltp = shoonya_ltp.get(name, 0)
+        prev_close = nse_prev.get(name, {}).get("prev_close")
+        if ltp and ltp > 0 and prev_close and prev_close > 0:
+            chg_pct = round(100 * (ltp - prev_close) / prev_close, 2)
+            result[name] = {"ltp": round(ltp, 2), "prev_close": round(prev_close, 2), "change_pct": chg_pct}
+        elif ltp and ltp > 0:
+            result[name] = {"ltp": round(ltp, 2), "prev_close": None, "change_pct": None}
+        else:
+            result[name] = {"ltp": 0, "prev_close": prev_close, "change_pct": None}
+
+    # INDIAVIX
+    if vix_ltp and vix_ltp > 0:
+        result["INDIAVIX"] = {"ltp": round(float(vix_ltp), 2)}
+
+    return result

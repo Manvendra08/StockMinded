@@ -487,7 +487,7 @@ def _run_engine() -> dict:
         )
         source_errors.append(f"Flow snapshot failed: {e}")
 
-    bench = feed.ohlc_cached("NIFTY", period="1y")
+    bench = nifty_df = feed.ohlc_cached("NIFTY", period="1y")
     ranks = lead_mod.rank_universe(stock_data, bench)
     inflow_syms = [s for s, _ in flow_snap.top_inflow_sectors]
 
@@ -530,55 +530,20 @@ def _run_engine() -> dict:
     structure = sm.plan_for(regime_snap.regime)
 
     # ── Index quotes for the header bar ──
-    # Use yfinance OHLC from cache (already fetched above) for prev_close / change_pct.
-    # The live LTP from Shoonya is available via /api/intraday if needed.
+    # Shoonya LTP (live) + NSE API prev_close (reliable).
+    _idx_quotes = {}
     try:
-        nifty_df = feed.ohlc_cached("NIFTY", period="1mo")
-        if not nifty_df.empty:
-            nifty_df = nifty_df.dropna(subset=["close"])
+        _idx_quotes = feed.fetch_index_quotes()
     except Exception as e:
-        nifty_df = pd.DataFrame()
-        source_errors.append(f"Nifty feed failed: {e}")
+        source_errors.append(f"Index quotes failed: {e}")
 
-    nifty_close = float(nifty_df["close"].iloc[-1]) if not nifty_df.empty else 0
-    nifty_prev = (
-        float(nifty_df["close"].iloc[-2]) if len(nifty_df) >= 2 else nifty_close
-    )
-    nifty_chg_pct = (
-        round(100 * (nifty_close - nifty_prev) / nifty_prev, 2) if nifty_prev else 0
-    )
+    nifty_data = _idx_quotes.get("NIFTY", {})
+    nifty_close = nifty_data.get("ltp", 0)
+    nifty_chg_pct = nifty_data.get("change_pct") or 0
 
-    # BankNifty — fallback to ^NSEBANK via yfinance if primary feed fails
-    bn_df = pd.DataFrame()
-    try:
-        bn_df = feed.ohlc_cached("BANKNIFTY", period="1mo")
-        if not bn_df.empty:
-            bn_df = bn_df.dropna(subset=["close"])
-    except Exception as e:
-        source_errors.append(f"BankNifty primary feed failed: {e}")
-    if bn_df.empty:
-        try:
-            import yfinance as yf
-
-            bn_ticker = yf.Ticker("^NSEBANK")
-            bn_df = bn_ticker.history(period="1mo")
-            if not bn_df.empty:
-                bn_df = bn_df.rename(
-                    columns={
-                        "Open": "open",
-                        "High": "high",
-                        "Low": "low",
-                        "Close": "close",
-                        "Volume": "volume",
-                    }
-                )
-                source_errors.append("BankNifty: used yfinance fallback")
-        except Exception as e2:
-            source_errors.append(f"BankNifty fallback also failed: {e2}")
-
-    bn_close = float(bn_df["close"].iloc[-1]) if not bn_df.empty else 0
-    bn_prev = float(bn_df["close"].iloc[-2]) if len(bn_df) >= 2 else bn_close
-    bn_chg_pct = round(100 * (bn_close - bn_prev) / bn_prev, 2) if bn_prev else 0
+    bn_data = _idx_quotes.get("BANKNIFTY", {})
+    bn_close = bn_data.get("ltp", 0)
+    bn_chg_pct = bn_data.get("change_pct") or 0
 
     # Risk params
     risk_cfg = cfg.get("risk", {})
@@ -3147,6 +3112,7 @@ def _automation_worker():
     _log.info("[%s] Background worker started...", start_time)
 
     last_engine_run = 0
+    _option_dedup_warned = {}  # {date_str: set of "SYM|STRUCT"} to throttle repeat warnings
     data = {}  # Maintain scope for exit checks
 
     while True:
@@ -3245,6 +3211,7 @@ def _automation_worker():
                                     _log.exception("  > Telegram send failed: %s", te)
 
                     # ---- Phase 2: NIFTY options auto-entry ----
+                    option_entered_this_tick = False
                     try:
                         setups = pt.get_nifty_option_setups(data, cfg)
                         nifty_entered = []
@@ -3261,6 +3228,7 @@ def _automation_worker():
                                 nifty_entered.append(result)
 
                         if nifty_entered:
+                            option_entered_this_tick = True
                             token = cfg.get("alerts", {}).get("telegram_bot_token")
                             chat_id = cfg.get("alerts", {}).get("telegram_chat_id")
 
@@ -3283,39 +3251,41 @@ def _automation_worker():
                         _log.exception("  > NIFTY options automation error: %s", ne)
 
                     # ---- Phase 3: BANKNIFTY options auto-entry ----
-                    try:
-                        banknifty_setups = pt.get_banknifty_option_setups(data, cfg)
-                        banknifty_entered = []
-                        for s in banknifty_setups:
-                            if not s.get("suitable") or not s.get("legs"):
-                                continue
-                            result = pt.enter_banknifty_option_structure(
-                                _dict_to_setup(s),
-                                _dict_legs_to_resolved(s["legs"]),
-                                cfg,
-                            )
-                            if "error" not in result:
-                                banknifty_entered.append(result)
-                        if banknifty_entered:
-                            token = cfg.get("alerts", {}).get("telegram_bot_token")
-                            chat_id = cfg.get("alerts", {}).get("telegram_chat_id")
-                            for res in banknifty_entered:
-                                msg = _format_options_telegram_alert(
-                                    res,
-                                    regime_name,
-                                    bias,
-                                    "N/A",
-                                    vix_disp,
-                                    is_nifty=False,
+                    if not option_entered_this_tick:
+                        try:
+                            banknifty_setups = pt.get_banknifty_option_setups(data, cfg)
+                            banknifty_entered = []
+                            for s in banknifty_setups:
+                                if not s.get("suitable") or not s.get("legs"):
+                                    continue
+                                result = pt.enter_banknifty_option_structure(
+                                    _dict_to_setup(s),
+                                    _dict_legs_to_resolved(s["legs"]),
+                                    cfg,
                                 )
-                                Alerter(token, chat_id).send(msg)
-                    except Exception as bne:
-                        _log.exception(
-                            "  > BANKNIFTY options automation error: %s", bne
-                        )
+                                if "error" not in result:
+                                    banknifty_entered.append(result)
+                            if banknifty_entered:
+                                option_entered_this_tick = True
+                                token = cfg.get("alerts", {}).get("telegram_bot_token")
+                                chat_id = cfg.get("alerts", {}).get("telegram_chat_id")
+                                for res in banknifty_entered:
+                                    msg = _format_options_telegram_alert(
+                                        res,
+                                        regime_name,
+                                        bias,
+                                        "N/A",
+                                        vix_disp,
+                                        is_nifty=False,
+                                    )
+                                    Alerter(token, chat_id).send(msg)
+                        except Exception as bne:
+                            _log.exception(
+                                "  > BANKNIFTY options automation error: %s", bne
+                            )
 
                     # ---- Phase 4: Multi-underlying options auto-execution ----
-                    if cfg.get("options", {}).get("enabled"):
+                    if cfg.get("options", {}).get("enabled") and not option_entered_this_tick:
                         try:
                             from signals.option_strategy import (
                                 pick_structure,
@@ -3389,9 +3359,30 @@ def _automation_worker():
                                         struct.name, legs, sym, cfg
                                     )
                                     if "error" in res:
+                                        err = res.get("error", "")
+                                        # Throttle recurring "already blocked" warnings
+                                        # (already traded today / stopped out / already
+                                        # open) so they log once per structure per day
+                                        # instead of on every engine tick.
+                                        is_dedup = (
+                                            "Already traded" in err
+                                            or "stopped out" in err
+                                            or "already open" in err
+                                        )
+                                        if is_dedup:
+                                            _today = datetime.now().strftime("%Y-%m-%d")
+                                            _warned = _option_dedup_warned.setdefault(_today, set())
+                                            _key = f"{sym}|{struct.name}"
+                                            if _key in _warned:
+                                                continue
+                                            _warned.add(_key)
+                                            # Drop stale days
+                                            for _d in list(_option_dedup_warned):
+                                                if _d != _today:
+                                                    _option_dedup_warned.pop(_d, None)
                                         _log.warning(
                                             "  > Auto-enter Option Structure FAILED: %s %s — %s",
-                                            sym, struct.name, res.get("error"),
+                                            sym, struct.name, err,
                                         )
                                         continue
 
