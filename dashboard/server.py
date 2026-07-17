@@ -863,6 +863,14 @@ def _generate_trade_alerts(data: dict) -> list[dict]:
     stock_action = stock_v.get("action", "WAIT")
     nifty_action = nifty_v.get("action", "WAIT")
 
+    # Authoritative conviction from the verdict engine. The verdict already blends
+    # regime, trend, breadth, AI sentiment, smart-money bias and heavyweight
+    # momentum into stock_conf. Alerts must respect this rather than re-deriving
+    # confidence from quintile alone (which silently downgrades clean trend setups).
+    verdict_stock_conf = str(stock_v.get("confidence") or "LOW").upper()
+    if verdict_stock_conf not in ("LOW", "MEDIUM", "HIGH"):
+        verdict_stock_conf = "LOW"
+
     can_trade_equity = bool(stock_v.get("can_trade"))
     can_trade_options = bool(nifty_v.get("can_trade"))
 
@@ -879,10 +887,10 @@ def _generate_trade_alerts(data: dict) -> list[dict]:
     allow_shorts = can_trade_equity and stock_action in ("SHORT_ONLY", "LONG_AND_SHORT")
 
     # 2. Entry Window Tightening:
-    # Avoid equity entries after 14:15 IST (EOD volatility). Options use their own
+    # Avoid equity entries after 15:15 IST (EOD volatility). Options use their own
     # window from config (is_within_entry_window) which allows until 14:30.
     now_ist = datetime.now(timezone(timedelta(hours=5, minutes=30)))
-    if (now_ist.hour, now_ist.minute) >= (14, 15):
+    if (now_ist.hour, now_ist.minute) > (15, 15):
         allow_longs = False
         allow_shorts = False
         # Do NOT block can_trade_options here — options entry window handles this
@@ -1219,7 +1227,14 @@ def _generate_trade_alerts(data: dict) -> list[dict]:
                     except Exception as e:
                         logging.debug(f"[SENTIMENT_FLIP] {sym}: error ({e})")
 
-            conf = "HIGH" if q >= 5 else ("MEDIUM" if q >= 4 else "LOW")
+            # Confidence is driven by the verdict engine (authoritative). Quintile
+            # can only *strengthen* to HIGH for a standout Q5 name; it never
+            # downgrades a clean verdict. This keeps trend setups (verdict MEDIUM)
+            # tradable while range setups (verdict LOW) stay filtered unless a
+            # genuine Q5 leader appears.
+            conf = verdict_stock_conf
+            if q >= 5 and conf != "HIGH":
+                conf = "HIGH"
             evidence = [
                 f"RS Slope: {stock['rs_slope']}",
                 f"Q: {q}",
@@ -1391,7 +1406,11 @@ def _generate_trade_alerts(data: dict) -> list[dict]:
                     except Exception as e:
                         logging.debug(f"[SENTIMENT_FLIP] {sym}: error ({e})")
 
-            conf = "HIGH" if q >= 5 else ("MEDIUM" if q >= 4 else "LOW")
+            # Confidence driven by the verdict engine (authoritative); Q5 standout
+            # can only strengthen to HIGH, never downgrade a clean verdict.
+            conf = verdict_stock_conf
+            if q >= 5 and conf != "HIGH":
+                conf = "HIGH"
             evidence = [
                 f"RS Slope: {stock['rs_slope']}",
                 f"Q: {q}",

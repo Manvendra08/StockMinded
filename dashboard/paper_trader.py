@@ -71,7 +71,12 @@ DEFAULT_SETTINGS = {
     "sl_pct": 2.0,
     "tgt_pct": 4.0,
     "trail_sl": True,
-    "min_confidence": "HIGH",
+    # MEDIUM matches the verdict engine's baseline for a valid directional trend
+    # setup (TREND_UP/TREND_DOWN issue MEDIUM by default, upgrading to HIGH only
+    # when AI + smart-money bias align). HIGH here would filter out nearly every
+    # clean trend trade. Range-regime setups remain LOW in the verdict and stay
+    # filtered. See signals/verdict.py.
+    "min_confidence": "MEDIUM",
     "max_trades_per_day": 8,
     "max_new_entries_per_cycle": 5,
     "regime_filter": True,
@@ -394,8 +399,8 @@ EOD_WINDOW_END = dt_mod.time(15, 35)
 OPTION_SL_GRACE_MINUTES = 5
 
 # Equity entry window: avoid open whipsaw and late-day insufficient-time entries
-EQUITY_ENTRY_START = dt_mod.time(10, 0)
-EQUITY_ENTRY_END = dt_mod.time(14, 15)
+EQUITY_ENTRY_START = dt_mod.time(9, 40)
+EQUITY_ENTRY_END = dt_mod.time(15, 15)
 
 
 def _within_grace_period(
@@ -2542,11 +2547,11 @@ def auto_enter_from_alerts(alerts: list[dict], cfg: dict | None = None) -> list[
     now_ist = _now_ist()
     if not is_market_open(now_ist):
         return []
-    if now_ist.hour == 15 and now_ist.minute >= 15:
+    if now_ist.hour == 15 and now_ist.minute > 15:
         return []
 
-    # Equity entry time window: avoid open whipsaw (09:15-10:00) and
-    # late-day entries with insufficient time for target (after 14:15).
+    # Equity entry time window: avoid open whipsaw (09:15-09:40) and
+    # late-day entries with insufficient time for target (after 15:15).
     t_now = now_ist.timetz().replace(tzinfo=None)
     if t_now < EQUITY_ENTRY_START or t_now > EQUITY_ENTRY_END:
         return []
