@@ -1463,7 +1463,7 @@ def india_vix(period: str = "3mo") -> pd.DataFrame:
 
 
 def _filter_atm_strikes(data: dict) -> dict:
-    """Filter records and filtered data to ATM +/- 15 strikes."""
+    """Filter records and filtered data to ATM +/- 10 strikes."""
     if not data or not isinstance(data, dict):
         return data
 
@@ -1508,9 +1508,9 @@ def _filter_atm_strikes(data: dict) -> dict:
     atm_strike = min(strikes, key=lambda x: abs(x - underlying_value))
     atm_idx = strikes.index(atm_strike)
 
-    # Slice the strikes to ATM +/- 15 strikes
-    start_idx = max(0, atm_idx - 15)
-    end_idx = min(len(strikes) - 1, atm_idx + 15)
+    # Slice the strikes to ATM +/- 10 strikes
+    start_idx = max(0, atm_idx - 10)
+    end_idx = min(len(strikes) - 1, atm_idx + 10)
     allowed_strikes = set(strikes[start_idx : end_idx + 1])
 
     # Filter data rows
@@ -1536,7 +1536,7 @@ def option_chain(symbol: str = "NIFTY", _skip_atm_filter: bool = False) -> dict:
 
     Args:
         symbol: Underlying symbol (e.g., NIFTY, BANKNIFTY).
-        _skip_atm_filter: If True, skip ATM +/-15 strike filtering.
+        _skip_atm_filter: If True, skip ATM +/-10 strike filtering.
                           Used internally by chain_snapshot when specific
                           target strikes are needed for exit checks.
     """

@@ -210,8 +210,39 @@ def format_dashboard(regime_snap, flow_snap, structure_plan, longs, shorts) -> s
         lines.append(ai_line)
         lines.append("")
 
-    # ── Footer ──
-    source = getattr(flow_snap, 'option_source', None) or "yfinance"
-    lines.append(f"⏰ {ts_str}  ·  Source: {source}")
+def format_telegram_alert(verdict: dict) -> str:
+    """Format a single investment verdict as a structured markdown trade card.
 
+    ``verdict`` keys: symbol, verdict, confidence, rationale, key_risks,
+    entry_zone, stop_loss, target, telegram_channel.
+    """
+    sym = verdict.get("symbol", "—")
+    v = verdict.get("verdict", "AVOID")
+    conf = verdict.get("confidence", "LOW")
+    emoji = {"BUY": "🟢", "SELL": "🔴", "AVOID": "⚪"}.get(v, "⚪")
+    lines = [
+        f"{emoji} *{sym} — {v}*  `({conf})`",
+    ]
+    if verdict.get("entry_zone"):
+        lines.append(f"  Entry: `{verdict['entry_zone']}`")
+    if verdict.get("stop_loss"):
+        lines.append(f"  SL: `{verdict['stop_loss']}`")
+    if verdict.get("target"):
+        lines.append(f"  Target: `{verdict['target']}`")
+    if verdict.get("rationale"):
+        ratio = verdict["rationale"]
+        if len(ratio) > 280:
+            ratio = ratio[:277] + "…"
+        lines.append(f"  _{ratio}_")
+    if verdict.get("key_risks"):
+        lines.append(f"  ⚠️ Risks: {verdict['key_risks']}")
+    if verdict.get("telegram_channel"):
+        lines.append(f"  📡 src: {verdict['telegram_channel']}")
     return "\n".join(lines)
+
+
+def send_telegram_alert(verdict: dict, bot_token: str | None, chat_id: str | None) -> bool:
+    """Send a single verdict card via the Bot API (separate from userbot)."""
+    alerter = Alerter(bot_token, chat_id)
+    return alerter.send(format_telegram_alert(verdict))
+

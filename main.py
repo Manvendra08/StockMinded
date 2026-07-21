@@ -6,6 +6,7 @@ Usage:
   python main.py agot-test          # quick AGoT system validation (no data fetch)
   python main.py schedule           # run APScheduler loop (IST times from config)
   python main.py health             # quick data connectivity check
+  python main.py telegram-pipeline [--dry-run]  # run dual-engine Telegram → verdict pipeline
 """
 from __future__ import annotations
 
@@ -13,6 +14,9 @@ import logging
 import signal
 import sys
 from datetime import datetime
+
+from core.log import setup_logging
+setup_logging()
 
 try:
     from apscheduler.schedulers.blocking import BlockingScheduler
@@ -24,12 +28,9 @@ except ImportError:
 
 from config.loader import load_config, load_universe, load_sector_map
 from data import feed
-from signals import regime as regime_mod
-from signals import flows as flows_mod
-from signals import leadership as lead_mod
-from signals import structure_map as sm
 from ops.alerts import Alerter, format_dashboard
 from ops.journal import Journal
+from ops.telegram_state import TelegramState
 
 # AGoT imports (lazy-loaded in functions to avoid startup overhead)
 
@@ -296,6 +297,188 @@ def run_health(cfg: dict) -> None:
     print("\n".join(checks))
 
 
+def run_telegram_pipeline(cfg: dict, dry_run: bool = False) -> dict:
+    """Run one pass of the dual-engine Telegram → verdict pipeline.
+
+    This is fully additive: it reads Telegram channels, parses tickers with an
+    LLM, fetches fundamentals, applies hard filters + LLM fusion, persists
+    verdicts to the journal, and (unless dry_run) sends alert cards. It does
+    NOT touch any existing dashboard/engine code paths.
+
+    Returns a run summary dict for logging/tests.
+    """
+    from datetime import datetime, timezone
+
+    import uuid
+
+    from data.ai_scraper import call_llm
+    from data.screener_fetcher import fetch_fundamentals
+    from data.telegram_fetcher import fetch_all_channels
+    from signals.regime import classify as classify_regime
+    from signals.telegram_fusion import run_fusion
+    from signals.telegram_parser import parse_message, is_spam
+
+    tp_cfg = cfg.get("telegram_pipeline", {})
+    if not tp_cfg.get("enabled", False) and not dry_run:
+        logging.getLogger(__name__).info("telegram-pipeline disabled in config")
+        return {"skipped": True, "reason": "disabled"}
+
+    journal = Journal(cfg["paths"]["journal_db"])
+    state = TelegramState(cfg["paths"]["journal_db"])
+
+    universe = set(load_universe(cfg)) if tp_cfg.get("fusion", {}).get("universe_filter", True) else None
+
+    # 1. Fetch new Telegram messages
+    from datetime import datetime
+    dt_str = datetime.now().strftime('%H:%M:%S')
+    print(f"\033[94m[{dt_str}] [Telegram Pipeline] Attempting to fetch new messages...\033[0m")
+    try:
+        messages = fetch_all_channels(tp_cfg, state, limit=tp_cfg.get("max_messages_per_run", 100))
+        if messages:
+            platform_map = {ch.get("username"): ch.get("platform", "telegram") for ch in tp_cfg.get("channels", [])}
+            journal.log_raw_messages(messages, platform_map)
+        print(f"\033[92m[{datetime.now().strftime('%H:%M:%S')}] [Telegram Pipeline] Status: SUCCESS. Fetched {len(messages)} messages.\033[0m")
+    except Exception as e:
+        print(f"\033[91m[{datetime.now().strftime('%H:%M:%S')}] [Telegram Pipeline] Status: FAILED. Error: {e}\033[0m")
+        return {"messages": 0, "extracted": 0, "verdicts": 0, "error": str(e)}
+
+    if not messages:
+        return {"messages": 0, "extracted": 0, "verdicts": 0}
+
+    # 2. Parse tickers from each message (dedupe by symbol, keep strongest context)
+    extracted_map: dict[str, Any] = {}
+    llm_calls = 0
+    for m in messages:
+        tickers = parse_message(
+            m.text,
+            call_llm=call_llm,
+            universe=universe,
+            model=tp_cfg.get("parser", {}).get("model", "llama-3.3-70b-versatile"),
+        )
+        llm_calls += 1 if tickers or not is_spam(m.text) else 0
+        for tk in tickers:
+            if tk.symbol not in extracted_map or tk.confidence > extracted_map[tk.symbol].confidence:
+                extracted_map[tk.symbol] = tk
+                extracted_map[tk.symbol].telegram_msg_id = m.msg_id
+                extracted_map[tk.symbol].telegram_channel = m.channel
+    extracted = list(extracted_map.values())
+    logging.getLogger(__name__).info(
+        "Parsed %d unique symbols from %d messages (LLM calls: ~%d)",
+        len(extracted), len(messages), llm_calls,
+    )
+
+    # 3. Regime context
+    try:
+        regime_snap = classify_regime("NIFTY")
+        regime_val = regime_snap.regime.value if hasattr(regime_snap.regime, "value") else str(regime_snap.regime)
+    except Exception as e:
+        logging.getLogger(__name__).warning("regime classify failed: %s", e)
+        regime_val = "UNKNOWN"
+
+    # 4. Hard filters + LLM fusion
+    fusion_cfg = tp_cfg.get("fusion", {})
+    logging.getLogger(__name__).info(
+        "Running fusion on %d symbols (LLM calls: ~%d)...",
+        len(extracted), len(extracted),
+    )
+    verdicts = run_fusion(
+        extracted=extracted,
+        fundamentals_fn=lambda s, c="": fetch_fundamentals(
+            s,
+            journal=journal if not dry_run else None,
+            cache_ttl_hours=tp_cfg.get("screener", {}).get("cache_ttl_hours", 24),
+            rate_limit_delay=tp_cfg.get("screener", {}).get("rate_limit_delay", 2.0),
+            company_name=c,
+        ),
+        filters=fusion_cfg.get("hard_filters", {}),
+        regime=regime_val,
+        call_llm=call_llm,
+        model=fusion_cfg.get("model", "llama-3.3-70b-versatile"),
+        max_tokens=fusion_cfg.get("max_tokens", 2048),
+    )
+
+    # Attach Telegram source metadata
+    for v in verdicts:
+        src = extracted_map.get(v.symbol)
+        if src is not None:
+            v.telegram_msg_id = getattr(src, "telegram_msg_id", None)
+            v.telegram_channel = getattr(src, "telegram_channel", None)
+
+    if dry_run:
+        summary = {
+            "dry_run": True,
+            "messages": len(messages),
+            "extracted": len(extracted),
+            "verdicts": len(verdicts),
+            "symbols": [v.symbol for v in verdicts],
+            "details": [
+                {
+                    "symbol": v.symbol,
+                    "verdict": v.verdict,
+                    "confidence": v.confidence,
+                    "news_event": getattr(v, "news_event", ""),
+                    "event_type": getattr(v, "event_type", ""),
+                    "sentiment": getattr(v, "sentiment_direction", ""),
+                    "company": getattr(v, "company_name", ""),
+                }
+                for v in verdicts
+            ],
+        }
+        logging.getLogger(__name__).info(
+            "DRY-RUN complete: %d messages → %d extracted → %d verdicts (total LLM calls: ~%d)",
+            len(messages), len(extracted), len(verdicts), llm_calls + len(extracted),
+        )
+        return summary
+
+    # 5. Persist
+    scan_id = uuid.uuid4().hex
+    scan_ts = datetime.now(timezone.utc).isoformat()
+    verdict_rows = []
+    for v in verdicts:
+        verdict_rows.append({
+            "symbol": v.symbol,
+            "verdict": v.verdict,
+            "confidence": v.confidence,
+            "rationale": v.rationale,
+            "key_risks": v.key_risks,
+            "entry_zone": v.entry_zone,
+            "stop_loss": v.stop_loss,
+            "target": v.target,
+            "telegram_msg_id": getattr(v, "telegram_msg_id", None),
+            "telegram_channel": getattr(v, "telegram_channel", None),
+            "fundamentals_json": getattr(v, "fundamentals_json", None),
+            "regime_at_scan": getattr(v, "regime_at_scan", None),
+            "news_event": getattr(v, "news_event", ""),
+            "event_type": getattr(v, "event_type", "general"),
+            "sentiment_direction": getattr(v, "sentiment_direction", "NEUTRAL"),
+            "company_name": getattr(v, "company_name", ""),
+        })
+    journal.save_investment_verdicts(scan_id, scan_ts, verdict_rows)
+
+    # 6. Prune old scans
+    inv_cfg = cfg.get("investment_dashboard", {})
+    keep = inv_cfg.get("max_history_scans", 50)
+    journal.prune_investment_scans(keep)
+
+    # 7. Alerts are surfaced on the Investment dashboard page only
+    #    (localhost-only deployment — no outbound Telegram alerts are sent).
+    alerts_sent = 0
+
+    logging.getLogger(__name__).info(
+        "Pipeline complete: %d messages → %d extracted → %d verdicts (scan_id=%s)",
+        len(messages), len(extracted), len(verdicts), scan_id,
+    )
+    print(f"\033[92m[{datetime.now().strftime('%H:%M:%S')}] [Telegram Pipeline] COMPLETE: {len(messages)} messages → {len(extracted)} extracted → {len(verdicts)} verdicts (scan_id: {scan_id[:8]}).\033[0m")
+
+    return {
+        "scan_id": scan_id,
+        "messages": len(messages),
+        "extracted": len(extracted),
+        "verdicts": len(verdicts),
+        "alerts_sent": alerts_sent,
+    }
+
+
 def run_schedule(cfg: dict) -> None:
     if not _SCHEDULER_AVAILABLE:
         raise RuntimeError(
@@ -322,6 +505,19 @@ def run_schedule(cfg: dict) -> None:
     sched.add_job(_h("dashboard", run_dashboard), CronTrigger(hour=hh, minute=mm, day_of_week="mon-fri"))
     print(f"Scheduler started (IST). Morning dashboard @ {s['morning_dashboard']}.  Ctrl-C to stop.")
 
+    # Dual-engine Telegram pipeline — hourly at :05 (additive, unique job id).
+    tp_cfg = cfg.get("telegram_pipeline", {})
+    if tp_cfg.get("enabled", False):
+        sched.add_job(
+            _h("telegram-pipeline", lambda c: run_telegram_pipeline(c)),
+            CronTrigger(minute=5),
+            id="telegram_pipeline",
+            replace_existing=True,
+        )
+        print("Telegram pipeline scheduled hourly at :05 (enabled).")
+    else:
+        print("Telegram pipeline NOT scheduled (telegram_pipeline.enabled=false).")
+
     def _shutdown_handler(signum, frame):
         print("\nShutting down scheduler gracefully...")
         sched.shutdown(wait=False)
@@ -342,6 +538,7 @@ def main() -> int:
         return 1
     cfg = load_config()
     cmd = sys.argv[1].lower()
+    dry_run = "--dry-run" in sys.argv[2:]
     if cmd == "dashboard":
         run_dashboard(cfg)
     elif cmd == "agot":
@@ -352,6 +549,8 @@ def main() -> int:
         run_health(cfg)
     elif cmd == "schedule":
         run_schedule(cfg)
+    elif cmd == "telegram-pipeline":
+        run_telegram_pipeline(cfg, dry_run=dry_run)
     else:
         print(f"unknown command: {cmd}")
         return 2

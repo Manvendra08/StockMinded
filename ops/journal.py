@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 # Schema version for migrations
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 5
 
 SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -80,6 +80,47 @@ CREATE TABLE IF NOT EXISTS trade_exit_analysis (
     notes TEXT,
     FOREIGN KEY(trade_id) REFERENCES trades(id)
 );
+
+CREATE TABLE IF NOT EXISTS fundamentals_cache (
+    symbol TEXT PRIMARY KEY,
+    fetched_at TEXT NOT NULL,
+    payload_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS investment_verdicts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scan_id TEXT NOT NULL,
+    scan_ts TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    verdict TEXT NOT NULL,
+    confidence TEXT NOT NULL,
+    rationale TEXT,
+    key_risks TEXT,
+    entry_zone TEXT,
+    stop_loss TEXT,
+    target TEXT,
+    telegram_msg_id INTEGER,
+    telegram_channel TEXT,
+    fundamentals_json TEXT,
+    regime_at_scan TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(scan_id, symbol)
+);
+CREATE INDEX IF NOT EXISTS idx_investment_scan ON investment_verdicts(scan_id);
+CREATE INDEX IF NOT EXISTS idx_investment_symbol ON investment_verdicts(symbol);
+
+CREATE TABLE IF NOT EXISTS raw_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
+    channel TEXT NOT NULL,
+    msg_id INTEGER NOT NULL,
+    date_str TEXT,
+    text TEXT NOT NULL,
+    platform TEXT DEFAULT 'telegram',
+    UNIQUE(channel, msg_id)
+);
+CREATE INDEX IF NOT EXISTS idx_raw_messages_channel ON raw_messages(channel);
+CREATE INDEX IF NOT EXISTS idx_raw_messages_fetched ON raw_messages(fetched_at);
 """
 
 
@@ -138,6 +179,19 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             )
         """)
     
+    # Migration from v3 to v4: Add news/event columns to investment_verdicts.
+    if current_version < 4:
+        for col_sql in (
+            "ALTER TABLE investment_verdicts ADD COLUMN news_event TEXT",
+            "ALTER TABLE investment_verdicts ADD COLUMN event_type TEXT DEFAULT 'general'",
+            "ALTER TABLE investment_verdicts ADD COLUMN sentiment_direction TEXT DEFAULT 'NEUTRAL'",
+            "ALTER TABLE investment_verdicts ADD COLUMN company_name TEXT",
+        ):
+            try:
+                cursor.execute(col_sql)
+            except sqlite3.OperationalError:
+                pass  # column already exists
+
     cursor.execute(
         "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, datetime('now'))",
         (SCHEMA_VERSION,)
@@ -373,6 +427,208 @@ class Journal:
                 ),
             )
         self.conn.commit()
+
+    def save_investment_verdicts(self, scan_id: str, scan_ts: str, verdicts: list[dict]) -> int:
+        """Insert a batch of verdicts for one pipeline scan.
+
+        ``verdicts`` items are dicts with keys:
+            symbol, verdict, confidence, rationale, key_risks, entry_zone,
+            stop_loss, target, telegram_msg_id, telegram_channel,
+            fundamentals_json, regime_at_scan,
+            news_event, event_type, sentiment_direction, company_name
+        The UNIQUE(scan_id, symbol) constraint prevents duplicate rows on re-run.
+        Returns the number of rows written.
+        """
+        written = 0
+        for v in verdicts:
+            try:
+                self.conn.execute(
+                    """INSERT OR IGNORE INTO investment_verdicts(
+                        scan_id, scan_ts, symbol, verdict, confidence, rationale,
+                        key_risks, entry_zone, stop_loss, target, telegram_msg_id,
+                        telegram_channel, fundamentals_json, regime_at_scan,
+                        news_event, event_type, sentiment_direction, company_name)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        scan_id,
+                        scan_ts,
+                        v.get("symbol"),
+                        v.get("verdict"),
+                        v.get("confidence"),
+                        v.get("rationale"),
+                        v.get("key_risks"),
+                        v.get("entry_zone"),
+                        v.get("stop_loss"),
+                        v.get("target"),
+                        v.get("telegram_msg_id"),
+                        v.get("telegram_channel"),
+                        v.get("fundamentals_json"),
+                        v.get("regime_at_scan"),
+                        v.get("news_event"),
+                        v.get("event_type"),
+                        v.get("sentiment_direction"),
+                        v.get("company_name"),
+                    ),
+                )
+                written += 1
+            except sqlite3.OperationalError:
+                pass
+        self.conn.commit()
+        return written
+
+    def get_investment_scans(self, limit: int = 50) -> list[dict]:
+        """Return recent scans, each with its verdict rows.
+
+        Response shape (matches plan §5.2):
+            [{scan_id, scan_ts, verdicts: [{...}, ...]}, ...]
+        """
+        cur = self.conn.execute(
+            """SELECT scan_id, scan_ts FROM investment_verdicts
+               GROUP BY scan_id ORDER BY MAX(created_at) DESC LIMIT ?""",
+            (limit,),
+        )
+        scans = []
+        for scan_id, scan_ts in cur.fetchall():
+            vcur = self.conn.execute(
+                """SELECT id, scan_id, scan_ts, symbol, verdict, confidence,
+                          rationale, key_risks, entry_zone, stop_loss, target,
+                          telegram_msg_id, telegram_channel, regime_at_scan,
+                          news_event, event_type, sentiment_direction, company_name
+                   FROM investment_verdicts WHERE scan_id = ? ORDER BY symbol""",
+                (scan_id,),
+            )
+            cols = [d[0] for d in vcur.description]
+            verdicts = [dict(zip(cols, row)) for row in vcur.fetchall()]
+            scans.append({"scan_id": scan_id, "scan_ts": scan_ts, "verdicts": verdicts})
+        return scans
+
+    def get_investment_scan(self, scan_id: str) -> dict | None:
+        cur = self.conn.execute(
+            """SELECT id, scan_id, scan_ts, symbol, verdict, confidence,
+                      rationale, key_risks, entry_zone, stop_loss, target,
+                      telegram_msg_id, telegram_channel, regime_at_scan,
+                      news_event, event_type, sentiment_direction, company_name
+               FROM investment_verdicts WHERE scan_id = ? ORDER BY symbol""",
+            (scan_id,),
+        )
+        cols = [d[0] for d in cur.description]
+        rows = cur.fetchall()
+        if not rows:
+            return None
+        verdicts = [dict(zip(cols, row)) for row in rows]
+        return {
+            "scan_id": scan_id,
+            "scan_ts": verdicts[0]["scan_ts"],
+            "verdicts": verdicts,
+        }
+
+    def get_investment_summary(self) -> dict:
+        """Summary cards: total scans, total verdicts, counts by verdict."""
+        total_scans = self.conn.execute(
+            "SELECT COUNT(DISTINCT scan_id) FROM investment_verdicts"
+        ).fetchone()[0]
+        total_verdicts = self.conn.execute(
+            "SELECT COUNT(*) FROM investment_verdicts"
+        ).fetchone()[0]
+        by_verdict = {"BUY": 0, "SELL": 0, "AVOID": 0}
+        cur = self.conn.execute(
+            "SELECT verdict, COUNT(*) FROM investment_verdicts GROUP BY verdict"
+        )
+        for verdict, count in cur.fetchall():
+            if verdict in by_verdict:
+                by_verdict[verdict] = count
+        return {
+            "total_scans": total_scans,
+            "total_verdicts": total_verdicts,
+            "by_verdict": by_verdict,
+        }
+
+    def prune_investment_scans(self, keep: int) -> int:
+        """Keep only the most recent ``keep`` scans; delete older ones."""
+        cur = self.conn.execute(
+            """SELECT scan_id FROM investment_verdicts
+               GROUP BY scan_id ORDER BY MAX(created_at) DESC LIMIT -1 OFFSET ?""",
+            (keep,),
+        )
+        old_ids = [r[0] for r in cur.fetchall()]
+        if not old_ids:
+            return 0
+        deleted = 0
+        for sid in old_ids:
+            deleted += self.conn.execute(
+                "DELETE FROM investment_verdicts WHERE scan_id = ?", (sid,)
+            ).rowcount
+        self.conn.commit()
+        return deleted
+
+    def cache_fundamentals(self, symbol: str, payload: dict, fetched_at: str) -> None:
+        self.conn.execute(
+            """INSERT INTO fundamentals_cache(symbol, fetched_at, payload_json)
+               VALUES (?, ?, ?)
+               ON CONFLICT(symbol) DO UPDATE SET
+                 fetched_at = excluded.fetched_at,
+                 payload_json = excluded.payload_json""",
+            (symbol, fetched_at, json.dumps(payload, default=str)),
+        )
+        self.conn.commit()
+
+    def get_cached_fundamentals(self, symbol: str, max_age_hours: int = 24) -> dict | None:
+        cur = self.conn.execute(
+            "SELECT payload_json, fetched_at FROM fundamentals_cache WHERE symbol = ?",
+            (symbol,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        payload_json, fetched_at = row
+        try:
+            from datetime import datetime, timedelta, timezone
+
+            fetched_dt = datetime.fromisoformat(fetched_at)
+            if datetime.now(timezone.utc) - fetched_dt > timedelta(hours=max_age_hours):
+                return None
+        except Exception:
+            pass
+        try:
+            return json.loads(payload_json)
+        except Exception:
+            return None
+
+    def log_raw_messages(self, messages: list, platform_map: dict | None = None) -> None:
+        """Log raw messages/tweets fetched from Telegram/X channels."""
+        for m in messages:
+            pl = (platform_map or {}).get(getattr(m, "channel", ""), "telegram")
+            self.conn.execute(
+                """INSERT INTO raw_messages(fetched_at, channel, msg_id, date_str, text, platform)
+                   VALUES (datetime('now'), ?, ?, ?, ?, ?)
+                   ON CONFLICT(channel, msg_id) DO UPDATE SET
+                     fetched_at = datetime('now'),
+                     text = excluded.text,
+                     date_str = excluded.date_str,
+                     platform = excluded.platform""",
+                (
+                    getattr(m, "channel", ""),
+                    getattr(m, "msg_id", 0),
+                    str(getattr(m, "date", "") or ""),
+                    getattr(m, "text", ""),
+                    pl,
+                ),
+            )
+        self.conn.commit()
+
+    def get_raw_messages(self, limit: int = 50, channel: str | None = None) -> list[dict]:
+        """Fetch raw messages/tweets ordered by newest first."""
+        query = "SELECT id, fetched_at, channel, msg_id, date_str, text, platform FROM raw_messages"
+        params = []
+        if channel:
+            query += " WHERE channel = ?"
+            params.append(channel)
+        query += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+
+        cur = self.conn.execute(query, params)
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
 
     def close(self) -> None:
         self.conn.close()

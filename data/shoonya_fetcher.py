@@ -24,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 
 import pyotp
 
-STRIKES_AROUND_ATM = int(os.environ.get("STRIKES_AROUND_ATM", "15"))
+STRIKES_AROUND_ATM = int(os.environ.get("STRIKES_AROUND_ATM", "10"))
 
 
 def _optional_env(key: str, default: str = "") -> str | None:
@@ -609,7 +609,7 @@ class ShoonyaFetcher:
         return self._api_call("GetQuotes", {"exch": exchange, "token": token})
 
     def _get_option_chain(
-        self, exchange: str, tsym: str, strikeprice: float, count: int = 15
+        self, exchange: str, tsym: str, strikeprice: float, count: int = STRIKES_AROUND_ATM
     ) -> dict | None:
         return self._api_call(
             "GetOptionChain",
@@ -1299,7 +1299,7 @@ class ShoonyaFetcher:
                     log.warning("[shoonya] failed to resolve BFO weekly option symbol: %s. Using default: %s", ex_bfo, chain_tsym)
 
             chain = self._get_option_chain(
-                option_exch, chain_tsym, underlying_price, count=15
+                option_exch, chain_tsym, underlying_price, count=STRIKES_AROUND_ATM
             )
             if not chain or chain.get("stat") != "Ok" or not chain.get("values"):
                 log.warning("[shoonya] empty option chain for %s", chain_tsym)

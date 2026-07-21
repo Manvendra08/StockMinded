@@ -1,0 +1,400 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>StockMinded — Investment Verdicts</title>
+        <link
+            href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap"
+            rel="stylesheet"
+        />
+        <style>
+            :root {
+                --bg-primary: #0a0e17;
+                --bg-secondary: #111827;
+                --bg-card: rgba(17, 24, 39, 0.7);
+                --bg-card-hover: rgba(24, 34, 56, 0.85);
+                --glass: rgba(255, 255, 255, 0.03);
+                --glass-border: rgba(255, 255, 255, 0.06);
+                --text-primary: #f0f4f8;
+                --text-secondary: #8b95a8;
+                --text-muted: #4b5563;
+                --accent-green: #10b981;
+                --accent-red: #ef4444;
+                --accent-blue: #3b82f6;
+                --accent-amber: #f59e0b;
+                --accent-purple: #8b5cf6;
+                --radius: 16px;
+                --radius-sm: 10px;
+                --font: 'Inter', -apple-system, sans-serif;
+                --mono: 'JetBrains Mono', monospace;
+                --transition: 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            }
+            * { box-sizing: border-box; margin: 0; padding: 0; }
+            body {
+                font-family: var(--font);
+                background: var(--bg-primary);
+                color: var(--text-primary);
+                min-height: 100vh;
+                padding: 24px;
+            }
+            .wrap { max-width: 1280px; margin: 0 auto; }
+            .header {
+                display: flex; align-items: center; justify-content: space-between;
+                margin-bottom: 24px; flex-wrap: wrap; gap: 12px;
+            }
+            .brand { display: flex; align-items: center; gap: 12px; }
+            .brand-logo {
+                width: 44px; height: 44px; border-radius: 12px;
+                background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+                display: grid; place-items: center; font-weight: 900; font-size: 1.4rem;
+            }
+            .brand-name { font-weight: 800; font-size: 1.2rem; }
+            .brand-sub { color: var(--text-secondary); font-size: 0.8rem; }
+            .nav-links { display: flex; gap: 8px; }
+            .nav-links a {
+                text-decoration: none; color: var(--text-secondary);
+                padding: 8px 14px; border-radius: var(--radius-sm);
+                border: 1px solid var(--glass-border); font-size: 0.85rem; font-weight: 600;
+                transition: var(--transition);
+            }
+            .nav-links a:hover { color: var(--text-primary); background: var(--bg-card-hover); }
+            .nav-links a.active { color: var(--accent-blue); border-color: rgba(59,130,246,0.4); background: rgba(59,130,246,0.12); }
+
+            .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 24px; }
+            .card {
+                background: var(--bg-card); border: 1px solid var(--glass-border);
+                border-radius: var(--radius); padding: 18px 20px; backdrop-filter: blur(8px);
+            }
+            .card .label { color: var(--text-secondary); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; }
+            .card .value { font-size: 1.9rem; font-weight: 800; margin-top: 6px; }
+            .card.buy .value { color: var(--accent-green); }
+            .card.sell .value { color: var(--accent-red); }
+            .card.avoid .value { color: var(--text-muted); }
+            .card.total .value { color: var(--accent-blue); }
+
+            .toolbar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 16px; }
+            .toolbar input, .toolbar select {
+                background: var(--bg-secondary); color: var(--text-primary);
+                border: 1px solid var(--glass-border); border-radius: var(--radius-sm);
+                padding: 8px 12px; font-size: 0.85rem; font-family: var(--font);
+            }
+            .toolbar input[type="text"] { min-width: 180px; }
+            .btn {
+                background: linear-gradient(135deg, #3b82f6, #8b5cf6); color: #fff; border: none;
+                padding: 8px 16px; border-radius: var(--radius-sm); font-weight: 700; cursor: pointer;
+                font-family: var(--font); font-size: 0.85rem;
+            }
+            .btn:hover { opacity: 0.9; }
+            .status { color: var(--text-secondary); font-size: 0.8rem; margin-left: auto; }
+
+            table { width: 100%; border-collapse: collapse; background: var(--bg-card); border-radius: var(--radius); overflow: hidden; }
+            thead th {
+                text-align: left; padding: 12px 14px; font-size: 0.75rem; text-transform: uppercase;
+                letter-spacing: 0.04em; color: var(--text-secondary); border-bottom: 1px solid var(--glass-border);
+            }
+            tbody td { padding: 11px 14px; border-bottom: 1px solid var(--glass-border); font-size: 0.88rem; vertical-align: top; }
+            tbody tr:hover { background: var(--bg-card-hover); }
+            .badge { padding: 3px 10px; border-radius: 999px; font-weight: 700; font-size: 0.75rem; }
+            .badge.BUY { background: rgba(16,185,129,0.15); color: var(--accent-green); }
+            .badge.SELL { background: rgba(239,68,68,0.15); color: var(--accent-red); }
+            .badge.AVOID { background: rgba(139,149,168,0.15); color: var(--text-secondary); }
+            .conf.HIGH { color: var(--accent-green); font-weight: 700; }
+            .conf.MEDIUM { color: var(--accent-amber); font-weight: 700; }
+            .conf.LOW { color: var(--text-muted); font-weight: 700; }
+            .mono { font-family: var(--mono); }
+            .scan-pill {
+                display: inline-block; padding: 4px 10px; border-radius: 999px; cursor: pointer;
+                background: rgba(59,130,246,0.12); color: var(--accent-blue); font-weight: 600; font-size: 0.75rem;
+            }
+            .scan-pill:hover { background: rgba(59,130,246,0.22); }
+            .empty { text-align: center; color: var(--text-secondary); padding: 48px; }
+            .rationale-cell { max-width: 360px; cursor: pointer; }
+            .rationale-cell .trunc { display: block; }
+            .rationale-cell .full { display: none; white-space: pre-wrap; color: var(--text-secondary); margin-top: 6px; }
+            .rationale-cell.open .trunc { display: none; }
+            .rationale-cell.open .full { display: block; }
+            .error { color: var(--accent-red); padding: 16px; }
+
+            /* Live Raw Tweet/Telegram Feed Styles */
+            .feed-section { margin-top: 24px; margin-bottom: 28px; background: var(--bg-card); border: 1px solid var(--glass-border); border-radius: var(--radius); padding: 20px; }
+            .feed-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; flex-wrap: wrap; gap: 10px; }
+            .feed-title { font-size: 1.05rem; font-weight: 800; display: flex; align-items: center; gap: 10px; }
+            .live-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent-green); box-shadow: 0 0 10px var(--accent-green); display: inline-block; animation: pulse 2s infinite; }
+            @keyframes pulse { 0% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(0.9); } 100% { opacity: 1; transform: scale(1); } }
+            .feed-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 14px; max-height: 440px; overflow-y: auto; padding-right: 6px; }
+            .feed-grid::-webkit-scrollbar { width: 6px; }
+            .feed-grid::-webkit-scrollbar-thumb { background: var(--glass-border); border-radius: 4px; }
+            .feed-card { background: var(--bg-secondary); border: 1px solid var(--glass-border); border-radius: var(--radius-sm); padding: 14px 16px; transition: var(--transition); }
+            .feed-card:hover { border-color: rgba(59,130,246,0.4); transform: translateY(-2px); }
+            .feed-meta { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; font-size: 0.76rem; }
+            .platform-tag { font-weight: 700; border-radius: 6px; padding: 3px 8px; font-size: 0.72rem; }
+            .platform-tag.twitter { background: rgba(59,130,246,0.18); color: var(--accent-blue); border: 1px solid rgba(59,130,246,0.3); }
+            .platform-tag.telegram { background: rgba(139,92,246,0.18); color: var(--accent-purple); border: 1px solid rgba(139,92,246,0.3); }
+            .feed-text { font-size: 0.86rem; line-height: 1.5; color: var(--text-primary); white-space: pre-wrap; font-family: var(--font); }
+            .feed-time { font-family: var(--mono); font-size: 0.72rem; color: var(--text-secondary); }
+        </style>
+    </head>
+    <body>
+        <div class="wrap">
+            <div class="header">
+                <div class="brand">
+                    <div class="brand-logo">S</div>
+                    <div>
+                        <div class="brand-name">StockMinded</div>
+                        <div class="brand-sub">Investment Verdicts</div>
+                    </div>
+                </div>
+                <div class="nav-links">
+                    <a href="/">Dashboard</a>
+                    <a href="/paper">Paper Trading</a>
+                    <a href="/investment" class="active">Investment</a>
+                </div>
+            </div>
+
+            <div class="cards" id="summary-cards">
+                <div class="card total"><div class="label">Total Scans</div><div class="value" id="sum-scans">—</div></div>
+                <div class="card buy"><div class="label">BUY</div><div class="value" id="sum-buy">—</div></div>
+                <div class="card sell"><div class="label">SELL</div><div class="value" id="sum-sell">—</div></div>
+                <div class="card avoid"><div class="label">AVOID</div><div class="value" id="sum-avoid">—</div></div>
+            </div>
+
+            <!-- Live Raw Source Feed (Previous Tweets / Telegram Messages) -->
+            <div class="feed-section">
+                <div class="feed-header">
+                    <div class="feed-title">
+                        <span class="live-dot"></span> Live Source Feed (Raw Tweets / Messages)
+                        <span class="badge BUY" id="feed-count-badge">0 Messages</span>
+                    </div>
+                    <div style="display:flex; gap:10px; align-items:center;">
+                        <span class="status" id="feed-status">Checking live feed…</span>
+                        <button class="btn" style="background:var(--bg-card-hover); border:1px solid var(--glass-border); color:var(--text-primary); font-size:0.78rem; padding:6px 12px;" onclick="loadFeed(true)">⚡ Scrape Live Tweets Now</button>
+                    </div>
+                </div>
+                <div class="feed-grid" id="tweets-feed">
+                    <div class="empty">Loading raw channel feed…</div>
+                </div>
+            </div>
+
+            <div class="toolbar">
+                <input type="text" id="search" placeholder="Search symbol…" oninput="applyFilters()" />
+                <select id="verdict-filter" onchange="applyFilters()">
+                    <option value="">All Verdicts</option>
+                    <option value="BUY">BUY</option>
+                    <option value="SELL">SELL</option>
+                    <option value="AVOID">AVOID</option>
+                </select>
+                <select id="conf-filter" onchange="applyFilters()">
+                    <option value="">All Confidence</option>
+                    <option value="HIGH">HIGH</option>
+                    <option value="MEDIUM">MEDIUM</option>
+                    <option value="LOW">LOW</option>
+                </select>
+                <button class="btn" onclick="refresh()">↻ Refresh</button>
+                <button class="btn" onclick="runVerdictScan()" style="margin-left:6px; background:linear-gradient(135deg,#3b82f6,#2563eb)">⚡ Run Verdict Scan Now</button>
+                <span class="status" id="status"></span>
+            </div>
+
+            <table id="verdicts-table">
+                <thead>
+                    <tr>
+                        <th>Scan</th>
+                        <th>Time</th>
+                        <th>Symbol</th>
+                        <th>Company</th>
+                        <th>News / Event</th>
+                        <th>Type</th>
+                        <th>Sentiment</th>
+                        <th>Verdict</th>
+                        <th>Confidence</th>
+                        <th>Rationale</th>
+                        <th>Levels (Entry / SL / Target)</th>
+                    </tr>
+                </thead>
+                <tbody id="verdicts-body"></tbody>
+            </table>
+            <div class="empty" id="empty-msg" style="display:none">No verdicts yet. Click "⚡ Run Verdict Scan Now" above.</div>
+        </div>
+
+        <script>
+            let ALL_ROWS = [];
+            let AUTO_REFRESH_MS = 300000;
+
+            async function loadSummary() {
+                try {
+                    const r = await fetch("/api/investment/summary");
+                    const d = await r.json();
+                    if (d.error) return;
+                    document.getElementById("sum-scans").textContent = d.total_scans ?? "—";
+                    document.getElementById("sum-buy").textContent = d.by_verdict?.BUY ?? "—";
+                    document.getElementById("sum-sell").textContent = d.by_verdict?.SELL ?? "—";
+                    document.getElementById("sum-avoid").textContent = d.by_verdict?.AVOID ?? "—";
+                } catch (e) { /* ignore */ }
+            }
+
+            async function refresh() {
+                const status = document.getElementById("status");
+                status.textContent = "Loading…";
+                try {
+                    const r = await fetch("/api/investment/verdicts");
+                    const d = await r.json();
+                    if (d.error) { status.textContent = "Error: " + d.error; return; }
+                    ALL_ROWS = [];
+                    (d.scans || []).forEach(scan => {
+                        (scan.verdicts || []).forEach(v => {
+                            ALL_ROWS.push(Object.assign({ scan_id: scan.scan_id, scan_ts: scan.scan_ts }, v));
+                        });
+                    });
+                    applyFilters();
+                    status.textContent = `${ALL_ROWS.length} verdicts · ${new Date().toLocaleTimeString()}`;
+                } catch (e) {
+                    status.textContent = "Fetch failed: " + e.message;
+                }
+            }
+
+            async function runVerdictScan() {
+                const status = document.getElementById("status");
+                status.textContent = "Executing LLM + Screener.in Verdict Scan…";
+                try {
+                    const r = await fetch("/api/investment/scan/run", { method: "POST" });
+                    const d = await r.json();
+                    if (d.error) {
+                        status.textContent = "Scan Error: " + d.error;
+                    } else {
+                        status.textContent = `Scan Complete! (${d.verdicts || 0} verdicts generated)`;
+                        await refresh();
+                    }
+                } catch (e) {
+                    status.textContent = "Scan failed: " + e.message;
+                }
+            }
+
+            function applyFilters() {
+                const q = document.getElementById("search").value.trim().toUpperCase();
+                const vf = document.getElementById("verdict-filter").value;
+                const cf = document.getElementById("conf-filter").value;
+                const body = document.getElementById("verdicts-body");
+                const rows = ALL_ROWS.filter(v =>
+                    (!q || (v.symbol || "").toUpperCase().includes(q)) &&
+                    (!vf || v.verdict === vf) &&
+                    (!cf || v.confidence === cf)
+                );
+                body.innerHTML = rows.map(v => {
+                    const ratio = (v.rationale || "").replace(/</g, "&lt;");
+                    const trunc = ratio.length > 120 ? ratio.slice(0, 120) + "…" : ratio;
+                    const news = (v.news_event || "").replace(/</g, "&lt;");
+                    const newsTrunc = news.length > 80 ? news.slice(0, 80) + "…" : news;
+                    const sentClass = (v.sentiment_direction || "NEUTRAL") === "POSITIVE" ? "conf HIGH"
+                                    : (v.sentiment_direction || "NEUTRAL") === "NEGATIVE" ? "conf LOW"
+                                    : "conf MEDIUM";
+                    const sentLabel = (v.sentiment_direction || "NEUTRAL").charAt(0) + (v.sentiment_direction || "NEUTRAL").slice(1).toLowerCase();
+                    const evtType = (v.event_type || "general").charAt(0).toUpperCase() + (v.event_type || "general").slice(1);
+                    return `<tr>
+                        <td><span class="scan-pill" onclick="viewScan('${v.scan_id}')" title="${v.scan_id}">${v.scan_id.slice(0,8)}</span></td>
+                        <td class="mono">${formatTime(v.scan_ts)}</td>
+                        <td class="mono" style="font-weight:700">${v.symbol || ""}</td>
+                        <td style="font-size:0.82rem;max-width:140px">${v.company_name || '—'}</td>
+                        <td class="rationale-cell" onclick="toggleRationale(this)" style="max-width:350px">
+                            <span class="trunc">${newsTrunc || '—'}</span>
+                            <span class="full">${news || '—'}</span>
+                        </td>
+                        <td style="font-size:0.78rem">${evtType}</td>
+                        <td class="${sentClass}" style="font-size:0.78rem">${sentLabel}</td>
+                        <td><span class="badge ${v.verdict || ''}">${v.verdict || ''}</span></td>
+                        <td class="conf ${v.confidence || ''}">${v.confidence || ''}</td>
+                        <td class="rationale-cell" onclick="toggleRationale(this)">
+                            <span class="trunc">${trunc || '—'}</span>
+                            <span class="full">${ratio || '—'}</span>
+                        </td>
+                        <td class="mono" style="font-size:0.75rem; white-space:nowrap; line-height:1.4;">
+                            <div style="color:var(--text-primary)">Entry: ${v.entry_zone || '—'}</div>
+                            <div style="color:#ef4444">SL: ${v.stop_loss || '—'}</div>
+                            <div style="color:#22c55e">Tgt: ${v.target || '—'}</div>
+                        </td>
+                    </tr>`;
+                }).join("");
+                document.getElementById("empty-msg").style.display = ALL_ROWS.length ? "none" : "block";
+            }
+
+            function toggleRationale(el) { el.classList.toggle("open"); }
+
+            function formatTime(ts) {
+                if (!ts) return "—";
+                try {
+                    let s = String(ts).trim();
+                    if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}/.test(s) && !s.includes("Z") && !s.includes("+") && !s.includes("-0")) {
+                        s += "Z";
+                    }
+                    let d = new Date(s);
+                    if (isNaN(d.getTime())) return ts;
+                    return d.toLocaleString(undefined, {
+                        month: 'numeric', day: 'numeric', year: 'numeric',
+                        hour: '2-digit', minute: '2-digit', second: '2-digit',
+                        hour12: true
+                    });
+                } catch (e) { return ts; }
+            }
+
+            function viewScan(scanId) {
+                window.open("/api/investment/verdicts/" + scanId, "_blank");
+            }
+
+            async function loadFeed(isLive = false) {
+                const status = document.getElementById("feed-status");
+                const feedContainer = document.getElementById("tweets-feed");
+                const countBadge = document.getElementById("feed-count-badge");
+                if (isLive) status.textContent = "Scraping X / Telegram live…";
+
+                try {
+                    const url = "/api/investment/tweets?limit=30" + (isLive ? "&live=true" : "");
+                    const r = await fetch(url);
+                    const d = await r.json();
+                    if (d.error) {
+                        status.textContent = "Error: " + d.error;
+                        return;
+                    }
+                    const msgs = d.messages || [];
+                    countBadge.textContent = `${msgs.length} Live Messages`;
+                    status.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+
+                    if (!msgs.length) {
+                        feedContainer.innerHTML = '<div class="empty">No raw messages fetched yet. Click "⚡ Scrape Live Tweets Now" above.</div>';
+                        return;
+                    }
+
+                    feedContainer.innerHTML = msgs.map(m => {
+                        const isTwitter = (m.platform || "twitter").toLowerCase() === "twitter";
+                        const platformClass = isTwitter ? "twitter" : "telegram";
+                        const platformIcon = isTwitter ? "𝕏" : "✈️";
+                        const channelHandle = m.channel.startsWith("@") ? m.channel : "@" + m.channel;
+                        const txt = (m.text || "").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+                        const msgTime = formatTime(m.date_str || m.fetched_at);
+                        return `<div class="feed-card">
+                            <div class="feed-meta">
+                                <div>
+                                    <span class="platform-tag ${platformClass}">${platformIcon} ${m.platform || 'X'}</span>
+                                    <strong style="color:var(--text-primary); margin-left:6px; font-size:0.82rem">${channelHandle}</strong>
+                                </div>
+                                <span class="feed-time">${msgTime}</span>
+                            </div>
+                            <div class="feed-text">${txt}</div>
+                        </div>`;
+                    }).join("");
+                } catch (e) {
+                    status.textContent = "Feed load failed: " + e.message;
+                }
+            }
+
+            async function init() {
+                await loadSummary();
+                await refresh();
+                await loadFeed();
+                const health = await fetch("/api/investment/health").then(r => r.json()).catch(() => ({}));
+                if (health.auto_refresh_seconds) AUTO_REFRESH_MS = health.auto_refresh_seconds * 1000;
+                setInterval(() => { refresh(); loadFeed(); }, AUTO_REFRESH_MS);
+            }
+
+            init();
+        </script>
+    </body>
+</html>

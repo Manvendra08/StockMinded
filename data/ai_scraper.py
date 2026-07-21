@@ -180,6 +180,26 @@ def _get_ai_config() -> Optional[dict]:
         if nvidia_api_key:
             nvidia_api_key = nvidia_api_key.strip().strip("'").strip('"')
 
+        github_api_key = cfg.get("github_api_key")
+        if (
+            isinstance(github_api_key, str)
+            and github_api_key.startswith("${")
+            and github_api_key.endswith("}")
+        ):
+            github_api_key = os.getenv(github_api_key[2:-1])
+        if github_api_key:
+            github_api_key = github_api_key.strip().strip("'").strip('"')
+
+        hf_api_key = cfg.get("hf_api_key")
+        if (
+            isinstance(hf_api_key, str)
+            and hf_api_key.startswith("${")
+            and hf_api_key.endswith("}")
+        ):
+            hf_api_key = os.getenv(hf_api_key[2:-1])
+        if hf_api_key:
+            hf_api_key = hf_api_key.strip().strip("'").strip('"')
+
         # Self-healing Fallback:
         # If the user accidentally set GOOGLE_API_KEY to their ScrapeGraphAI key (starts with 'sgai-')
         # we route it to saas_api_key and clear api_key so the local Gemini LLM doesn't get initialized with it.
@@ -206,6 +226,8 @@ def _get_ai_config() -> Optional[dict]:
             else None,
             "saas_api_key": saas_api_key,
             "groq_api_key": groq_api_key,
+            "github_api_key": github_api_key,
+            "hf_api_key": hf_api_key,
             "openrouter_api_key": openrouter_api_key,
             "sambanova_api_key": sambanova_api_key,
             "opencode_api_key": opencode_api_key,
@@ -395,8 +417,17 @@ def _call_chat_completion(
 
 
 def _print_llm(msg: str) -> None:
-    """Print LLM activity to terminal (always visible regardless of log level)."""
-    print(f"[LLM] {msg}", flush=True)
+    """Print LLM activity to terminal with color and timestamp."""
+    from core.log import llm_log
+    low = msg.lower()
+    if "ok:" in low or low.startswith("ok"):
+        llm_log(msg, level="ok")
+    elif "failed" in low or "error" in low or "ssl" in low or "exhausted" in low:
+        llm_log(msg, level="error")
+    elif "marking dead" in low:
+        llm_log(msg, level="warn")
+    else:
+        llm_log(msg, level="info")
 
 
 def call_llm(
@@ -407,7 +438,7 @@ def call_llm(
     return_provider: bool = False,
 ) -> Any:
     """Universal LLM call with fallback:
-    Groq 70b -> GitHub Models -> Nvidia NIM -> Cloudflare -> Groq 8b -> Gemini -> Bedrock -> OpenCode Zen."""
+    HuggingFace -> Groq 70b -> GitHub Models -> Nvidia NIM -> Cloudflare -> Groq 8b -> Gemini -> Bedrock -> OpenCode Zen."""
     config = _get_ai_config()
     if not config:
         return (None, "None") if return_provider else None
@@ -418,12 +449,78 @@ def call_llm(
         dead_until = _dead_providers.get(provider)
         return bool(dead_until and time.time() < dead_until)
 
-    # ── #0. Groq 70b (PRIMARY) ──────────────────────────────────────────
+    # ── #0. HuggingFace (PRIMARY — free tier, 1000 req/day) ────────────────
+    if not is_dead("huggingface") and config.get("hf_api_key"):
+        session, backend = _create_curl_cffi_llm_session()
+        _HF_MODELS = [
+            "Qwen/Qwen2.5-7B-Instruct",
+            "meta-llama/Meta-Llama-3.1-8B-Instruct",
+            "mistralai/Mistral-7B-Instruct-v0.3",
+        ]
+        _HF_BASE = os.getenv("HF_API_BASE", "https://router.huggingface.co")
+        for hf_model in _HF_MODELS:
+            try:
+                _print_llm(f"#0 trying {hf_model} [HuggingFace] (backend={backend})")
+                logger.info("LLM #0: %s [provider=HuggingFace]", hf_model)
+                url = f"{_HF_BASE}/v1/chat/completions"
+                headers = {
+                    "Authorization": f"Bearer {config['hf_api_key']}",
+                    "Content-Type": "application/json",
+                }
+                payload = {
+                    "model": hf_model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "max_tokens": max_tokens or 2048,
+                    "temperature": 0.3,
+                }
+                if json_mode:
+                    payload["response_format"] = {"type": "json_object"}
+                resp = session.post(url, headers=headers, json=payload, timeout=30)
+                resp.raise_for_status()
+                text = resp.json()["choices"][0]["message"]["content"]
+                res_val = json.loads(text) if json_mode else text
+                _print_llm(f"#0 OK: {hf_model} [HuggingFace] (backend={backend})")
+                logger.info("LLM success: %s [HuggingFace] (backend=%s)", hf_model, backend)
+                _log_llm_call(f"HuggingFace ({hf_model})", resp, prompt=prompt, output=text)
+                return (res_val, f"HuggingFace ({hf_model})") if return_provider else res_val
+            except Exception as e:
+                if _is_ssl_transport_error(e) or "TLS" in str(e):
+                    _dead_providers["huggingface"] = time.time() + _DEAD_PROVIDER_TTL
+                    _print_llm(f"#0 SSL/TLS error on {hf_model}; marking dead. Trying Groq 70b.")
+                    logger.warning("HuggingFace %s SSL error; marking dead. Trying Groq 70b.", hf_model)
+                    break
+                elif _is_http_error(e):
+                    status = _get_http_status(e)
+                    if status in (401, 403):
+                        _dead_providers["huggingface"] = time.time() + _DEAD_PROVIDER_TTL
+                        _print_llm(f"#0 HTTP {status} on {hf_model}; marking dead (check HF_API_TOKEN). Trying Groq 70b.")
+                        logger.warning("HuggingFace %s HTTP %s; marking dead. Trying Groq 70b.", hf_model, status)
+                        break
+                    elif status in (429, 500, 502, 503):
+                        _dead_providers["huggingface"] = time.time() + _DEAD_PROVIDER_TTL
+                        _print_llm(f"#0 HTTP {status} on {hf_model}; marking dead. Trying Groq 70b.")
+                        logger.warning("HuggingFace %s HTTP %s; marking dead %ss. Trying Groq 70b.", hf_model, status, _DEAD_PROVIDER_TTL)
+                        break
+                    else:
+                        _print_llm(f"#0 failed on {hf_model}: {e}. Trying next HF model.")
+                        logger.warning("HuggingFace %s failed: %s. Trying next model.", hf_model, e)
+                        continue
+                else:
+                    _print_llm(f"#0 failed on {hf_model}: {e}. Trying next HF model.")
+                    logger.warning("HuggingFace %s failed: %s. Trying next model.", hf_model, e)
+                    continue
+        _print_llm("#0 all HuggingFace models failed; marking dead. Trying Groq 70b.")
+        _dead_providers["huggingface"] = time.time() + _DEAD_PROVIDER_TTL
+
+    # ── #1. Groq 70b ──────────────────────────────────────────────────────
     if not is_dead("groq_70b") and config.get("groq_api_key"):
         session, backend = _create_curl_cffi_llm_session()
         try:
-            _print_llm(f"#0 trying llama-3.3-70b-versatile [Groq] (backend={backend})")
-            logger.info("LLM #0: llama-3.3-70b-versatile [provider=Groq]")
+            _print_llm(f"#1 trying llama-3.3-70b-versatile [Groq] (backend={backend})")
+            logger.info("LLM #1: llama-3.3-70b-versatile [provider=Groq]")
             url = "https://api.groq.com/openai/v1/chat/completions"
             headers = {
                 "Authorization": f"Bearer {config['groq_api_key']}",
@@ -442,23 +539,23 @@ def call_llm(
             resp.raise_for_status()
             text = resp.json()["choices"][0]["message"]["content"]
             res_val = json.loads(text) if json_mode else text
-            _print_llm(f"#0 OK: llama-3.3-70b-versatile [Groq] (backend={backend})")
+            _print_llm(f"#1 OK: llama-3.3-70b-versatile [Groq] (backend={backend})")
             logger.info("LLM success: llama-3.3-70b-versatile [Groq] (backend=%s)", backend)
             _log_llm_call("Groq (llama-3.3-70b-versatile)", resp, prompt=prompt, output=text)
             return (res_val, "Groq (llama-3.3-70b-versatile)") if return_provider else res_val
         except Exception as e:
             if _is_ssl_transport_error(e):
                 _dead_providers["groq_70b"] = time.time() + _DEAD_PROVIDER_TTL
-                _print_llm("#0 SSL error; marking dead. Trying GitHub Models.")
+                _print_llm("#1 SSL error; marking dead. Trying GitHub Models.")
                 logger.warning("Groq 70b SSL error; marking dead. Trying GitHub Models.")
             elif _is_http_error(e):
                 status = _get_http_status(e)
                 if status in (429, 500, 502, 503):
                     _dead_providers["groq_70b"] = time.time() + _DEAD_PROVIDER_TTL
-                    _print_llm(f"#0 HTTP {status}; marking dead. Trying GitHub Models.")
+                    _print_llm(f"#1 HTTP {status}; marking dead. Trying GitHub Models.")
                     logger.warning("Groq 70b HTTP %s; marking dead %ss. Trying GitHub Models.", status, _DEAD_PROVIDER_TTL)
                 else:
-                    _print_llm(f"#0 failed: {e}. Trying GitHub Models.")
+                    _print_llm(f"#1 failed: {e}. Trying GitHub Models.")
                     logger.warning("Groq 70b failed: %s. Trying GitHub Models.", e)
             else:
                 _print_llm(f"#0 failed: {e}. Trying GitHub Models.")

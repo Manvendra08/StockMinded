@@ -1,1 +1,0 @@
-print(open(".env").read())

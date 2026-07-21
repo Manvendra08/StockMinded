@@ -27,6 +27,9 @@ load_dotenv(PROJECT_ROOT / ".env")
 
 import logging
 
+from core.log import setup_logging
+setup_logging()
+
 # Suppress noisy external warnings
 logging.getLogger("src.intelligence.ml_predictor").setLevel(logging.ERROR)
 logging.getLogger("urllib3.connectionpool").setLevel(logging.ERROR)
@@ -3652,6 +3655,135 @@ def trigger_refresh_weights():
     except Exception as e:
         logging.getLogger(__name__).exception("Failed to force refresh weights: %s", e)
         return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route("/api/investment/verdicts")
+def api_investment_verdicts():
+    """Return recent scans with all verdicts (plan §5.2)."""
+    try:
+        cfg = load_config()
+        inv = cfg.get("investment_dashboard", {})
+        limit = int(request.args.get("limit", inv.get("max_history_scans", 50)))
+        journal = Journal(cfg["paths"]["journal_db"])
+        scans = journal.get_investment_scans(limit=limit)
+        journal.close()
+        return jsonify({"scans": scans})
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/investment/verdicts/<scan_id>")
+def api_investment_scan(scan_id: str):
+    try:
+        cfg = load_config()
+        journal = Journal(cfg["paths"]["journal_db"])
+        scan = journal.get_investment_scan(scan_id)
+        journal.close()
+        if scan is None:
+            return jsonify({"error": "scan not found"}), 404
+        return jsonify(scan)
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/investment/summary")
+def api_investment_summary():
+    try:
+        cfg = load_config()
+        journal = Journal(cfg["paths"]["journal_db"])
+        summary = journal.get_investment_summary()
+        journal.close()
+        return jsonify(summary)
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/investment/health")
+def api_investment_health():
+    """Lightweight healthcheck for the investment module."""
+    return jsonify({
+        "status": "ok",
+        "enabled": load_config().get("investment_dashboard", {}).get("enabled", False),
+    })
+
+
+@app.route("/api/investment/scan/run", methods=["POST", "GET"])
+def api_investment_scan_run():
+    """Execute a live Verdict Scan pass in a background thread."""
+    try:
+        from main import run_telegram_pipeline
+        import threading
+        cfg = load_config()
+
+        def run_task():
+            try:
+                run_telegram_pipeline(cfg, dry_run=False)
+            except Exception as e:
+                logging.getLogger(__name__).error(f"Background verdict scan failed: {e}")
+
+        t = threading.Thread(target=run_task)
+        t.daemon = True
+        t.start()
+
+        return jsonify({"status": "started", "message": "Scan started in background. Refresh in a few seconds."})
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/investment/raw-messages")
+@app.route("/api/investment/tweets")
+def api_investment_raw_messages():
+    """Return raw fetched messages/tweets from channels."""
+    try:
+        cfg = load_config()
+        limit = int(request.args.get("limit", 50))
+        channel = request.args.get("channel", None)
+        live = request.args.get("live", "").lower() in ("true", "1")
+        journal = Journal(cfg["paths"]["journal_db"])
+
+        if live:
+            from data.telegram_fetcher import fetch_all_channels
+            from ops.telegram_state import TelegramState
+            tp_cfg = cfg.get("telegram_pipeline", {})
+            state = TelegramState(cfg["paths"]["journal_db"])
+            channels_to_reset = [channel] if channel else [ch.get("name") or ch.get("username") for ch in tp_cfg.get("channels", [])]
+            for ch_name in channels_to_reset:
+                if ch_name:
+                    state.set_last_msg_id(ch_name, 0)
+            msgs = fetch_all_channels(tp_cfg, state, limit=limit)
+            platform_map = {ch.get("username"): ch.get("platform", "telegram") for ch in tp_cfg.get("channels", [])}
+            journal.log_raw_messages(msgs, platform_map)
+
+        messages = journal.get_raw_messages(limit=limit, channel=channel)
+
+        if not messages and not live:
+            from data.telegram_fetcher import fetch_all_channels
+            from ops.telegram_state import TelegramState
+            tp_cfg = cfg.get("telegram_pipeline", {})
+            state = TelegramState(cfg["paths"]["journal_db"])
+            channels_to_reset = [channel] if channel else [ch.get("name") or ch.get("username") for ch in tp_cfg.get("channels", [])]
+            for ch_name in channels_to_reset:
+                if ch_name:
+                    state.set_last_msg_id(ch_name, 0)
+            msgs = fetch_all_channels(tp_cfg, state, limit=limit)
+            platform_map = {ch.get("username"): ch.get("platform", "telegram") for ch in tp_cfg.get("channels", [])}
+            journal.log_raw_messages(msgs, platform_map)
+            messages = journal.get_raw_messages(limit=limit, channel=channel)
+
+        journal.close()
+        return jsonify({"messages": messages, "count": len(messages)})
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/investment")
+def investment_page():
+    # Serve the Investment verdicts dashboard (additive page).
+    return send_from_directory(str(Path(__file__).parent), "investment.html")
 
 
 @app.route("/api/health")

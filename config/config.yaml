@@ -96,6 +96,7 @@ data_sources:
     model: "google_genai/gemini-2.5-flash-lite"
     model_tokens: 8192
     api_key: "${GOOGLE_API_KEY}"
+    hf_api_key: "${HF_API_TOKEN}"
     bedrock_api_key: "${BEDROCK_API_KEY}"
     groq_api_key: "${GROQ_API_KEY}"
     openrouter_api_key: "${OPENROUTER_API_KEY}"
@@ -263,3 +264,58 @@ timing_engine:
     min_trades_for_analysis: 20
     correlation_threshold: 0.6
     output_dir: "./data/backtest"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Dual-Engine Telegram → LLM → Screener → Verdict Pipeline
+# (Additive module. Disabled by default; does not affect existing engines.)
+# ─────────────────────────────────────────────────────────────────────────────
+telegram_pipeline:
+  enabled: true  # master switch — set true to activate
+  # No credentials required: uses the public Telegram Web Preview
+  # (https://t.me/s/{username}) — zero auth, no phone, no API key.
+  channels:
+    - name: "redbox_global"
+      username: "Indiaredboxglobal"  # @Indiaredboxglobal Telegram channel
+      enabled: true
+    - name: "nabor_tips"
+      username: "naborstocktips"  # F&O calls, text-based
+      enabled: true
+    - name: "stock_ideas"
+      username: "StockMarketTradingIdeas"  # Intraday + FNO
+      enabled: true
+    - name: "options_signals"
+      username: "OptionsTradingSignals"  # Options-focused
+      enabled: true
+  max_messages_per_run: 100
+  parser:
+    model: "llama-3.3-70b-versatile"  # via call_llm()
+    temperature: 0.1
+    max_tokens: 1024
+  screener:
+    enabled: true
+    cache_ttl_hours: 24
+    rate_limit_delay: 2.0  # seconds between requests
+  fusion:
+    model: "llama-3.3-70b-versatile"
+    temperature: 0.3
+    max_tokens: 2048
+    # Moderate profile (plan §2.4). Margin compression auto-reject is on.
+    hard_filters:
+      max_debt_to_equity: 0.75          # skipped for Banking/Financial/NBFC
+      min_roce_pct: 15
+      max_promoter_pledge_pct: 5
+      min_sales_growth_3y_pct: 10
+      min_profit_growth_3y_pct: 10
+      min_qtr_sales_var_pct: 10
+      min_qtr_profit_var_pct: 0
+      margin_compression_reject: true   # Qtr Profit < 0.85x Qtr Sales -> AVOID
+    universe_filter: false  # only keep tickers present in load_universe()
+  # Localhost-only: alerts are displayed on the Investment dashboard page.
+  # No outbound Telegram alerts are sent (no bot token required).
+  alerts:
+    min_confidence: "MEDIUM"  # only surface MEDIUM/HIGH on the dashboard
+
+investment_dashboard:
+  enabled: true  # UI link hidden when false
+  max_history_scans: 50  # retain last N scans
+  auto_refresh_seconds: 300  # UI poll interval
