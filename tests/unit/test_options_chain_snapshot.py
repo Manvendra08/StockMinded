@@ -35,4 +35,4 @@ def test_chain_snapshot_resolves_underlying_price_keys() -> None:
         # Verify 24500 CE LTP is filled with a non-zero synthetic premium
         ce_row_24500 = df[df["strike"] == 24500.0].iloc[0]
         assert ce_row_24500["ce_ltp"] > 0.0
-        assert ce_row_24500["ce_synthetic"] is True
+        assert bool(ce_row_24500["ce_synthetic"]) is True

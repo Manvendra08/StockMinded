@@ -37,6 +37,15 @@ IST = timezone(timedelta(hours=5, minutes=30))
 
 _API_BASE = "https://api.shoonya.com/NorenWClientAPI"
 _TOKEN_URL = "https://api.shoonya.com/NorenWClientAPI/GenAcsTok"
+_SHOONYA_LOGIN_FAILURE_TS = 0.0
+
+
+def _is_session_expired_response(response: dict | None) -> bool:
+    if not response or not isinstance(response, dict):
+        return False
+    emsg = str(response.get("emsg") or "")
+    return response.get("stat") == "Not_Ok" and "Session Expired" in emsg
+
 
 _INDEX_SPOT_NAMES = {
     "NIFTY": "Nifty 50",
@@ -530,10 +539,7 @@ class ShoonyaFetcher:
                 self._token_created_at = time.time()
                 self._save_token()
 
-        is_expired = False
-        if res and isinstance(res, dict):
-            if res.get("stat") == "Not_Ok" and "Session Expired" in res.get("emsg", ""):
-                is_expired = True
+        is_expired = _is_session_expired_response(res)
 
         if is_expired:
             log.warning(
@@ -559,9 +565,7 @@ class ShoonyaFetcher:
                             self._token_created_at = time.time()
                             self._save_token()
                         return res
-                    is_expired = res.get(
-                        "stat"
-                    ) == "Not_Ok" and "Session Expired" in res.get("emsg", "")
+                    is_expired = _is_session_expired_response(res)
 
             if is_expired:
                 log.warning(
@@ -573,7 +577,11 @@ class ShoonyaFetcher:
                         "[shoonya] Retrying API call to %s after re-authentication...",
                         endpoint,
                     )
-                    if self.login():
+                    login_ok = self.login(force=True)
+                    if not login_ok:
+                        global _SHOONYA_LOGIN_FAILURE_TS
+                        _SHOONYA_LOGIN_FAILURE_TS = time.time()
+                    if login_ok:
                         # ═══════════════════════════════════════════════════════
                         # FIX: Extract rotated token from retry response too.
                         # Without this, the new token from the retry call would be
@@ -583,7 +591,6 @@ class ShoonyaFetcher:
                         res = _post_jdata(
                             f"{_API_BASE}/{endpoint}", payload, self.access_token
                         )
-                        self._increment_and_save_call_count()
                         if res and isinstance(res, dict) and res.get("stat") == "Ok":
                             fresh_token = res.get("susertoken") or res.get(
                                 "access_token"
@@ -1451,11 +1458,23 @@ class ShoonyaFetcher:
                     except (ValueError, TypeError):
                         return None
 
+                parsed_ltp = _fq("lp") or 0.0
+                if parsed_ltp > 0 and underlying_price > 0:
+                    intrinsic = (underlying_price - strike) if ot == "CE" else (strike - underlying_price)
+                    intrinsic = max(0.0, intrinsic)
+                    max_allowed = intrinsic + (0.15 * underlying_price)
+                    if parsed_ltp > max_allowed:
+                        log.warning(
+                            "[shoonya] Rejecting corrupt option LTP %.2f for %s %s strike %.1f (underlying %.2f, max allowed %.2f)",
+                            parsed_ltp, base, ot, strike, underlying_price, max_allowed,
+                        )
+                        parsed_ltp = 0.0
+
                 strikes.append(
                     {
                         "strike": strike,
                         "option_type": ot,
-                        "ltp": _fq("lp") or 0.0,
+                        "ltp": parsed_ltp,
                         "oi": _iq("oi") or 0,
                         "oi_change": _iq("oichg") or 0,
                         "volume": _iq("v") or 0,

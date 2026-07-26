@@ -25,11 +25,12 @@ def test_refresh_weights_calculations() -> None:
     mock_tickers = MagicMock()
     mock_tickers.tickers = {f"{s}.NS": mock_ticker for s in index_weightage.FREE_FLOAT_FACTORS.keys()}
 
+    from unittest.mock import mock_open
     # Mock open and json.dump to avoid writing files in unit tests
     with patch("yfinance.Tickers", return_value=mock_tickers), \
          patch("signals.index_weightage.load_index_weights_state", return_value={"last_refresh": None, "weights": {}}), \
          patch("os.makedirs"), \
-         patch("builtins.open", patch("builtins.open")), \
+         patch("builtins.open", mock_open()), \
          patch("json.dump") as mock_dump:
         
         res = index_weightage.refresh_weights_if_needed(force=True)

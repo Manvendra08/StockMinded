@@ -44,6 +44,16 @@ MAP: dict[Regime, StructurePlan] = {
         secondary="Ratio spreads if directional bias clear.",
         notes="Great for income. Watch for sudden expansion — gamma risk.",
     ),
+    Regime.TREND_EMERGING_UP: StructurePlan(
+        primary="Early positional Long futures/stock on emerging leaders; Bull Call Spread Nifty.",
+        secondary="Debit call spreads on breaking-out stocks.",
+        notes="Scale in with 0.75x position sizing as trend emerges.",
+    ),
+    Regime.TREND_EMERGING_DOWN: StructurePlan(
+        primary="Early positional Bear Put Spread Nifty/BankNifty; short futures on emerging laggards.",
+        secondary="Put debit spreads on breakdown stocks.",
+        notes="Scale in with 0.75x position sizing as breakdown confirms.",
+    ),
 }
 
 

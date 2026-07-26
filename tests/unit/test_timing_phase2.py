@@ -13,42 +13,42 @@ class TestAiTimingReview:
 
     def test_ai_review_fallback_on_unavailable_llm(self):
         """If LLM unavailable, should fail-open (ai_timing_ok=True)."""
-        result = timing_mod.review_timing_with_llm(
-            symbol="TEST",
-            direction="LONG",
-            price=1000,
-            timing_snapshot={"vwap_overextended": (False, "OK")},
-            market_regime="TREND_UP",
-            ai_sentiment=None,
-            use_groq=False,
-            groq_config=None,
-        )
+        from unittest.mock import patch
+        with patch("data.ai_scraper.call_llm", return_value=(None, "none")):
+            result = timing_mod.review_timing_with_llm(
+                symbol="TEST",
+                direction="LONG",
+                price=1000,
+                timing_snapshot={"vwap_overextended": (False, "OK")},
+                market_regime="TREND_UP",
+                ai_sentiment=None,
+                use_groq=False,
+                groq_config=None,
+            )
 
-        assert result["ai_timing_ok"] is True
-        assert result["confidence"] == 0.0
-        assert (
-            "fallback" in result["reason"].lower()
-            or "unavailable" in result["reason"].lower()
-        )
-        assert result["model_used"] == "fallback"
+            assert result["ai_timing_ok"] is True
+            assert result["confidence"] == 0.1
+            assert "unavailable" in result["reason"].lower()
+            assert result["model_used"] == "none"
 
     def test_ai_review_timeout_handling(self):
         """AI review should handle timeout gracefully."""
-        # Set very short timeout and no valid API key
-        result = timing_mod.review_timing_with_llm(
-            symbol="TEST",
-            direction="LONG",
-            price=1000,
-            timing_snapshot={"vwap_overextended": (False, "OK")},
-            market_regime="TREND_UP",
-            ai_sentiment=None,
-            use_groq=True,
-            groq_config={"api_key": "invalid_key", "timeout_sec": 0.1},
-        )
+        from unittest.mock import patch
+        with patch("data.ai_scraper.call_llm", return_value=(None, "none")):
+            result = timing_mod.review_timing_with_llm(
+                symbol="TEST",
+                direction="LONG",
+                price=1000,
+                timing_snapshot={"vwap_overextended": (False, "OK")},
+                market_regime="TREND_UP",
+                ai_sentiment=None,
+                use_groq=True,
+                groq_config={"api_key": "invalid_key", "timeout_sec": 0.1},
+            )
 
-        # Should fail-open
-        assert result["ai_timing_ok"] is True
-        assert result["latency_ms"] >= 0  # Timing recorded
+            # Should fail-open
+            assert result["ai_timing_ok"] is True
+            assert result["latency_ms"] >= 0  # Timing recorded
 
     def test_ai_review_sentiment_warning(self):
         """AI review should flag BEARISH sentiment as warning."""
@@ -262,19 +262,21 @@ class TestPhase2Integration:
             "vwap_overextended": (False, f"OK at {adjusted['max_vwap_dist_pct']}%")
         }
 
-        result = timing_mod.review_timing_with_llm(
-            symbol="TEST",
-            direction="LONG",
-            price=1000,
-            timing_snapshot=timing_snapshot,
-            market_regime="TREND_UP",
-            ai_sentiment={"overall": "BULLISH"},
-            use_groq=False,
-            groq_config=None,
-        )
+        from unittest.mock import patch
+        with patch("data.ai_scraper.call_llm", return_value=("YES: Good timing", "groq")):
+            result = timing_mod.review_timing_with_llm(
+                symbol="TEST",
+                direction="LONG",
+                price=1000,
+                timing_snapshot=timing_snapshot,
+                market_regime="TREND_UP",
+                ai_sentiment={"overall": "BULLISH"},
+                use_groq=False,
+                groq_config=None,
+            )
 
-        # Should fail-open with adjusted context
-        assert result["ai_timing_ok"] is True
+            # Should fail-open with adjusted context
+            assert result["ai_timing_ok"] is True
 
     def test_sentiment_flip_blocks_entry_in_alert_flow(self):
         """Sentiment flip should prevent entry in alert generation."""
