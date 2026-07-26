@@ -14,9 +14,10 @@ from dashboard.server import _generate_trade_alerts
 
 @pytest.fixture(autouse=True)
 def mock_market_hours_time():
-    """Mock datetime and weighted momentum in dashboard.server to avoid live market data calls in unit tests."""
+    """Mock datetime, weighted momentum, and expiry check in dashboard.server to avoid live data calls in unit tests."""
     with patch("dashboard.server.datetime") as mock_dt, \
-         patch("signals.index_weightage.calculate_weighted_momentum", return_value={"weighted_momentum": 0.5}):
+         patch("signals.index_weightage.calculate_weighted_momentum", return_value={"weighted_momentum": 0.5}), \
+         patch("signals.options.is_symbol_expiry_today", return_value=False):
         market_time = datetime(2026, 5, 19, 10, 0, tzinfo=timezone(timedelta(hours=5, minutes=30)))
         mock_dt.now.return_value = market_time
         mock_dt.side_effect = lambda *args, **kw: datetime(*args, **kw) if args else market_time
