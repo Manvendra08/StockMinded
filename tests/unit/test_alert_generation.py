@@ -28,6 +28,7 @@ def mock_market_hours_time():
 def base_data():
     """Base signal data for testing."""
     return {
+        "iv_rank": 50.0,
         "regime": {
             "name": "TREND_UP",
             "trend_score": 4,
@@ -35,6 +36,7 @@ def base_data():
             "vix_5d_change_pct": -3.0,
             "adx": 27.0,
             "breadth_pct_above_50dma": 72.0,
+            "iv_rank": 50.0,
         },
         "flows": {
             "fii_dii_5d": {"fii": 1200.0, "dii": 500.0},
