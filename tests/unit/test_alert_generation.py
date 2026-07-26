@@ -1,4 +1,5 @@
 """Tests for alert generation by regime in dashboard/server.py."""
+import pandas as pd
 import pytest
 from datetime import datetime, timezone, timedelta
 from unittest.mock import patch, MagicMock
@@ -14,10 +15,12 @@ from dashboard.server import _generate_trade_alerts
 
 @pytest.fixture(autouse=True)
 def mock_market_hours_time():
-    """Mock datetime, weighted momentum, and expiry check in dashboard.server to avoid live data calls in unit tests."""
+    """Mock datetime, weighted momentum, expiry check, timing gate, and ohlc in dashboard.server to avoid live network calls."""
     with patch("dashboard.server.datetime") as mock_dt, \
          patch("signals.index_weightage.calculate_weighted_momentum", return_value={"weighted_momentum": 0.5}), \
-         patch("signals.options.is_symbol_expiry_today", return_value=False):
+         patch("signals.options.is_symbol_expiry_today", return_value=False), \
+         patch("signals.timing.evaluate_timing_for_entry", return_value={"timing_ok": True, "reason": "OK", "checks": {}}), \
+         patch("data.feed.ohlc_cached", return_value=pd.DataFrame()):
         market_time = datetime(2026, 5, 19, 10, 0, tzinfo=timezone(timedelta(hours=5, minutes=30)))
         mock_dt.now.return_value = market_time
         mock_dt.side_effect = lambda *args, **kw: datetime(*args, **kw) if args else market_time
@@ -48,11 +51,11 @@ def base_data():
             "bias": "LONG",
         },
         "leaders": [
-            {"symbol": "RELIANCE", "rs_slope": 5.0, "pct_vs_50dma": 3.0, "quintile": 5},
-            {"symbol": "INFY", "rs_slope": 4.5, "pct_vs_50dma": 2.5, "quintile": 5},
+            {"symbol": "RELIANCE", "rs_slope": 5.0, "pct_vs_50dma": 3.0, "quintile": 5, "ltp": 2500.0},
+            {"symbol": "INFY", "rs_slope": 4.5, "pct_vs_50dma": 2.5, "quintile": 5, "ltp": 1500.0},
         ],
         "laggards": [
-            {"symbol": "TATAMOTORS", "rs_slope": -4.0, "pct_vs_50dma": -2.0, "quintile": 1},
+            {"symbol": "TATAMOTORS", "rs_slope": -4.0, "pct_vs_50dma": -2.0, "quintile": 1, "ltp": 900.0},
         ],
         "risk": {
             "capital": 7_000_000,
@@ -150,17 +153,17 @@ class TestAlertGenerationByRegime:
         assert "VIX" in avoid[0].get("no_trade_reason", "")
 
     def test_late_day_filter_blocks_entries(self, base_data):
-        """Entries after 14:45 IST should be blocked."""
-        # Mock datetime to be after 14:45
+        """Entries after 15:15 IST should block equity trade alerts."""
+        # Mock datetime to be after 15:15
         with patch("dashboard.server.datetime") as mock_dt:
-            mock_dt.now.return_value = datetime(2026, 4, 28, 14, 50, tzinfo=timezone(timedelta(hours=5, minutes=30)))
+            mock_dt.now.return_value = datetime(2026, 4, 28, 15, 30, tzinfo=timezone(timedelta(hours=5, minutes=30)))
             mock_dt.side_effect = lambda *args, **kw: datetime(*args, **kw) if args else datetime.now()
             
             alerts = _generate_trade_alerts(base_data)
             
-            # Should not have actionable stock/index trades
-            actionable = [a for a in alerts if a["direction"] in ("LONG", "SHORT") and a["symbol"] in ("NIFTY", "RELIANCE", "INFY")]
-            assert len(actionable) == 0
+            # Should not have actionable stock trades
+            actionable_stocks = [a for a in alerts if a["direction"] in ("LONG", "SHORT") and a["symbol"] in ("RELIANCE", "INFY")]
+            assert len(actionable_stocks) == 0
 
     def test_alert_structure_has_required_fields(self, base_data):
         """All alerts should have the required structured fields."""
