@@ -16,6 +16,7 @@ dashboard/paper_trades.json
 .kilo/
 .planning/
 data/*.sqlite
+data/*.db
 *.jpg
 *.bak
 .minimax/

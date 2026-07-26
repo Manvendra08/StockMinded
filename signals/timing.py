@@ -369,6 +369,9 @@ def review_timing_with_llm(
     """
     LLM review of entry timing quality (Phase 2).
 
+    Uses the project's unified call_llm() provider chain:
+    HuggingFace -> Groq 70b -> GitHub Models -> Nvidia NIM -> Cloudflare -> Groq 8b -> Gemini -> Bedrock -> OpenCode Zen.
+
     Validates entry timing against market context using a language model.
     Provides AI-driven confidence in addition to Phase 1 technical checks.
 
@@ -379,8 +382,8 @@ def review_timing_with_llm(
         timing_snapshot: Dict from Phase 1 evaluate_timing_for_entry() checks
         market_regime: Detected regime (TREND_UP, RANGE_LOW_VOL, etc.)
         ai_sentiment: Current AI sentiment dict with overall/confidence/actionable_ideas
-        use_groq: Try Groq first (fast); fallback to Gemini if fails
-        groq_config: Config dict with api_key, model, timeout_sec
+        use_groq: Deprecated — kept for backward compat; provider chain is now automatic
+        groq_config: Deprecated — kept for backward compat; provider chain is now automatic
 
     Returns:
         {
@@ -388,7 +391,7 @@ def review_timing_with_llm(
             "confidence": float,   # 0.0–1.0 confidence in approval
             "reason": str,         # LLM explanation
             "sentiment_warning": bool,  # True if sentiment concern
-            "model_used": str,     # "groq" | "gemini" | "fallback"
+            "model_used": str,     # provider/model name
             "latency_ms": int      # API call duration
         }
 
@@ -443,139 +446,80 @@ def review_timing_with_llm(
     """
 
     try:
-        # Try Groq first if configured
-        if use_groq and groq_config:
-            try:
-                from groq import Groq
+        from data.ai_scraper import call_llm
 
-                client = Groq(
-                    api_key=groq_config.get("api_key")
-                    or __import__("os").getenv("GROQ_API_KEY")
-                )
-                timeout = groq_config.get("timeout_sec", 3)
+        resp, provider = call_llm(
+            prompt=prompt,
+            system_prompt="You are a professional Indian stock market strategist. Reply concisely: YES, MAYBE, or NO.",
+            json_mode=False,
+            max_tokens=100,
+            return_provider=True,
+        )
+        latency_ms = int((time.time() - start_time) * 1000)
 
-                message = client.chat.completions.create(
-                    model=groq_config.get("model", "mixtral-8x7b-32768"),
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=groq_config.get("temperature", 0.3),
-                    max_tokens=100,
-                    timeout=timeout,
-                )
+        if not resp:
+            logger.debug(f"[AI_REVIEW] {symbol}: LLM returned empty response")
+            return {
+                "ai_timing_ok": True,
+                "confidence": 0.1,
+                "reason": "LLM unavailable",
+                "sentiment_warning": False,
+                "model_used": "none",
+                "latency_ms": latency_ms,
+            }
 
-                response_text = message.choices[0].message.content.upper().strip()
-                latency_ms = int((time.time() - start_time) * 1000)
+        response_text = str(resp).upper().strip()
 
-                # Parse response - improved robust parsing
-                # Look for explicit YES/MAYBE/NO at start of response
-                ai_timing_ok = False
-                confidence = 0.1
-                
-                # Check first word or explicit phrases
-                first_word = response_text.split()[0] if response_text.split() else ""
-                if first_word in ("YES", "YES:", "YES."):
-                    ai_timing_ok = True
-                    confidence = 0.9
-                elif first_word in ("MAYBE", "MAYBE:", "MAYBE."):
-                    ai_timing_ok = False  # MAYBE = not approved
-                    confidence = 0.5
-                elif first_word in ("NO", "NO:", "NO."):
-                    ai_timing_ok = False
-                    confidence = 0.1
-                # Fallback: check if response contains explicit approval phrase
-                elif "TIMING IS SOUND" in response_text or "ENTRY APPROVED" in response_text:
-                    ai_timing_ok = True
-                    confidence = 0.85
-                elif "NOT RECOMMENDED" in response_text or "AVOID ENTRY" in response_text:
-                    ai_timing_ok = False
-                    confidence = 0.1
-                # Last resort: original substring match (with caution)
-                elif "YES" in response_text and "NOT YES" not in response_text:
-                    ai_timing_ok = True
-                    confidence = 0.7
-                    
-                sentiment_warning = (
-                    "BEARISH" in sentiment_desc or "FLIP" in response_text
-                )
+        # Parse response - improved robust parsing
+        ai_timing_ok = False
+        confidence = 0.1
 
-                logger.debug(
-                    f"[AI_REVIEW] {symbol} {direction}: Groq response ({latency_ms}ms) - {response_text[:50]}"
-                )
+        first_word = response_text.split()[0] if response_text.split() else ""
+        if first_word in ("YES", "YES:", "YES."):
+            ai_timing_ok = True
+            confidence = 0.9
+        elif first_word in ("MAYBE", "MAYBE:", "MAYBE."):
+            ai_timing_ok = False
+            confidence = 0.5
+        elif first_word in ("NO", "NO:", "NO."):
+            ai_timing_ok = False
+            confidence = 0.1
+        elif "TIMING IS SOUND" in response_text or "ENTRY APPROVED" in response_text:
+            ai_timing_ok = True
+            confidence = 0.85
+        elif "NOT RECOMMENDED" in response_text or "AVOID ENTRY" in response_text:
+            ai_timing_ok = False
+            confidence = 0.1
+        elif "YES" in response_text and "NOT YES" not in response_text:
+            ai_timing_ok = True
+            confidence = 0.7
 
-                return {
-                    "ai_timing_ok": ai_timing_ok,
-                    "confidence": confidence,
-                    "reason": response_text[:200],
-                    "sentiment_warning": sentiment_warning,
-                    "model_used": "groq",
-                    "latency_ms": latency_ms,
-                }
+        sentiment_warning = "BEARISH" in sentiment_desc or "FLIP" in response_text
 
-            except Exception as groq_err:
-                logger.debug(
-                    f"[AI_REVIEW] {symbol}: Groq failed ({groq_err}); trying Gemini"
-                )
-                # Fall through to Gemini
+        logger.debug(
+            f"[AI_REVIEW] {symbol} {direction}: {provider} response ({latency_ms}ms) - {response_text[:50]}"
+        )
 
-        # Fallback to Gemini
-        try:
-            import google.generativeai as genai
-
-            api_key = groq_config.get("gemini_api_key") if groq_config else None
-            if not api_key:
-                api_key = __import__("os").getenv("GOOGLE_API_KEY")
-
-            if api_key:
-                genai.configure(api_key=api_key)
-                model = genai.GenerativeModel("gemini-pro")
-                response = model.generate_content(
-                    prompt, generation_config={"max_output_tokens": 100}
-                )
-
-                response_text = response.text.upper().strip() if response.text else ""
-                latency_ms = int((time.time() - start_time) * 1000)
-
-                # Improved parsing (same logic as Groq)
-                ai_timing_ok = False
-                confidence = 0.15
-                first_word = response_text.split()[0] if response_text.split() else ""
-                if first_word in ("YES", "YES:", "YES."):
-                    ai_timing_ok = True
-                    confidence = 0.85
-                elif first_word in ("MAYBE", "MAYBE:", "MAYBE."):
-                    ai_timing_ok = False
-                    confidence = 0.45
-                elif first_word in ("NO", "NO:", "NO."):
-                    ai_timing_ok = False
-                    confidence = 0.15
-                elif "TIMING IS SOUND" in response_text or "ENTRY APPROVED" in response_text:
-                    ai_timing_ok = True
-                    confidence = 0.8
-                elif "NOT RECOMMENDED" in response_text or "AVOID ENTRY" in response_text:
-                    ai_timing_ok = False
-                    confidence = 0.15
-                elif "YES" in response_text and "NOT YES" not in response_text:
-                    ai_timing_ok = True
-                    confidence = 0.65
-                    
-                sentiment_warning = "BEARISH" in sentiment_desc
-
-                logger.debug(
-                    f"[AI_REVIEW] {symbol} {direction}: Gemini response ({latency_ms}ms) - {response_text[:50]}"
-                )
-
-                return {
-                    "ai_timing_ok": ai_timing_ok,
-                    "confidence": confidence,
-                    "reason": response_text[:200],
-                    "sentiment_warning": sentiment_warning,
-                    "model_used": "gemini",
-                    "latency_ms": latency_ms,
-                }
-        except Exception as gemini_err:
-            logger.debug(f"[AI_REVIEW] {symbol}: Gemini failed ({gemini_err})")
+        return {
+            "ai_timing_ok": ai_timing_ok,
+            "confidence": confidence,
+            "reason": response_text[:200],
+            "sentiment_warning": sentiment_warning,
+            "model_used": provider or "unknown",
+            "latency_ms": latency_ms,
+        }
 
     except Exception as e:
+        latency_ms = int((time.time() - start_time) * 1000)
         logger.debug(f"[AI_REVIEW] {symbol}: LLM check error ({e})")
+        return {
+            "ai_timing_ok": True,
+            "confidence": 0.1,
+            "reason": f"LLM error: {e}",
+            "sentiment_warning": False,
+            "model_used": "error",
+            "latency_ms": latency_ms,
+        }
 
     # Fallback: fail-open (allow entry)
     latency_ms = int((time.time() - start_time) * 1000)
@@ -696,6 +640,32 @@ def get_regime_adjusted_thresholds(
     )
 
     return adjusted
+
+
+def get_regime_position_multiplier(market_regime: str) -> float:
+    """
+    Return position size multiplier based on market regime for positional trading.
+
+    Positional trading (3-20 day holds) needs exposure in emerging trends but
+    reduced risk in uncertain regimes. Multipliers scale base position size.
+
+    Args:
+        market_regime: Regime name from Regime enum
+
+    Returns:
+        Multiplier (0.0 to 1.0) to apply to base position size
+    """
+    multipliers = {
+        "TREND_UP": 1.0,
+        "TREND_DOWN": 1.0,
+        "TREND_EMERGING_UP": 0.75,
+        "TREND_EMERGING_DOWN": 0.75,
+        "RANGE_HIGH_VOL": 0.50,
+        "RANGE_LOW_VOL": 0.50,
+        "VOL_CONTRACTION": 0.50,
+        "VOL_EXPANSION": 0.0,  # Too chaotic - block entirely
+    }
+    return multipliers.get(market_regime, 0.5)
 
 
 def detect_sentiment_flip(

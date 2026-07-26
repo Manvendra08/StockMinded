@@ -440,7 +440,13 @@ def is_within_entry_window(
         return False, f"{symbol} options disabled"
 
     mode = sym_cfg.get("mode", "positional")
-    now = now or datetime.now(timezone(timedelta(hours=5, minutes=30)))
+    ist_tz = timezone(timedelta(hours=5, minutes=30))
+    if now is None:
+        now = datetime.now(ist_tz)
+    elif now.tzinfo is None:
+        now = now.replace(tzinfo=ist_tz)
+    else:
+        now = now.astimezone(ist_tz)
 
     if now.weekday() >= 5:
         return False, "Weekend - market closed"
@@ -452,22 +458,20 @@ def is_within_entry_window(
     current_time = now.time()
 
     # Get entry window times
-    entry_start_str = sym_cfg.get("intraday_entry_start", "09:45")
-    entry_end_str = sym_cfg.get("intraday_entry_end", "14:30")
+    entry_start_str = str(sym_cfg.get("intraday_entry_start", "09:15"))
+    entry_end_str = str(sym_cfg.get("intraday_entry_end", "15:15"))
 
-    # BUG-15 FIX: Wrap time parsing in try/except to handle invalid config formats
-    # like "945" instead of "09:45". Fall back to sensible defaults on error.
     try:
         h1, m1 = map(int, entry_start_str.split(":"))
         entry_start = time(h1, m1)
     except (ValueError, TypeError):
-        entry_start = time(9, 45)
+        entry_start = time(9, 15)
 
     try:
         h2, m2 = map(int, entry_end_str.split(":"))
         entry_end = time(h2, m2)
     except (ValueError, TypeError):
-        entry_end = time(14, 30)
+        entry_end = time(15, 15)
 
     if not (entry_start <= current_time <= entry_end):
         return False, f"Outside entry window ({entry_start_str}-{entry_end_str})"

@@ -18,6 +18,11 @@ This file provides guidance to agents when working with code in this repository.
   - Environment: Requires `GOOGLE_API_KEY` for local fallback. Configured in `config/config.yaml` under `scrapegraphai`.
   - Flow snapshot captures `ai_sentiment` using news sentiment summarization.
   - Sentiment history persisted at `data/cache/ai_sentiment_history.json` for the self-improvement loop.
+- **Adaptive Screener Analysis**: [`data/screener_fetcher.py`](data/screener_fetcher.py:1) uses two strategies for fundamental data:
+  - **Structured parse** (default): `fetch_screener()` extracts specific fields from known HTML selectors. Fast and token-free.
+  - **Adaptive LLM** (optional): `scrape_raw_tables()` grabs ALL tables as raw Markdown via pandas; `adaptive_fundamental_analysis()` passes them to the LLM with a sector-agnostic prompt. The LLM deduces the business model from row labels (e.g. "Financing Profit" → banking, "Operating Profit" → corporate). Zero maintenance — new metrics or exotic sectors (REITs, InvITs) require no code changes.
+  - `fetch_fundamentals()` runs adaptive analysis when `call_llm` is passed. Result stored as `adaptive_analysis` key.
+  - LLM prompt in `_ADAPTIVE_SYSTEM_PROMPT` returns JSON with `business_model`, `key_metrics`, `thesis`, `risk`, `verdict`.
 - **Intelligence Module (AGoT)**: [`intelligence/`](intelligence/__init__.py) implements Adaptive Graph of Thoughts framework.
   - `thought_graph.py` — Core graph-based reasoning engine (`ThoughtGraph`, `ThoughtNode`, `Evidence`).
   - `adaptive_regime.py` — Multi-hypothesis regime classification (`AdaptiveRegimeClassifier`).
@@ -29,7 +34,9 @@ This file provides guidance to agents when working with code in this repository.
   - `is_overextended_from_vwap()`, `is_rsi_overextended()`, `is_price_overextended()` (ATR-based).
   - `market_exhaustion_score()` — breadth drop + VIX spike → 0.0–1.0 severity.
   - `evaluate_timing_for_entry()` — main entry point; optional Groq/Gemini AI review.
+  - `get_regime_position_multiplier()` — regime-based position sizing (emerging=0.75, range=0.50, vol_expansion=0.0).
   - Config under `timing_engine` in `config/config.yaml` (late_entry_filter, market_exhaustion, event_risk_mode, ai_review, dynamic_thresholds, sentiment_tracking, backtest).
+- **Regime Classification**: [`signals/regime.py`](signals/regime.py:1) outputs 8 regimes: `TREND_UP`, `TREND_DOWN`, `TREND_EMERGING_UP`, `TREND_EMERGING_DOWN`, `RANGE_LOW_VOL`, `RANGE_HIGH_VOL`, `VOL_EXPANSION`, `VOL_CONTRACTION`. Emerging regimes use relaxed thresholds (ADX≥15, trend≤/-3, breadth 50%, ADX rising 5-day slope) for earlier positional entry. VOL_EXPANSION blocks all directional trades (multiplier=0.0).
 - **Verdict Engine (Split)**: [`signals/verdict.py`](signals/verdict.py:1) `build_trade_verdict()` splits decisions into `StockVerdict` (directional: LONG_ONLY/SHORT_ONLY/LONG_AND_SHORT/WAIT) and `NiftyVerdict` (option selling: OPTION_SELL_DEFINED_RISK/NAKED_OPTION_SELL/WAIT). AI sentiment steers confidence (boost/penalize) without blocking. Confidence labels HIGH/MEDIUM/LOW map to numeric scores 80/50/20.
 - **Skip Log**: Blocked trades logged to `skipped_trades` SQLite table via [`ops/journal.py`](ops/journal.py:137) `log_skipped_trade()`. Deduped per (symbol, reason, engine) per day via `has_skipped_today()`. Dashboard exposes `/api/paper/skipped`.
 - **Backtest Harness**: [`ops/backtest.py`](ops/backtest.py:1) `TimingBacktester` correlates `entry_quality` with PnL and suggests threshold adjustments. Output dir: `./data/backtest`.

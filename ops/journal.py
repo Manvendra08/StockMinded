@@ -7,8 +7,24 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
+
+def _utc_now_iso() -> str:
+    """Canonical UTC timestamp used for EVERY Python-side write in this module.
+
+    M7 FIX: centralising timestamp generation guarantees one consistent format
+    (tz-aware UTC ISO-8601, e.g. ``2026-07-22T10:30:00.123456+00:00``) across all
+    tables. Previously each call site repeated
+    ``datetime.now(timezone.utc).isoformat()``, and that drift-prone duplication
+    risked mixing formats. The range queries below additionally normalise BOTH
+    sides via SQLite's ``datetime()`` so any residual format difference (naive vs
+    aware, ``T`` vs space separator, fractional seconds, or the ``datetime('now')``
+    schema default) can never cause a query to silently match nothing or everything.
+    """
+    return datetime.now(timezone.utc).isoformat()
+
+
 # Schema version for migrations
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 7
 
 SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -121,6 +137,20 @@ CREATE TABLE IF NOT EXISTS raw_messages (
 );
 CREATE INDEX IF NOT EXISTS idx_raw_messages_channel ON raw_messages(channel);
 CREATE INDEX IF NOT EXISTS idx_raw_messages_fetched ON raw_messages(fetched_at);
+
+CREATE TABLE IF NOT EXISTS sahi_classifications (
+    url TEXT PRIMARY KEY,
+    title TEXT,
+    symbol TEXT,
+    company_name TEXT,
+    news_event TEXT,
+    event_type TEXT DEFAULT 'general',
+    sentiment TEXT DEFAULT 'NEUTRAL',
+    verdict TEXT,
+    confidence REAL,
+    classified_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_sahi_classifications_symbol ON sahi_classifications(symbol);
 """
 
 
@@ -192,6 +222,34 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             except sqlite3.OperationalError:
                 pass  # column already exists
 
+    # Migration from v5 to v6: Add source_platform to investment_verdicts.
+    if current_version < 6:
+        try:
+            cursor.execute("ALTER TABLE investment_verdicts ADD COLUMN source_platform TEXT DEFAULT 'telegram'")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+
+    # Migration from v6 to v7: Add sahi_classifications table for persistent
+    # per-article news classification (stable card verdict badges).
+    if current_version < 7:
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS sahi_classifications (
+                url TEXT PRIMARY KEY,
+                title TEXT,
+                symbol TEXT,
+                company_name TEXT,
+                news_event TEXT,
+                event_type TEXT DEFAULT 'general',
+                sentiment TEXT DEFAULT 'NEUTRAL',
+                verdict TEXT,
+                confidence REAL,
+                classified_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sahi_classifications_symbol ON sahi_classifications(symbol)"
+        )
+
     cursor.execute(
         "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, datetime('now'))",
         (SCHEMA_VERSION,)
@@ -211,7 +269,7 @@ class Journal:
         self.conn.execute(
             "INSERT INTO regime_snapshots(ts, regime, payload) VALUES (?,?,?)",
             (
-                datetime.now(timezone.utc).isoformat(),
+                _utc_now_iso(),
                 payload.get("regime"),
                 json.dumps(payload),
             ),
@@ -221,7 +279,7 @@ class Journal:
     def log_flow(self, payload: dict) -> None:
         self.conn.execute(
             "INSERT INTO flow_snapshots(ts, payload) VALUES (?,?)",
-            (datetime.now(timezone.utc).isoformat(), json.dumps(payload, default=str)),
+            (_utc_now_iso(), json.dumps(payload, default=str)),
         )
         self.conn.commit()
 
@@ -238,7 +296,7 @@ class Journal:
             """INSERT INTO trades(opened_at, symbol, structure, side, qty, entry, stop, target, risk_rupees, regime, notes)
                VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
             (
-                kw.get("opened_at", datetime.now(timezone.utc).isoformat()),
+                kw.get("opened_at", _utc_now_iso()),
                 kw["symbol"],
                 kw["structure"],
                 kw["side"],
@@ -257,7 +315,7 @@ class Journal:
     def close_trade(self, trade_id: int, exit_price: float, pnl_rupees: float) -> None:
         self.conn.execute(
             "UPDATE trades SET closed_at=?, exit_price=?, pnl_rupees=? WHERE id=?",
-            (datetime.now(timezone.utc).isoformat(), exit_price, pnl_rupees, trade_id),
+            (_utc_now_iso(), exit_price, pnl_rupees, trade_id),
         )
         self.conn.commit()
 
@@ -278,7 +336,7 @@ class Journal:
                skip_reason, regime, flow_bias, risk_gate, notes)
                VALUES (?,?,?,?,?,?,?,?,?)""",
             (
-                datetime.now(timezone.utc).isoformat(),
+                _utc_now_iso(),
                 symbol,
                 direction,
                 alert_confidence,
@@ -298,7 +356,12 @@ class Journal:
         query = "SELECT * FROM skipped_trades"
         params = []
         if since_date:
-            query += " WHERE ts >= ?"
+            # M7 FIX: normalise BOTH sides with SQLite's datetime() so the
+            # comparison is robust to format drift (tz-aware vs naive, 'T' vs
+            # space separator, fractional seconds). A plain string compare here
+            # silently broke whenever the stored `ts` and the caller-supplied
+            # `since_date` used different ISO flavours.
+            query += " WHERE datetime(ts) >= datetime(?)"
             params.append(since_date)
         query += " ORDER BY ts DESC LIMIT ?"
         params.append(limit)
@@ -339,12 +402,17 @@ class Journal:
         from datetime import timedelta
 
         threshold = datetime.now(timezone.utc) - timedelta(days=older_than_days)
-
-        # Store `ts` using datetime.now(timezone.utc).isoformat() elsewhere in this module.
         threshold_iso = threshold.isoformat()
 
+        # M7 FIX: normalise BOTH sides with SQLite's datetime() so pruning is
+        # robust to format drift. A raw `ts < ?` string compare could silently
+        # delete nothing (or everything) if the stored `ts` format ever differed
+        # from the threshold's ISO flavour. datetime() parses both to a canonical
+        # 'YYYY-MM-DD HH:MM:SS' UTC form first; unparseable rows yield NULL and
+        # are safely left untouched (fail-closed for deletion).
         cur = self.conn.execute(
-            "DELETE FROM skipped_trades WHERE ts < ?", (threshold_iso,)
+            "DELETE FROM skipped_trades WHERE datetime(ts) < datetime(?)",
+            (threshold_iso,),
         )
         self.conn.commit()
         return cur.rowcount
@@ -420,7 +488,7 @@ class Journal:
                    VALUES (?,?,?,?,?)""",
                 (
                     trade_id,
-                    datetime.now(timezone.utc).isoformat(),
+                    _utc_now_iso(),
                     loss_root_cause,
                     json.dumps(timing_at_exit or {}, default=str),
                     notes,
@@ -435,7 +503,8 @@ class Journal:
             symbol, verdict, confidence, rationale, key_risks, entry_zone,
             stop_loss, target, telegram_msg_id, telegram_channel,
             fundamentals_json, regime_at_scan,
-            news_event, event_type, sentiment_direction, company_name
+            news_event, event_type, sentiment_direction, company_name,
+            source_platform
         The UNIQUE(scan_id, symbol) constraint prevents duplicate rows on re-run.
         Returns the number of rows written.
         """
@@ -447,8 +516,9 @@ class Journal:
                         scan_id, scan_ts, symbol, verdict, confidence, rationale,
                         key_risks, entry_zone, stop_loss, target, telegram_msg_id,
                         telegram_channel, fundamentals_json, regime_at_scan,
-                        news_event, event_type, sentiment_direction, company_name)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        news_event, event_type, sentiment_direction, company_name,
+                        source_platform)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         scan_id,
                         scan_ts,
@@ -468,6 +538,7 @@ class Journal:
                         v.get("event_type"),
                         v.get("sentiment_direction"),
                         v.get("company_name"),
+                        v.get("source_platform", "telegram"),
                     ),
                 )
                 written += 1
@@ -475,6 +546,77 @@ class Journal:
                 pass
         self.conn.commit()
         return written
+
+    def has_recent_verdict(
+        self,
+        symbol: str,
+        news_event: str = "",
+        msg_id: int | None = None,
+        max_age_hours: int = 24,
+        source_platform: str = "",
+    ) -> bool:
+        """Check if a verdict for this symbol & news event/msg_id exists within max_age_hours.
+
+        Only skips re-processing when there is a strong match:
+        - For Telegram: match by msg_id (exact) OR news_event prefix AND same source_platform.
+        - For Sahi: match only by news_event prefix AND source_platform='sahi'.
+        - Never block cross-platform processing (Telegram verdict does not block Sahi re-run).
+        """
+        if not symbol:
+            return False
+
+        # Exact msg_id match — only for Telegram messages with a real msg_id
+        if msg_id and msg_id > 0 and source_platform in ("telegram", ""):
+            cur = self.conn.execute(
+                """SELECT 1 FROM investment_verdicts
+                   WHERE symbol = ? AND telegram_msg_id = ?
+                     AND datetime(created_at) >= datetime('now', ?) LIMIT 1""",
+                (symbol, msg_id, f"-{max_age_hours} hours"),
+            )
+            if cur.fetchone():
+                return True
+
+        # News event prefix match — only skip if same source_platform AND meaningful news_event
+        if news_event and source_platform:
+            prefix = news_event[:35].strip().lower()
+            if len(prefix) >= 10:  # require at least 10 chars to avoid false positives
+                cur = self.conn.execute(
+                    """SELECT news_event FROM investment_verdicts
+                        WHERE symbol = ? AND source_platform = ?
+                          AND datetime(created_at) >= datetime('now', ?)""",
+                    (symbol, source_platform, f"-{max_age_hours} hours"),
+                )
+                for row in cur.fetchall():
+                    existing = (row[0] or "").strip().lower()
+                    if existing and (prefix in existing or existing[:35] == prefix):
+                        return True
+        return False
+
+    def deduplicate_investment_verdicts(self) -> int:
+        """Delete true duplicate rows - same symbol + news_event AND same scan_id.
+
+        IMPORTANT: Only deduplicates within the same scan_id. Historical rows from
+        earlier scans are preserved so the Verdicts table shows history.
+        Rows with NULL/empty news_event are never deleted (they may be from different
+        Telegram messages for the same symbol).
+        """
+        cur = self.conn.execute(
+            """DELETE FROM investment_verdicts
+               WHERE id NOT IN (
+                   SELECT MAX(id)
+                   FROM investment_verdicts
+                   WHERE news_event IS NOT NULL AND TRIM(news_event) != ''
+                   GROUP BY scan_id, symbol, LOWER(SUBSTR(TRIM(news_event), 1, 35))
+               )
+               AND news_event IS NOT NULL AND TRIM(news_event) != ''
+               AND id NOT IN (
+                   -- Also keep the latest row per scan_id even if news_event matches
+                   SELECT MAX(id) FROM investment_verdicts GROUP BY scan_id, symbol
+               )"""
+        )
+        deleted = cur.rowcount
+        self.conn.commit()
+        return deleted
 
     def get_investment_scans(self, limit: int = 50) -> list[dict]:
         """Return recent scans, each with its verdict rows.
@@ -493,7 +635,8 @@ class Journal:
                 """SELECT id, scan_id, scan_ts, symbol, verdict, confidence,
                           rationale, key_risks, entry_zone, stop_loss, target,
                           telegram_msg_id, telegram_channel, regime_at_scan,
-                          news_event, event_type, sentiment_direction, company_name
+                          news_event, event_type, sentiment_direction, company_name,
+                          source_platform
                    FROM investment_verdicts WHERE scan_id = ? ORDER BY symbol""",
                 (scan_id,),
             )
@@ -507,7 +650,8 @@ class Journal:
             """SELECT id, scan_id, scan_ts, symbol, verdict, confidence,
                       rationale, key_risks, entry_zone, stop_loss, target,
                       telegram_msg_id, telegram_channel, regime_at_scan,
-                      news_event, event_type, sentiment_direction, company_name
+                      news_event, event_type, sentiment_direction, company_name,
+                      source_platform
                FROM investment_verdicts WHERE scan_id = ? ORDER BY symbol""",
             (scan_id,),
         )
@@ -561,6 +705,22 @@ class Journal:
         self.conn.commit()
         return deleted
 
+    def prune_investment_verdicts(self, max_age_hours: int = 24) -> int:
+        """Delete verdicts older than ``max_age_hours`` (all verdict values)."""
+        deleted = self.conn.execute(
+            """DELETE FROM investment_verdicts
+               WHERE datetime(created_at) < datetime('now', ?)""",
+            (f"-{max_age_hours} hours",),
+        ).rowcount
+        self.conn.commit()
+        return deleted
+
+    def clear_all_investment_verdicts(self) -> int:
+        """Delete all investment verdicts from the database to start fresh."""
+        deleted = self.conn.execute("DELETE FROM investment_verdicts").rowcount
+        self.conn.commit()
+        return deleted
+
     def cache_fundamentals(self, symbol: str, payload: dict, fetched_at: str) -> None:
         self.conn.execute(
             """INSERT INTO fundamentals_cache(symbol, fetched_at, payload_json)
@@ -595,8 +755,17 @@ class Journal:
             return None
 
     def log_raw_messages(self, messages: list, platform_map: dict | None = None) -> None:
-        """Log raw messages/tweets fetched from Telegram/X channels."""
+        """Log raw messages/tweets fetched from Telegram/X channels.
+
+        Only messages that pass the is_stock_specific() heuristic are stored.
+        Macro/political/non-company messages are dropped at ingestion time to
+        keep the raw_messages table and the Live Source Feed uncluttered.
+        """
+        from signals.telegram_parser import is_stock_specific
         for m in messages:
+            text = getattr(m, "text", "") or ""
+            if not is_stock_specific(text):
+                continue  # Drop non-company-specific messages
             pl = (platform_map or {}).get(getattr(m, "channel", ""), "telegram")
             self.conn.execute(
                 """INSERT INTO raw_messages(fetched_at, channel, msg_id, date_str, text, platform)
@@ -610,25 +779,141 @@ class Journal:
                     getattr(m, "channel", ""),
                     getattr(m, "msg_id", 0),
                     str(getattr(m, "date", "") or ""),
-                    getattr(m, "text", ""),
+                    text,
                     pl,
                 ),
             )
         self.conn.commit()
 
     def get_raw_messages(self, limit: int = 50, channel: str | None = None) -> list[dict]:
-        """Fetch raw messages/tweets ordered by newest first."""
-        query = "SELECT id, fetched_at, channel, msg_id, date_str, text, platform FROM raw_messages"
-        params = []
+        """Fetch raw messages/tweets ordered by newest first.
+
+        When channel is None, uses a windowed query (ROW_NUMBER per channel) to ensure
+        all active channels get fair representation instead of high-volume channels
+        starving low-volume signal channels.
+        """
         if channel:
-            query += " WHERE channel = ?"
-            params.append(channel)
-        query += " ORDER BY id DESC LIMIT ?"
-        params.append(limit)
+            query = "SELECT id, fetched_at, channel, msg_id, date_str, text, platform FROM raw_messages WHERE channel = ? ORDER BY id DESC LIMIT ?"
+            params = [channel, limit]
+        else:
+            query = """
+            WITH Ranked AS (
+                SELECT id, fetched_at, channel, msg_id, date_str, text, platform,
+                       ROW_NUMBER() OVER (PARTITION BY channel ORDER BY id DESC) as rn
+                FROM raw_messages
+            )
+            SELECT id, fetched_at, channel, msg_id, date_str, text, platform
+            FROM Ranked
+            WHERE rn <= ?
+            ORDER BY id DESC
+            LIMIT ?
+            """
+            per_ch = max(10, limit // 2)
+            params = [per_ch, limit]
 
         cur = self.conn.execute(query, params)
         cols = [d[0] for d in cur.description]
-        return [dict(zip(cols, row)) for row in cur.fetchall()]
+        rows = [dict(zip(cols, row)) for row in cur.fetchall()]
+
+        # Post-filter: remove non-stock-specific messages that were stored before
+        # the ingestion-level filter was added (backward-compatible cleanup).
+        try:
+            from signals.telegram_parser import is_stock_specific
+            rows = [r for r in rows if is_stock_specific(r.get("text", ""))]
+        except Exception:
+            pass  # If import fails, return all rows unfiltered
+
+        return rows
+
+    def save_sahi_classifications(self, rows: list[dict]) -> int:
+        """Upsert per-article sahi.com classifications (keyed by article URL).
+
+        Each row may contain: url, title, symbol, company_name, news_event,
+        event_type, sentiment, verdict, confidence. Persisting the
+        classification per article is what keeps the Investment dashboard card
+        badges stable across reloads (they are no longer recomputed client-side
+        from transient data).
+        """
+        written = 0
+        for r in rows:
+            url = r.get("url")
+            if not url:
+                continue
+            self.conn.execute(
+                """INSERT INTO sahi_classifications(
+                       url, title, symbol, company_name, news_event,
+                       event_type, sentiment, verdict, confidence, classified_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(url) DO UPDATE SET
+                       title = excluded.title,
+                       symbol = excluded.symbol,
+                       company_name = excluded.company_name,
+                       news_event = excluded.news_event,
+                       event_type = excluded.event_type,
+                       sentiment = excluded.sentiment,
+                       verdict = excluded.verdict,
+                       confidence = excluded.confidence,
+                       classified_at = excluded.classified_at""",
+                (
+                    url,
+                    r.get("title"),
+                    r.get("symbol"),
+                    r.get("company_name"),
+                    r.get("news_event"),
+                    r.get("event_type", "general"),
+                    r.get("sentiment", "NEUTRAL"),
+                    r.get("verdict"),
+                    r.get("confidence"),
+                    _utc_now_iso(),
+                ),
+            )
+            written += 1
+        self.conn.commit()
+        return written
+
+    def get_sahi_classifications(self, urls: list[str] | None = None) -> dict[str, dict]:
+        """Return stored sahi.com classifications keyed by article URL.
+
+        When ``urls`` is provided only those articles are returned; otherwise
+        every stored classification is returned.
+        """
+        query = (
+            "SELECT url, title, symbol, company_name, news_event, event_type, "
+            "sentiment, verdict, confidence, classified_at FROM sahi_classifications"
+        )
+        params: list = []
+        if urls:
+            placeholders = ",".join("?" for _ in urls)
+            query += f" WHERE url IN ({placeholders})"
+            params.extend(urls)
+        cur = self.conn.execute(query, params)
+        cols = [d[0] for d in cur.description]
+        return {row[0]: dict(zip(cols, row)) for row in cur.fetchall()}
+
+    def get_latest_verdicts_by_symbol(self) -> dict[str, dict]:
+        """Return the most recent investment verdict for each symbol.
+
+        Used to enrich sahi.com card badges with the actual BUY/SELL/AVOID
+        verdict produced by the LLM fusion pass (from investment_verdicts),
+        rather than only the raw news sentiment.
+        """
+        cur = self.conn.execute(
+            """SELECT symbol, verdict, confidence, rationale, news_event,
+                      company_name, scan_ts
+               FROM investment_verdicts v
+               WHERE scan_ts = (
+                   SELECT MAX(scan_ts) FROM investment_verdicts
+                   WHERE symbol = v.symbol
+               )"""
+        )
+        cols = [d[0] for d in cur.description]
+        out: dict[str, dict] = {}
+        for row in cur.fetchall():
+            d = dict(zip(cols, row))
+            sym = d.get("symbol")
+            if sym:
+                out[sym] = d
+        return out
 
     def close(self) -> None:
         self.conn.close()

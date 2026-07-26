@@ -3,6 +3,12 @@
     <head>
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <script>
+            (function() {
+                const savedTheme = localStorage.getItem('stockminded-theme') || 'dark';
+                document.documentElement.setAttribute('data-theme', savedTheme);
+            })();
+        </script>
         <title>StockMinded — Paper Trader</title>
         <meta
             name="description"
@@ -179,6 +185,53 @@
                 gap: 14px;
                 border-bottom: 1px solid var(--glass-border);
                 margin-bottom: 28px;
+            }
+            .nav-links {
+                display: flex;
+                align-items: center;
+                gap: 6px;
+            }
+            .nav-links a {
+                text-decoration: none;
+                display: inline-flex;
+                align-items: center;
+                gap: 6px;
+                padding: 6px 12px;
+                font-size: 0.82rem;
+                font-family: var(--font);
+                font-weight: 600;
+                color: var(--text-secondary);
+                background: rgba(255, 255, 255, 0.04);
+                border: 1px solid var(--glass-border, rgba(255, 255, 255, 0.08));
+                border-radius: var(--radius-sm, 10px);
+                transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+            }
+            .nav-links a:hover {
+                color: var(--text-primary);
+                background: rgba(255, 255, 255, 0.08);
+                border-color: rgba(255, 255, 255, 0.15);
+            }
+            .nav-links a.active {
+                color: #ffffff;
+                background: linear-gradient(135deg, rgba(59, 130, 246, 0.3), rgba(139, 92, 246, 0.3));
+                border-color: rgba(59, 130, 246, 0.5);
+                font-weight: 700;
+                box-shadow: 0 0 12px rgba(59, 130, 246, 0.2);
+            }
+            [data-theme="light"] .nav-links a {
+                color: #4b5563;
+                background: rgba(0, 0, 0, 0.03);
+                border-color: rgba(0, 0, 0, 0.1);
+            }
+            [data-theme="light"] .nav-links a:hover {
+                color: #111827;
+                background: rgba(0, 0, 0, 0.06);
+            }
+            [data-theme="light"] .nav-links a.active {
+                color: #1d4ed8;
+                background: rgba(59, 130, 246, 0.12);
+                border-color: rgba(59, 130, 246, 0.4);
+                box-shadow: none;
             }
             .brand {
                 display: flex;
@@ -567,6 +620,15 @@
                 font-size: 0.72rem;
                 color: var(--text-secondary);
                 margin-top: 6px;
+            }
+            .pnl-breakdown {
+                font-size: 0.72rem;
+                color: var(--text-secondary);
+                margin-top: 4px;
+            }
+            .pnl-breakdown span {
+                font-family: var(--mono);
+                font-weight: 600;
             }
             .stat-icon {
                 width: 24px;
@@ -1390,9 +1452,11 @@
                             </div>
                         </div>
                     </div>
-                    <a href="/" class="dash-back-btn" style="margin-left: 20px"
-                        >← Dashboard</a
-                    >
+                    <nav class="nav-links" style="margin-left: 20px;">
+                        <a href="/">📊 Dashboard</a>
+                        <a href="/paper" class="active">📈 Paper Trading</a>
+                        <a href="/investment">💎 Investment</a>
+                    </nav>
                 </div>
 
                 <div class="header-actions">
@@ -1439,14 +1503,6 @@
                         <span class="icon-sun">☀️</span>
                         <span class="icon-moon">🌙</span>
                     </button>
-                    <button class="btn btn-green" onclick="autoEnter(this)">
-                        <span class="spin"></span
-                        ><span class="btn-text">⚡ Auto-Enter</span>
-                    </button>
-                    <button class="btn btn-ghost" onclick="checkSLTGT(this)">
-                        <span class="spin"></span
-                        ><span class="btn-text">🔄 Check SL/TGT</span>
-                    </button>
                 </div>
             </header>
 
@@ -1455,6 +1511,10 @@
                 <div class="stat-card blue-top bento-lg">
                     <div class="stat-label">Total P&L</div>
                     <div class="stat-value" id="s-pnl">—</div>
+                    <div class="pnl-breakdown" id="s-pnl-breakdown">
+                        Stocks: <span id="s-pnl-stocks">—</span> &nbsp;|&nbsp;
+                        Options: <span id="s-pnl-options">—</span>
+                    </div>
                     <div class="stat-sub" id="s-pnl-sub">Realized P&L</div>
                     <div class="stat-icon">
                         <i data-lucide="trending-up"></i>
@@ -2818,6 +2878,8 @@
                     let grossLoss = 0;
                     let longs = { wins: 0, total: 0 };
                     let shorts = { wins: 0, total: 0 };
+                    let stockPnl = 0;
+                    let optionPnl = 0;
 
                     closed.forEach((t) => {
                         const pnl = t.pnl || 0;
@@ -2836,6 +2898,18 @@
                             shorts.total++;
                             if (pnl > 0) shorts.wins++;
                         }
+
+                        // Breakout: stock vs option
+                        const isOption = !!(
+                            t.structure &&
+                            ["IRON_CONDOR", "IRON_BUTTERFLY", "IRON_FLY", "VERTICAL_SPREAD",
+                             "CALENDAR", "DIAGONAL", "COVERED_CALL", "PROTECTIVE_PUT",
+                             "STRADDLE", "STRANGLE", "STRIP", "STRAP"].some((s) =>
+                                String(t.structure).toUpperCase().includes(s),
+                            )
+                        );
+                        if (isOption) optionPnl += pnl;
+                        else stockPnl += pnl;
                     });
 
                     const returns = [];
@@ -2929,6 +3003,14 @@
                     document.getElementById("s-pnl").innerHTML = colorPnl(
                         stats.cumulative_pnl,
                     );
+                    const elStockPnl = document.getElementById("s-pnl-stocks");
+                    const elOptionPnl = document.getElementById("s-pnl-options");
+                    if (elStockPnl)
+                        elStockPnl.innerHTML = colorPnl(stockPnl) +
+                            ` <small>(${closed.filter((t) => !(t.structure && String(t.structure).match(/\b(IRON|VERTICAL|CALENDAR|DIAGONAL|COVERED|PROTECTIVE|STRADDLE|STRANGLE|STRIP|STRAP)\b/i))).length})</small>`;
+                    if (elOptionPnl)
+                        elOptionPnl.innerHTML = colorPnl(optionPnl) +
+                            ` <small>(${closed.filter((t) => t.structure && String(t.structure).match(/\b(IRON|VERTICAL|CALENDAR|DIAGONAL|COVERED|PROTECTIVE|STRADDLE|STRANGLE|STRIP|STRAP)\b/i)).length})</small>`;
                     document.getElementById("s-pnl-sub").textContent =
                         `${stats.total_winners}W / ${stats.total_losers}L realized`;
                     document.getElementById("s-mdd").textContent =
@@ -3026,7 +3108,7 @@
                 await btnAction(btn, async () => {
                     const r = await fetch("/api/paper/cleanup", {
                         method: "POST",
-                        headers: { "Content-Type": "application/json" },
+                        headers: { "Content-Type": "application/json", "X-Requested-With": "XMLHttpRequest" },
                         body: JSON.stringify({
                             from_date: from,
                             to_date: to,
@@ -3068,7 +3150,7 @@
                 await btnAction(btn, async () => {
                     const r = await fetch("/api/paper/cleanup", {
                         method: "POST",
-                        headers: { "Content-Type": "application/json" },
+                        headers: { "Content-Type": "application/json", "X-Requested-With": "XMLHttpRequest" },
                         body: JSON.stringify({ full_reset: true }),
                     });
                     const d = await r.json();
@@ -3254,7 +3336,7 @@
                     };
                     const r = await fetch("/api/paper/settings", {
                         method: "POST",
-                        headers: { "Content-Type": "application/json" },
+                        headers: { "Content-Type": "application/json", "X-Requested-With": "XMLHttpRequest" },
                         body: JSON.stringify(body),
                     });
                     const d = await r.json();
@@ -3296,7 +3378,10 @@
 
             async function testTelegram(btn) {
                 await btnAction(btn, async () => {
-                    const r = await fetch("/api/test-telegram");
+                    const r = await fetch("/api/test-telegram", {
+                        method: "POST",
+                        headers: { "X-Requested-With": "XMLHttpRequest" }
+                    });
                     const d = await r.json();
                     if (d.ok) {
                         toast("Test ping sent! Check Telegram.", "ok");
@@ -3594,6 +3679,16 @@
         <div class="em-label">Cumulative</div>
         <div class="em-value ${cls(s.cumulative_pnl)}">${fmtInr(s.cumulative_pnl)}</div>
       </div>
+      ${s.stock_pnl !== undefined ? `
+      <div class="eod-metric">
+        <div class="em-label">Stocks P&L</div>
+        <div class="em-value ${cls(s.stock_pnl)}">${fmtInr(s.stock_pnl)}</div>
+      </div>` : ''}
+      ${s.option_pnl !== undefined ? `
+      <div class="eod-metric">
+        <div class="em-label">Options P&L</div>
+        <div class="em-value ${cls(s.option_pnl)}">${fmtInr(s.option_pnl)}</div>
+      </div>` : ''}
     </div>
 
     ${
@@ -3768,7 +3863,7 @@
                 try {
                     const r = await fetch("/api/paper/skipped/clear", {
                         method: "POST",
-                        headers: { "Content-Type": "application/json" },
+                        headers: { "Content-Type": "application/json", "X-Requested-With": "XMLHttpRequest" },
                         body: JSON.stringify({ days: parseInt(days, 10) }),
                     });
                     const d = await r.json();
@@ -4088,7 +4183,10 @@
             // ── Actions ───────────────────────────────────────────────────
             async function autoEnter(btn) {
                 await btnAction(btn, async () => {
-                    const r = await fetch("/api/paper/auto-enter");
+                    const r = await fetch("/api/paper/auto-enter", {
+                        method: "POST",
+                        headers: { "X-Requested-With": "XMLHttpRequest" }
+                    });
                     const d = await r.json();
                     if (d.error) {
                         toast("Error: " + d.error, "err");
@@ -4261,7 +4359,10 @@
                 btn.disabled = true;
                 btn.textContent = "...";
                 try {
-                    const r = await fetch(`/api/options/close/${tradeId}`);
+                    const r = await fetch(`/api/options/close/${tradeId}`, {
+                        method: "POST",
+                        headers: { "X-Requested-With": "XMLHttpRequest" }
+                    });
                     const d = await r.json();
                     if (d.error) {
                         toast("Error: " + d.error, "err");
@@ -4284,7 +4385,10 @@
 
             async function checkSLTGT(btn) {
                 await btnAction(btn, async () => {
-                    const r = await fetch("/api/paper/check");
+                    const r = await fetch("/api/paper/check", {
+                        method: "POST",
+                        headers: { "X-Requested-With": "XMLHttpRequest" }
+                    });
                     const d = await r.json();
                     if (d.error) {
                         toast("Error: " + d.error, "err");
@@ -4409,7 +4513,7 @@
                 try {
                     const r = await fetch("/api/paper/intelligence/apply", {
                         method: "POST",
-                        headers: { "Content-Type": "application/json" },
+                        headers: { "Content-Type": "application/json", "X-Requested-With": "XMLHttpRequest" },
                         body: JSON.stringify({ param, suggest }),
                     });
                     const d = await r.json();
@@ -4440,7 +4544,10 @@
                 btn.disabled = true;
                 btn.textContent = "...";
                 try {
-                    const r = await fetch(`/api/paper/close/${tradeId}`);
+                    const r = await fetch(`/api/paper/close/${tradeId}`, {
+                        method: "POST",
+                        headers: { "X-Requested-With": "XMLHttpRequest" }
+                    });
                     const d = await r.json();
                     if (d.error) {
                         toast("Error: " + d.error, "err");
@@ -4650,7 +4757,10 @@
 
             async function checkSLTGTSilent() {
                 try {
-                    const r = await fetch("/api/paper/check");
+                    const r = await fetch("/api/paper/check", {
+                        method: "POST",
+                        headers: { "X-Requested-With": "XMLHttpRequest" }
+                    });
                     const d = await r.json();
                     if ((d.count || 0) > 0) {
                         toast(
@@ -4699,7 +4809,18 @@
             }
 
             function formatEODTelegram(s) {
-                return `*EOD PAPER TRADE REPORT — ${s.date}*\n\nP&L: ${sign(s.total_pnl)}₹${Math.abs(s.total_pnl).toFixed(0)}\nTrades: ${s.total_trades} | Win Rate: ${s.win_rate}%\nWinners: ${s.winners} | Losers: ${s.losers}\nSL Hits: ${s.sl_hits} | Tgts: ${s.target_hits}`;
+                const stockLine = s.stock_pnl !== undefined
+                    ? `Stocks: ${sign(s.stock_pnl)}₹${Math.abs(s.stock_pnl).toFixed(0)}\n`
+                    : "";
+                const optLine = s.option_pnl !== undefined
+                    ? `Options: ${sign(s.option_pnl)}₹${Math.abs(s.option_pnl).toFixed(0)}\n`
+                    : "";
+                return `*EOD PAPER TRADE REPORT — ${s.date}*\n\n` +
+                       `P&L: ${sign(s.total_pnl)}₹${Math.abs(s.total_pnl).toFixed(0)}\n` +
+                       stockLine + optLine +
+                       `Trades: ${s.total_trades} | Win Rate: ${s.win_rate}%\n` +
+                       `Winners: ${s.winners} | Losers: ${s.losers}\n` +
+                       `SL Hits: ${s.sl_hits} | Tgts: ${s.target_hits}`;
             }
 
             function toggleTheme() {

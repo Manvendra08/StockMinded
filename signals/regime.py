@@ -13,6 +13,8 @@ from data import feed
 class Regime(str, Enum):
     TREND_UP = "TREND_UP"
     TREND_DOWN = "TREND_DOWN"
+    TREND_EMERGING_UP = "TREND_EMERGING_UP"
+    TREND_EMERGING_DOWN = "TREND_EMERGING_DOWN"
     RANGE_LOW_VOL = "RANGE_LOW_VOL"
     RANGE_HIGH_VOL = "RANGE_HIGH_VOL"
     VOL_EXPANSION = "VOL_EXPANSION"
@@ -82,6 +84,36 @@ def _adx(df: pd.DataFrame, n: int = 14) -> float:
     minus_di = 100 * minus_dm.ewm(alpha=1 / n, adjust=False).mean() / atr
     dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, 1e-9)
     return float(dx.ewm(alpha=1 / n, adjust=False).mean().fillna(0).iloc[-1])
+
+
+def _adx_series(df: pd.DataFrame, n: int = 14) -> pd.Series:
+    """Return the full ADX series (not just last value) for trend analysis."""
+    high, low, close = df["high"], df["low"], df["close"]
+    up = high.diff()
+    dn = -low.diff()
+    cond_plus = (up > dn) & (up > 0)
+    cond_minus = (dn > up) & (dn > 0)
+    plus_dm = up.where(cond_plus, 0.0)
+    minus_dm = dn.where(cond_minus, 0.0)
+    tr = pd.concat([
+        (high - low),
+        (high - close.shift()).abs(),
+        (low - close.shift()).abs(),
+    ], axis=1).max(axis=1)
+    atr = tr.ewm(alpha=1 / n, adjust=False).mean()
+    plus_di = 100 * plus_dm.ewm(alpha=1 / n, adjust=False).mean() / atr
+    minus_di = 100 * minus_dm.ewm(alpha=1 / n, adjust=False).mean() / atr
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, 1e-9)
+    adx = dx.ewm(alpha=1 / n, adjust=False).mean().fillna(0)
+    return adx
+
+
+def _trend_persistence(trend_series: pd.Series, window: int = 5, threshold: int = -3, min_hits: int = 3) -> bool:
+    """True if trend_score ≤ threshold for ≥ min_hits of last window sessions."""
+    if len(trend_series) < window:
+        return False
+    recent = trend_series.tail(window)
+    return (recent <= threshold).sum() >= min_hits
 
 
 def _cmp(a: float, b: float, neutral_band: float = 0.0015) -> int:
@@ -195,6 +227,28 @@ def classify(index_symbol: str = "NIFTY", stock_universe_data: dict | None = Non
     elif vix_chg < -20 and vix_now < 14:
         regime = Regime.VOL_CONTRACTION
         notes.append(f"VIX {vix_chg:.1f}% in 5d at {vix_now:.1f}")
+    # ---- TREND_EMERGING regimes (relaxed thresholds for positional trading) ----
+    # ADX 15+ (rising), trend score -3/-3+, breadth 50/50%, persistence check
+    elif adx >= 15 and trend <= -3 and breadth_val <= 50:
+        # Check ADX rising (trend gaining strength)
+        adx_series = _adx_series(idx, 14)
+        adx_rising = len(adx_series) >= 5 and float(adx_series.iloc[-1]) > float(adx_series.iloc[-5])
+        if adx_rising:
+            regime = Regime.TREND_EMERGING_DOWN
+            notes.append(f"TREND_EMERGING_DOWN: ADX {adx:.1f} rising, trend {trend}, breadth {breadth_val:.1f}%")
+        else:
+            regime = Regime.RANGE_HIGH_VOL if vix_now >= 16 else Regime.RANGE_LOW_VOL
+            notes.append("mixed tape: index weak, breadth neutral")
+    elif adx >= 15 and trend >= 3 and breadth_val >= 50:
+        adx_series = _adx_series(idx, 14)
+        adx_rising = len(adx_series) >= 5 and float(adx_series.iloc[-1]) > float(adx_series.iloc[-5])
+        if adx_rising:
+            regime = Regime.TREND_EMERGING_UP
+            notes.append(f"TREND_EMERGING_UP: ADX {adx:.1f} rising, trend {trend}, breadth {breadth_val:.1f}%")
+        else:
+            regime = Regime.RANGE_HIGH_VOL if vix_now >= 16 else Regime.RANGE_LOW_VOL
+            notes.append("mixed tape: index firm, breadth neutral")
+    # ---- Original mixed-tape rules (kept for completeness) ----
     elif trend <= -3 and breadth_val >= 55:
         # Issue #3: lower mixed-tape breadth floor from 60->55 to match the new 45 cap above
         regime = Regime.RANGE_HIGH_VOL if vix_now >= 16 else Regime.RANGE_LOW_VOL
@@ -202,6 +256,7 @@ def classify(index_symbol: str = "NIFTY", stock_universe_data: dict | None = Non
     elif trend >= 3 and breadth_val <= 40:
         regime = Regime.RANGE_HIGH_VOL if vix_now >= 16 else Regime.RANGE_LOW_VOL
         notes.append("mixed tape: index firm, breadth weak")
+    # ---- Full trend regimes (original strict thresholds) ----
     elif adx >= 20 and trend >= 4 and breadth_val >= 50:
         regime = Regime.TREND_UP
     elif adx >= 20 and trend <= -4 and breadth_val <= 45:

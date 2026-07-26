@@ -239,63 +239,49 @@ def build_trade_verdict(data: dict) -> CombinedVerdict:
                         f"Nifty heavyweight momentum bearish ({nifty_momentum:+.2f}%) aligns with shorts"
                     )
             stock_strategy = "Short A-Grade laggards with RS Slope < -50."
-        elif regime_name in ("RANGE_HIGH_VOL", "RANGE_LOW_VOL", "VOL_CONTRACTION"):
-            # Range regimes: directional stock picking only when leadership is
-            # exceptionally strong.  Marginal setups bleed via EOD close in
-            # choppy conditions.  Prefer option premium selling instead.
+        elif regime_name in ("TREND_EMERGING_DOWN", "TREND_EMERGING_UP", "RANGE_HIGH_VOL", "RANGE_LOW_VOL", "VOL_CONTRACTION"):
+            # Emerging/Range regimes: allow directional trades with relaxed gates
+            # Gate: Q5 laggards/longs OR Q4+ with daily momentum confirmation
             q5_longs = sum(1 for l in leaders if _get_val(l, "quintile", 0) == 5)
             q5_shorts = sum(1 for l in laggards if _get_val(l, "quintile", 0) == 5)
+            q4_longs = sum(1 for l in leaders if _get_val(l, "quintile", 0) >= 4)
+            q4_shorts = sum(1 for l in laggards if _get_val(l, "quintile", 0) >= 4)
 
-            # Gate: need >=5 Q5 names on at least one side to even consider
-            if q5_longs >= 5 or q5_shorts >= 5:
-                long_str = (
-                    q5_longs
-                    + (2 if bias == "LONG" else 0)
-                    + (4 if trend > 0 else 0)
-                )
-                short_str = (
-                    q5_shorts
-                    + (2 if bias == "SHORT" else 0)
-                    + (4 if trend < 0 else 0)
-                )
+            # Daily momentum from heavyweights (positional, not intraday)
+            daily_momentum = nifty_momentum if nifty_momentum is not None else 0.0
 
-                # Evaluate strength first to avoid overlap bug
-                # If one side has clear edge, take that direction
-                if long_str > short_str + 4:
-                    stock_action = "LONG_ONLY"
-                elif short_str > long_str + 4:
-                    stock_action = "SHORT_ONLY"
-                elif q5_longs >= 5 and q5_shorts >= 5:
-                    # Both sides qualify but no clear edge - mixed play
-                    stock_action = "LONG_AND_SHORT"
+            # Relaxed gates for emerging/range regimes
+            long_gate = (q5_longs >= 3 or q4_longs >= 5) and daily_momentum > 0.25
+            short_gate = (q5_shorts >= 3 or q4_shorts >= 5) and daily_momentum < -0.25
+
+            if long_gate and not short_gate:
+                stock_action = "LONG_ONLY"
+            elif short_gate and not long_gate:
+                stock_action = "SHORT_ONLY"
+            elif long_gate and short_gate:
+                stock_action = "LONG_AND_SHORT"
+
+            if stock_action != "WAIT":
+                if stock_action == "LONG_AND_SHORT":
+                    stock_tone = "mixed"
+                elif stock_action == "LONG_ONLY":
+                    stock_tone = "bull"
                 else:
-                    # Ambiguous - stay out in range regimes
-                    pass
-
-                if stock_action != "WAIT":
-                    # Issue #8: "mixed" tone is now a first-class value; downstream
-                    # consumers must handle it explicitly (e.g. present as "range play").
-                    if stock_action == "LONG_AND_SHORT":
-                        stock_tone = "mixed"
-                    elif stock_action == "LONG_ONLY":
-                        stock_tone = "bull"
-                    else:
-                        stock_tone = "bear"
-                    stock_can_trade = True
-                    # Confidence: AI alignment can boost from LOW to MEDIUM
-                    ai_range_boost = abs(ai_influence) > 0.4
-                    base_high = q5_longs >= 7 or q5_shorts >= 7
-                    if ai_range_boost or base_high:
-                        stock_conf = "MEDIUM"
-                    else:
-                        stock_conf = "LOW"
-                    stock_strategy = f"Range leadership {stock_action}: Only Q5 RS candidates (high bar)."
-                    # Log AI influence on range direction decision
-                    if ai_influence != 0:
-                        direction = "longs" if ai_influence > 0 else "shorts"
-                        stock_reasons_extra.append(
-                            f"AI sentiment {ai_overall} ({ai_conf_lbl}) favors {direction} (confidence boost)"
-                        )
+                    stock_tone = "bear"
+                stock_can_trade = True
+                # Confidence: MEDIUM for emerging/range directional plays
+                ai_range_boost = abs(ai_influence) > 0.4
+                base_high = q5_longs >= 7 or q5_shorts >= 7
+                if ai_range_boost or base_high:
+                    stock_conf = "MEDIUM"
+                else:
+                    stock_conf = "LOW"
+                stock_strategy = f"Emerging/Range {stock_action}: Q4+ leadership with daily momentum confirmation."
+                if ai_influence != 0:
+                    direction = "longs" if ai_influence > 0 else "shorts"
+                    stock_reasons_extra.append(
+                        f"AI sentiment {ai_overall} ({ai_conf_lbl}) favors {direction} (confidence boost)"
+                    )
 
             # Intraday Momentum Override: fires in low-vol regimes when heavyweight
             # momentum is strongly directional. ADX/breadth are lagging indicators
@@ -320,16 +306,39 @@ def build_trade_verdict(data: dict) -> CombinedVerdict:
                         stock_reasons_extra.append(
                             f"Nifty heavyweight momentum {nifty_momentum:+.2f}% signals bearish intraday"
                         )
-                    # AI bearish override: downgrade confidence if AI disagrees
+                        # AI override: downgrade confidence if AI disagrees
+                        if ai_influence > 0.4:
+                            stock_conf = "LOW"
+                            stock_reasons_extra.append(
+                                f"AI sentiment {ai_overall} ({ai_conf_lbl}) contradicts intraday short"
+                            )
+                    # AI override for intraday long
                     if stock_action == "LONG_ONLY" and ai_influence < -0.4:
                         stock_conf = "LOW"
                         stock_reasons_extra.append(
                             f"AI sentiment {ai_overall} ({ai_conf_lbl}) contradicts intraday long"
                         )
-                    elif stock_action == "SHORT_ONLY" and ai_influence > 0.4:
-                        stock_conf = "LOW"
+
+            # Daily Momentum Override for positional trading in emerging/range regimes
+            if stock_action == "WAIT" and vix < 20:
+                if regime_name in ("TREND_EMERGING_DOWN", "TREND_EMERGING_UP", "RANGE_LOW_VOL", "RANGE_HIGH_VOL", "VOL_CONTRACTION"):
+                    if nifty_momentum is not None and nifty_momentum < -0.50:
+                        stock_action = "SHORT_ONLY"
+                        stock_tone = "bear"
+                        stock_can_trade = True
+                        stock_conf = "MEDIUM"
+                        stock_strategy = "Positional short: heavyweight daily momentum bearish in emerging/range regime."
                         stock_reasons_extra.append(
-                            f"AI sentiment {ai_overall} ({ai_conf_lbl}) contradicts intraday short"
+                            f"Nifty heavyweight daily momentum {nifty_momentum:+.2f}% signals bearish positional"
+                        )
+                    elif nifty_momentum is not None and nifty_momentum > 0.50:
+                        stock_action = "LONG_ONLY"
+                        stock_tone = "bull"
+                        stock_can_trade = True
+                        stock_conf = "MEDIUM"
+                        stock_strategy = "Positional long: heavyweight daily momentum bullish in emerging/range regime."
+                        stock_reasons_extra.append(
+                            f"Nifty heavyweight daily momentum {nifty_momentum:+.2f}% signals bullish positional"
                         )
 
     stock_reasons = list(common_reasons)

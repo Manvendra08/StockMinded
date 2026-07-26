@@ -1,0 +1,20 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# StockMinded — OPTIONAL / HEAVY dependencies.
+#
+# L7 FIX: these were previously mixed into the core requirements.txt. They are
+# large, pull native/browser binaries, and are only needed for the advanced
+# AI-scraping features. The core signal + paper-trading engine runs WITHOUT them
+# (data/ai_scraper.py guards every import with try/except ImportError fallbacks).
+#
+# Install only if you actually use ScrapeGraphAI / Playwright-based scraping:
+#     pip install -r requirements-optional.txt
+#
+# Same pin caveat as requirements.txt applies: verify against `pip freeze`.
+# ─────────────────────────────────────────────────────────────────────────────
+scrapegraphai==1.0.0
+scrapegraph-py==2.1.0
+langchain-google-genai==1.0.0
+playwright==1.40.0
+
+# After installing playwright, fetch its browser binaries ONCE with:
+#     python -m playwright install chromium

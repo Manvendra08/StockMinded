@@ -7,6 +7,7 @@ Usage:
   python main.py schedule           # run APScheduler loop (IST times from config)
   python main.py health             # quick data connectivity check
   python main.py telegram-pipeline [--dry-run]  # run dual-engine Telegram → verdict pipeline
+  python main.py investment-dashboard # run lightweight server for Investment Verdicts page only
 """
 from __future__ import annotations
 
@@ -14,6 +15,7 @@ import logging
 import signal
 import sys
 from datetime import datetime
+from typing import Any
 
 from core.log import setup_logging
 setup_logging()
@@ -36,6 +38,14 @@ from ops.telegram_state import TelegramState
 
 
 def run_dashboard(cfg: dict) -> None:
+    # H1 fix: these signal modules were referenced below but never imported,
+    # causing a NameError the moment `python main.py dashboard` ran. Lazy-import
+    # them here (consistent with run_agot_dashboard) to avoid startup overhead.
+    from signals import regime as regime_mod
+    from signals import flows as flows_mod
+    from signals import leadership as lead_mod
+    from signals import structure_map as sm
+
     alerter = Alerter(cfg["alerts"].get("telegram_bot_token"), cfg["alerts"].get("telegram_chat_id"))
     journal = Journal(cfg["paths"]["journal_db"])
 
@@ -297,7 +307,7 @@ def run_health(cfg: dict) -> None:
     print("\n".join(checks))
 
 
-def run_telegram_pipeline(cfg: dict, dry_run: bool = False) -> dict:
+def run_telegram_pipeline(cfg: dict, dry_run: bool = False, force_live: bool = False) -> dict:
     """Run one pass of the dual-engine Telegram → verdict pipeline.
 
     This is fully additive: it reads Telegram channels, parses tickers with an
@@ -319,8 +329,12 @@ def run_telegram_pipeline(cfg: dict, dry_run: bool = False) -> dict:
     from signals.telegram_parser import parse_message, is_spam
 
     tp_cfg = cfg.get("telegram_pipeline", {})
-    if not tp_cfg.get("enabled", False) and not dry_run:
-        logging.getLogger(__name__).info("telegram-pipeline disabled in config")
+    sahi_cfg = cfg.get("sahi_news", {})
+    tp_enabled = tp_cfg.get("enabled", True)
+    sahi_enabled = sahi_cfg.get("enabled", True)
+
+    if not tp_enabled and not sahi_enabled and not dry_run and not force_live:
+        logging.getLogger(__name__).info("telegram-pipeline and sahi-news disabled in config")
         return {"skipped": True, "reason": "disabled"}
 
     journal = Journal(cfg["paths"]["journal_db"])
@@ -329,11 +343,12 @@ def run_telegram_pipeline(cfg: dict, dry_run: bool = False) -> dict:
     universe = set(load_universe(cfg)) if tp_cfg.get("fusion", {}).get("universe_filter", True) else None
 
     # 1. Fetch new Telegram messages
-    from datetime import datetime
+    # H2 fix: removed redundant `from datetime import datetime` that shadowed the
+    # `datetime` already imported at the top of this function (with timezone).
     dt_str = datetime.now().strftime('%H:%M:%S')
     print(f"\033[94m[{dt_str}] [Telegram Pipeline] Attempting to fetch new messages...\033[0m")
     try:
-        messages = fetch_all_channels(tp_cfg, state, limit=tp_cfg.get("max_messages_per_run", 100))
+        messages = fetch_all_channels(tp_cfg, state, limit=tp_cfg.get("max_messages_per_run", 20))
         if messages:
             platform_map = {ch.get("username"): ch.get("platform", "telegram") for ch in tp_cfg.get("channels", [])}
             journal.log_raw_messages(messages, platform_map)
@@ -342,30 +357,98 @@ def run_telegram_pipeline(cfg: dict, dry_run: bool = False) -> dict:
         print(f"\033[91m[{datetime.now().strftime('%H:%M:%S')}] [Telegram Pipeline] Status: FAILED. Error: {e}\033[0m")
         return {"messages": 0, "extracted": 0, "verdicts": 0, "error": str(e)}
 
-    if not messages:
-        return {"messages": 0, "extracted": 0, "verdicts": 0}
-
     # 2. Parse tickers from each message (dedupe by symbol, keep strongest context)
     extracted_map: dict[str, Any] = {}
     llm_calls = 0
-    for m in messages:
-        tickers = parse_message(
-            m.text,
-            call_llm=call_llm,
-            universe=universe,
-            model=tp_cfg.get("parser", {}).get("model", "llama-3.3-70b-versatile"),
+    if messages:
+        for m in messages:
+            tickers = parse_message(
+                m.text,
+                call_llm=call_llm,
+                universe=universe,
+                model=tp_cfg.get("parser", {}).get("model", "llama-3.3-70b-versatile"),
+            )
+            llm_calls += 1 if tickers or not is_spam(m.text) else 0
+            for tk in tickers:
+                tk.source_platform = "telegram"
+                tk.telegram_msg_id = m.msg_id
+                tk.telegram_channel = m.channel
+                if tk.symbol not in extracted_map or tk.confidence > extracted_map[tk.symbol].confidence:
+                    extracted_map[tk.symbol] = tk
+        logging.getLogger(__name__).info(
+            "Parsed %d unique symbols from %d messages (LLM calls: ~%d)",
+            len(extracted_map), len(messages), llm_calls,
         )
-        llm_calls += 1 if tickers or not is_spam(m.text) else 0
-        for tk in tickers:
-            if tk.symbol not in extracted_map or tk.confidence > extracted_map[tk.symbol].confidence:
-                extracted_map[tk.symbol] = tk
-                extracted_map[tk.symbol].telegram_msg_id = m.msg_id
-                extracted_map[tk.symbol].telegram_channel = m.channel
+
+    # 2b. Fetch sahi.com breaking news headlines (additive source)
+    sahi_cfg = cfg.get("sahi_news", {})
+    sahi_enabled = sahi_cfg.get("enabled", True)
+    sahi_extracted = []
+    if sahi_enabled:
+        try:
+            from data.sahi_news import extract_tickers_from_headlines, fetch_sahi_headlines
+            # Collect the full recency window (default: past 1 hour) across
+            # multiple listing pages so the bot does not miss headlines that
+            # fall beyond the first page of the breaking-news feed.
+            fetch_kwargs = {
+                "limit": sahi_cfg.get("max_headlines", 60),
+                "window_minutes": sahi_cfg.get("window_minutes", 60),
+                "max_pages": sahi_cfg.get("max_pages", 4),
+            }
+            if force_live:
+                fetch_kwargs["min_interval"] = 0
+            sahi_headlines = fetch_sahi_headlines(**fetch_kwargs)
+            if sahi_headlines:
+                sahi_extracted = extract_tickers_from_headlines(
+                    sahi_headlines,
+                    call_llm=call_llm,
+                    universe=universe,
+                    min_confidence=sahi_cfg.get("min_confidence", 0.4),
+                    journal=journal,
+                )
+                # Merge sahi tickers into extracted_map.
+                # Rule: do not overwrite a Telegram ticker with a sahi ticker of
+                # equal or lower confidence. Only upgrade to sahi when its
+                # confidence is strictly higher.
+                for tk in sahi_extracted:
+                    tk.source_platform = "sahi"
+                    existing = extracted_map.get(tk.symbol)
+                    existing_conf = getattr(existing, "confidence", 0.0)
+                    existing_src = getattr(existing, "source_platform", "")
+                    if existing is None:
+                        extracted_map[tk.symbol] = tk
+                    elif tk.confidence > existing_conf and existing_src != "telegram":
+                        extracted_map[tk.symbol] = tk
+                    elif tk.confidence > existing_conf + 0.1:
+                        extracted_map[tk.symbol] = tk
+                    # else: keep existing ticker (preserves telegram-sourced ones)
+                logging.getLogger(__name__).info(
+                    "Sahi.com: %d headlines → %d symbols (merged into %d total)",
+                    len(sahi_headlines), len(sahi_extracted), len(extracted_map),
+                )
+        except Exception as e:
+            logging.getLogger(__name__).warning("Sahi.com pipeline failed: %s", e)
+
     extracted = list(extracted_map.values())
-    logging.getLogger(__name__).info(
-        "Parsed %d unique symbols from %d messages (LLM calls: ~%d)",
-        len(extracted), len(messages), llm_calls,
-    )
+    if not extracted:
+        return {"messages": len(messages), "extracted": 0, "verdicts": 0}
+
+    # Filter extracted items to process only NEW news events/messages (incremental fusion)
+    new_extracted = []
+    for tk in extracted:
+        news_ev = getattr(tk, "news_event", "") or getattr(tk, "context", "")
+        msg_id = getattr(tk, "telegram_msg_id", None)
+        src_plat = getattr(tk, "source_platform", "")
+        if not journal.has_recent_verdict(tk.symbol, news_event=news_ev, msg_id=msg_id, max_age_hours=24, source_platform=src_plat):
+            new_extracted.append(tk)
+        else:
+            logging.getLogger(__name__).info(
+                "Skipping duplicate verdict pass for %s (news event already processed in last 24h)", tk.symbol
+            )
+
+    if not new_extracted:
+        logging.getLogger(__name__).info("No new un-processed news events found for fusion scan.")
+        return {"messages": len(messages), "extracted": len(extracted), "verdicts": 0, "status": "no_new_items"}
 
     # 3. Regime context
     try:
@@ -378,31 +461,34 @@ def run_telegram_pipeline(cfg: dict, dry_run: bool = False) -> dict:
     # 4. Hard filters + LLM fusion
     fusion_cfg = tp_cfg.get("fusion", {})
     logging.getLogger(__name__).info(
-        "Running fusion on %d symbols (LLM calls: ~%d)...",
-        len(extracted), len(extracted),
+        "Running fusion on %d new symbols (total candidates: %d)...",
+        len(new_extracted), len(extracted),
     )
     verdicts = run_fusion(
-        extracted=extracted,
+        extracted=new_extracted,
         fundamentals_fn=lambda s, c="": fetch_fundamentals(
             s,
             journal=journal if not dry_run else None,
             cache_ttl_hours=tp_cfg.get("screener", {}).get("cache_ttl_hours", 24),
             rate_limit_delay=tp_cfg.get("screener", {}).get("rate_limit_delay", 2.0),
             company_name=c,
+            call_llm=call_llm,
         ),
         filters=fusion_cfg.get("hard_filters", {}),
         regime=regime_val,
         call_llm=call_llm,
         model=fusion_cfg.get("model", "llama-3.3-70b-versatile"),
         max_tokens=fusion_cfg.get("max_tokens", 2048),
+        source_platform="mixed",
     )
 
-    # Attach Telegram source metadata
+    # Attach Telegram / Sahi source metadata
     for v in verdicts:
         src = extracted_map.get(v.symbol)
         if src is not None:
             v.telegram_msg_id = getattr(src, "telegram_msg_id", None)
             v.telegram_channel = getattr(src, "telegram_channel", None)
+            v.source_platform = getattr(src, "source_platform", "telegram")
 
     if dry_run:
         summary = {
@@ -410,6 +496,7 @@ def run_telegram_pipeline(cfg: dict, dry_run: bool = False) -> dict:
             "messages": len(messages),
             "extracted": len(extracted),
             "verdicts": len(verdicts),
+            "sahi_headlines": len(sahi_extracted),
             "symbols": [v.symbol for v in verdicts],
             "details": [
                 {
@@ -420,6 +507,7 @@ def run_telegram_pipeline(cfg: dict, dry_run: bool = False) -> dict:
                     "event_type": getattr(v, "event_type", ""),
                     "sentiment": getattr(v, "sentiment_direction", ""),
                     "company": getattr(v, "company_name", ""),
+                    "source": getattr(v, "source_platform", "telegram"),
                 }
                 for v in verdicts
             ],
@@ -434,8 +522,9 @@ def run_telegram_pipeline(cfg: dict, dry_run: bool = False) -> dict:
     scan_id = uuid.uuid4().hex
     scan_ts = datetime.now(timezone.utc).isoformat()
     verdict_rows = []
+    seen_symbols: dict[str, dict] = {}
     for v in verdicts:
-        verdict_rows.append({
+        row = {
             "symbol": v.symbol,
             "verdict": v.verdict,
             "confidence": v.confidence,
@@ -452,13 +541,54 @@ def run_telegram_pipeline(cfg: dict, dry_run: bool = False) -> dict:
             "event_type": getattr(v, "event_type", "general"),
             "sentiment_direction": getattr(v, "sentiment_direction", "NEUTRAL"),
             "company_name": getattr(v, "company_name", ""),
-        })
+            "source_platform": getattr(v, "source_platform", "telegram"),
+        }
+        existing = seen_symbols.get(v.symbol)
+        if existing is None or v.confidence > existing["confidence"]:
+            seen_symbols[v.symbol] = row
+    verdict_rows = list(seen_symbols.values())
     journal.save_investment_verdicts(scan_id, scan_ts, verdict_rows)
+    journal.deduplicate_investment_verdicts()
+
+    # 5b. Feed actionable stock verdicts to paper trading engine
+    try:
+        from dashboard import paper_trader as pt
+        actionable_alerts = []
+        for v in verdicts:
+            v_str = str(getattr(v, "verdict", "")).upper()
+            if any(k in v_str for k in ("BUY", "LONG", "ACCUMULATE")):
+                direction = "LONG"
+            elif any(k in v_str for k in ("SELL", "SHORT", "REDUCE")):
+                direction = "SHORT"
+            else:
+                continue
+
+            actionable_alerts.append({
+                "symbol": v.symbol,
+                "direction": direction,
+                "confidence": getattr(v, "confidence", "MEDIUM"),
+                "source_regime": getattr(v, "regime_at_scan", regime_val),
+                "flow_bias": getattr(v, "sentiment_direction", "NEUTRAL"),
+                "type": "STOCK",
+                "entry_price": getattr(v, "entry_zone", None),
+                "stop": getattr(v, "stop_loss", None),
+                "target": getattr(v, "target", None),
+                "entry_trigger": f"Telegram Verdict: {v.verdict}",
+            })
+        if actionable_alerts:
+            entered_trades = pt.auto_enter_from_alerts(actionable_alerts, cfg=cfg)
+            if entered_trades:
+                print(f"\033[93m[{datetime.now().strftime('%H:%M:%S')}] [Telegram Pipeline] [+ ] Auto-entered {len(entered_trades)} stock paper trades: {', '.join(t['symbol'] for t in entered_trades)}\033[0m")
+    except Exception as pt_err:
+        logging.getLogger(__name__).warning("Failed to auto-enter Telegram paper trades: %s", pt_err)
 
     # 6. Prune old scans
     inv_cfg = cfg.get("investment_dashboard", {})
     keep = inv_cfg.get("max_history_scans", 50)
     journal.prune_investment_scans(keep)
+    pruned = journal.prune_investment_verdicts(max_age_hours=24)
+    if pruned:
+        logging.getLogger(__name__).info("Pruned %d old/Avoid verdicts", pruned)
 
     # 7. Alerts are surfaced on the Investment dashboard page only
     #    (localhost-only deployment — no outbound Telegram alerts are sent).
@@ -468,7 +598,7 @@ def run_telegram_pipeline(cfg: dict, dry_run: bool = False) -> dict:
         "Pipeline complete: %d messages → %d extracted → %d verdicts (scan_id=%s)",
         len(messages), len(extracted), len(verdicts), scan_id,
     )
-    print(f"\033[92m[{datetime.now().strftime('%H:%M:%S')}] [Telegram Pipeline] COMPLETE: {len(messages)} messages → {len(extracted)} extracted → {len(verdicts)} verdicts (scan_id: {scan_id[:8]}).\033[0m")
+    print(f"\033[92m[{datetime.now().strftime('%H:%M:%S')}] [Telegram Pipeline] COMPLETE: {len(messages)} messages -> {len(extracted)} extracted -> {len(verdicts)} verdicts (scan_id: {scan_id[:8]}).\033[0m")
 
     return {
         "scan_id": scan_id,
@@ -518,6 +648,22 @@ def run_schedule(cfg: dict) -> None:
     else:
         print("Telegram pipeline NOT scheduled (telegram_pipeline.enabled=false).")
 
+    # Sahi.com news — hourly at :05, independent of telegram pipeline.
+    sahi_cfg = cfg.get("sahi_news", {})
+    if sahi_cfg.get("enabled", True):
+        def _run_sahi_only(c):
+            from data.sahi_news import run_sahi_pipeline
+            run_sahi_pipeline(c)
+        sched.add_job(
+            _h("sahi-news", _run_sahi_only),
+            CronTrigger(minute=5),
+            id="sahi_news",
+            replace_existing=True,
+        )
+        print("Sahi.com news scheduled hourly at :05 (enabled).")
+    else:
+        print("Sahi.com news NOT scheduled (sahi_news.enabled=false).")
+
     def _shutdown_handler(signum, frame):
         print("\nShutting down scheduler gracefully...")
         sched.shutdown(wait=False)
@@ -551,6 +697,13 @@ def main() -> int:
         run_schedule(cfg)
     elif cmd == "telegram-pipeline":
         run_telegram_pipeline(cfg, dry_run=dry_run)
+    elif cmd in ("investment-dashboard", "investment-page"):
+        import subprocess
+        print("🧠 Launching lightweight Investment Dashboard server...")
+        try:
+            subprocess.run([sys.executable, "dashboard/server.py", "--investment-only"])
+        except KeyboardInterrupt:
+            print("\nServer stopped.")
     else:
         print(f"unknown command: {cmd}")
         return 2

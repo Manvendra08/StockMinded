@@ -3,6 +3,12 @@
     <head>
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <script>
+            (function() {
+                const savedTheme = localStorage.getItem('stockminded-theme') || 'dark';
+                document.documentElement.setAttribute('data-theme', savedTheme);
+            })();
+        </script>
         <title>StockMinded — Decision Dashboard</title>
         <meta
             name="description"
@@ -195,6 +201,54 @@
                   justify-content: space-between;
                   flex-wrap: wrap;
                   gap: 16px;
+                }
+
+                .nav-links {
+                  display: flex;
+                  align-items: center;
+                  gap: 6px;
+                }
+                .nav-links a {
+                  text-decoration: none;
+                  display: inline-flex;
+                  align-items: center;
+                  gap: 6px;
+                  padding: 6px 12px;
+                  font-size: 0.82rem;
+                  font-family: var(--font);
+                  font-weight: 600;
+                  color: var(--text-secondary);
+                  background: rgba(255, 255, 255, 0.04);
+                  border: 1px solid var(--glass-border, rgba(255, 255, 255, 0.08));
+                  border-radius: var(--radius-sm, 10px);
+                  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+                }
+                .nav-links a:hover {
+                  color: var(--text-primary);
+                  background: rgba(255, 255, 255, 0.08);
+                  border-color: rgba(255, 255, 255, 0.15);
+                }
+                .nav-links a.active {
+                  color: #ffffff;
+                  background: linear-gradient(135deg, rgba(59, 130, 246, 0.3), rgba(139, 92, 246, 0.3));
+                  border-color: rgba(59, 130, 246, 0.5);
+                  font-weight: 700;
+                  box-shadow: 0 0 12px rgba(59, 130, 246, 0.2);
+                }
+                [data-theme="light"] .nav-links a {
+                  color: #4b5563;
+                  background: rgba(0, 0, 0, 0.03);
+                  border-color: rgba(0, 0, 0, 0.1);
+                }
+                [data-theme="light"] .nav-links a:hover {
+                  color: #111827;
+                  background: rgba(0, 0, 0, 0.06);
+                }
+                [data-theme="light"] .nav-links a.active {
+                  color: #1d4ed8;
+                  background: rgba(59, 130, 246, 0.12);
+                  border-color: rgba(59, 130, 246, 0.4);
+                  box-shadow: none;
                 }
 
                 .brand {
@@ -2279,46 +2333,11 @@
                     </div>
                 </div>
                 <div class="header-right">
-                    <a
-                        href="/paper"
-                        class="theme-toggle"
-                        style="
-                            text-decoration: none;
-                            display: flex;
-                            align-items: center;
-                            gap: 5px;
-                            width: auto;
-                            padding: 0 12px;
-                            font-size: 0.8rem;
-                            font-family: var(--font);
-                            font-weight: 700;
-                            background: rgba(79, 142, 247, 0.15);
-                            border: 1px solid rgba(79, 142, 247, 0.3);
-                            color: var(--accent-blue);
-                        "
-                    >
-                        <span class="icon">📈</span> Paper Trade
-                    </a>
-                    <a
-                        href="/investment"
-                        class="theme-toggle"
-                        style="
-                            text-decoration: none;
-                            display: flex;
-                            align-items: center;
-                            gap: 5px;
-                            width: auto;
-                            padding: 0 12px;
-                            font-size: 0.8rem;
-                            font-family: var(--font);
-                            font-weight: 700;
-                            background: rgba(139, 92, 246, 0.15);
-                            border: 1px solid rgba(139, 92, 246, 0.3);
-                            color: var(--accent-purple);
-                        "
-                    >
-                        <span class="icon">💎</span> Investment
-                    </a>
+                    <nav class="nav-links">
+                        <a href="/" class="active">📊 Dashboard</a>
+                        <a href="/paper">📈 Paper Trading</a>
+                        <a href="/investment">💎 Investment</a>
+                    </nav>
                     <button
                         class="theme-toggle"
                         style="
@@ -2928,7 +2947,8 @@
        ═══════════════════════════════════════════════════════════════ */
 
             async function fetchDashboard(endpoint = "/api/dashboard") {
-                const res = await fetch(endpoint);
+                const options = endpoint === "/api/refresh" ? { method: "POST", headers: { "X-Requested-With": "XMLHttpRequest" } } : {};
+                const res = await fetch(endpoint, options);
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
                 const data = await res.json();
                 if (data.error) throw new Error(data.error);
@@ -4121,7 +4141,10 @@
                 btn.innerHTML = '<span class="icon">✈️</span> Sending...';
                 btn.disabled = true;
                 try {
-                    const res = await fetch("/api/send-alerts");
+                    const res = await fetch("/api/send-alerts", {
+                        method: "POST",
+                        headers: { "X-Requested-With": "XMLHttpRequest" }
+                    });
                     const d = await res.json();
                     if (d.error) throw new Error(d.error);
                     btn.innerHTML =
@@ -4626,7 +4649,10 @@
                 const origText = btn.textContent;
                 btn.textContent = "Refreshing...";
                 try {
-                    const res = await fetch("/api/intelligence/refresh_weights", { method: "POST" });
+                    const res = await fetch("/api/intelligence/refresh_weights", {
+                        method: "POST",
+                        headers: { "X-Requested-With": "XMLHttpRequest" }
+                    });
                     if (res.ok) {
                         await loadIndexMomentum();
                     }

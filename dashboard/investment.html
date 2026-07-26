@@ -3,6 +3,12 @@
     <head>
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <script>
+            (function() {
+                const savedTheme = localStorage.getItem('stockminded-theme') || 'dark';
+                document.documentElement.setAttribute('data-theme', savedTheme);
+            })();
+        </script>
         <title>StockMinded — Investment Verdicts</title>
         <link
             href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap"
@@ -51,15 +57,45 @@
             }
             .brand-name { font-weight: 800; font-size: 1.2rem; }
             .brand-sub { color: var(--text-secondary); font-size: 0.8rem; }
-            .nav-links { display: flex; gap: 8px; }
-            .nav-links a {
-                text-decoration: none; color: var(--text-secondary);
-                padding: 8px 14px; border-radius: var(--radius-sm);
-                border: 1px solid var(--glass-border); font-size: 0.85rem; font-weight: 600;
-                transition: var(--transition);
+            [data-theme="light"] {
+                --bg-primary: #f8fafc;
+                --bg-secondary: #ffffff;
+                --bg-card: rgba(255, 255, 255, 0.9);
+                --bg-card-hover: rgba(241, 245, 249, 1);
+                --glass: rgba(0, 0, 0, 0.02);
+                --glass-border: rgba(0, 0, 0, 0.08);
+                --text-primary: #0f172a;
+                --text-secondary: #475569;
+                --text-muted: #94a3b8;
             }
-            .nav-links a:hover { color: var(--text-primary); background: var(--bg-card-hover); }
-            .nav-links a.active { color: var(--accent-blue); border-color: rgba(59,130,246,0.4); background: rgba(59,130,246,0.12); }
+            .header-right { display: flex; align-items: center; gap: 12px; }
+            .nav-links { display: flex; align-items: center; gap: 6px; }
+            .nav-links a {
+                text-decoration: none; display: inline-flex; align-items: center; gap: 6px;
+                padding: 6px 12px; font-size: 0.82rem; font-family: var(--font); font-weight: 600;
+                color: var(--text-secondary); background: rgba(255, 255, 255, 0.04);
+                border: 1px solid var(--glass-border, rgba(255, 255, 255, 0.08));
+                border-radius: var(--radius-sm, 10px); transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+            }
+            .nav-links a:hover { color: var(--text-primary); background: rgba(255, 255, 255, 0.08); border-color: rgba(255, 255, 255, 0.15); }
+            .nav-links a.active {
+                color: #ffffff; background: linear-gradient(135deg, rgba(59, 130, 246, 0.3), rgba(139, 92, 246, 0.3));
+                border-color: rgba(59, 130, 246, 0.5); font-weight: 700; box-shadow: 0 0 12px rgba(59, 130, 246, 0.2);
+            }
+            [data-theme="light"] .nav-links a { color: #4b5563; background: rgba(0, 0, 0, 0.03); border-color: rgba(0, 0, 0, 0.1); }
+            [data-theme="light"] .nav-links a:hover { color: #111827; background: rgba(0, 0, 0, 0.06); }
+            [data-theme="light"] .nav-links a.active { color: #1d4ed8; background: rgba(59, 130, 246, 0.12); border-color: rgba(59, 130, 246, 0.4); box-shadow: none; }
+            .theme-toggle {
+                background: rgba(255, 255, 255, 0.05); border: 1px solid var(--glass-border);
+                border-radius: var(--radius-sm, 10px); width: 36px; height: 36px;
+                display: flex; align-items: center; justify-content: center;
+                cursor: pointer; color: var(--text-primary); transition: var(--transition);
+            }
+            .theme-toggle:hover { background: rgba(255, 255, 255, 0.1); }
+            .icon-sun { display: none; }
+            .icon-moon { display: inline; }
+            [data-theme="light"] .icon-sun { display: inline; }
+            [data-theme="light"] .icon-moon { display: none; }
 
             .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 24px; }
             .card {
@@ -109,12 +145,48 @@
             }
             .scan-pill:hover { background: rgba(59,130,246,0.22); }
             .empty { text-align: center; color: var(--text-secondary); padding: 48px; }
-            .rationale-cell { max-width: 360px; cursor: pointer; }
-            .rationale-cell .trunc { display: block; }
-            .rationale-cell .full { display: none; white-space: pre-wrap; color: var(--text-secondary); margin-top: 6px; }
-            .rationale-cell.open .trunc { display: none; }
-            .rationale-cell.open .full { display: block; }
+            .news-cell { max-width: 350px; cursor: pointer; }
+            .news-cell .trunc { display: block; }
+            .news-cell .full { display: none; white-space: pre-wrap; color: var(--text-secondary); margin-top: 6px; }
+            .news-cell.open .trunc { display: none; }
+            .news-cell.open .full { display: block; }
+            .rationale-link {
+                color: var(--accent-blue); font-weight: 600; cursor: pointer; text-decoration: underline;
+                font-size: 0.82rem; white-space: nowrap;
+            }
+            .rationale-link:hover { color: #93c5fd; }
+            .rationale-overlay {
+                display: none; position: fixed; inset: 0; z-index: 9998;
+                background: rgba(0, 0, 0, 0.5); backdrop-filter: blur(4px);
+            }
+            .rationale-overlay.open { display: flex; align-items: center; justify-content: center; }
+            .rationale-popup {
+                background: var(--bg-card); border: 1px solid var(--glass-border);
+                border-radius: var(--radius); padding: 24px 28px; max-width: 560px; width: 90%;
+                max-height: 70vh; overflow-y: auto; position: relative;
+                box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            }
+            .rationale-popup .popup-header {
+                display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;
+            }
+            .rationale-popup .popup-symbol { font-size: 1.1rem; font-weight: 800; color: var(--text-primary); }
+            .rationale-popup .popup-close {
+                background: none; border: none; color: var(--text-muted); font-size: 1.4rem;
+                cursor: pointer; padding: 4px 8px; border-radius: 6px;
+            }
+            .rationale-popup .popup-close:hover { background: rgba(255,255,255,0.08); color: var(--text-primary); }
+            .rationale-popup .popup-body {
+                color: var(--text-secondary); font-size: 0.88rem; line-height: 1.65; white-space: pre-wrap;
+            }
             .error { color: var(--accent-red); padding: 16px; }
+            .ds-controls { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; margin-bottom: 18px; padding: 14px 18px; background: var(--bg-card); border: 1px solid var(--glass-border); border-radius: var(--radius); }
+            .ds-toggle { display: flex; align-items: center; gap: 8px; font-size: 0.85rem; }
+            .ds-toggle label { color: var(--text-secondary); cursor: pointer; user-select: none; }
+            .ds-toggle input[type="checkbox"] { appearance: none; width: 38px; height: 20px; background: var(--bg-secondary); border-radius: 10px; position: relative; cursor: pointer; border: 1px solid var(--glass-border); transition: var(--transition); }
+            .ds-toggle input[type="checkbox"]::after { content: ''; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--text-muted); transition: var(--transition); }
+            .ds-toggle input[type="checkbox"]:checked { background: rgba(16,185,129,0.3); border-color: var(--accent-green); }
+            .ds-toggle input[type="checkbox"]:checked::after { left: 20px; background: var(--accent-green); }
+            .ds-label { font-weight: 700; font-size: 0.85rem; color: var(--text-primary); margin-right: 8px; }
 
             /* Live Raw Tweet/Telegram Feed Styles */
             .feed-section { margin-top: 24px; margin-bottom: 28px; background: var(--bg-card); border: 1px solid var(--glass-border); border-radius: var(--radius); padding: 20px; }
@@ -131,6 +203,7 @@
             .platform-tag { font-weight: 700; border-radius: 6px; padding: 3px 8px; font-size: 0.72rem; }
             .platform-tag.twitter { background: rgba(59,130,246,0.18); color: var(--accent-blue); border: 1px solid rgba(59,130,246,0.3); }
             .platform-tag.telegram { background: rgba(139,92,246,0.18); color: var(--accent-purple); border: 1px solid rgba(139,92,246,0.3); }
+            .platform-tag.sahi { background: rgba(16,185,129,0.18); color: var(--accent-green); border: 1px solid rgba(16,185,129,0.3); }
             .feed-text { font-size: 0.86rem; line-height: 1.5; color: var(--text-primary); white-space: pre-wrap; font-family: var(--font); }
             .feed-time { font-family: var(--mono); font-size: 0.72rem; color: var(--text-secondary); }
         </style>
@@ -145,10 +218,21 @@
                         <div class="brand-sub">Investment Verdicts</div>
                     </div>
                 </div>
-                <div class="nav-links">
-                    <a href="/">Dashboard</a>
-                    <a href="/paper">Paper Trading</a>
-                    <a href="/investment" class="active">Investment</a>
+                <div class="header-right">
+                    <nav class="nav-links">
+                        <a href="/">📊 Dashboard</a>
+                        <a href="/paper">📈 Paper Trading</a>
+                        <a href="/investment" class="active">💎 Investment</a>
+                    </nav>
+                    <button
+                        class="theme-toggle"
+                        id="theme-toggle"
+                        onclick="toggleTheme()"
+                        title="Toggle Theme"
+                    >
+                        <span class="icon-sun">☀️</span>
+                        <span class="icon-moon">🌙</span>
+                    </button>
                 </div>
             </div>
 
@@ -159,11 +243,26 @@
                 <div class="card avoid"><div class="label">AVOID</div><div class="value" id="sum-avoid">—</div></div>
             </div>
 
+            <!-- Data Source Controls -->
+            <div class="ds-controls">
+                <span class="ds-label">Data Sources:</span>
+                <div class="ds-toggle">
+                    <input type="checkbox" id="ds-telegram" checked onchange="toggleDataSource('telegram', this.checked)" />
+                    <label for="ds-telegram">✈️ Telegram Channels</label>
+                </div>
+                <div class="ds-toggle">
+                    <input type="checkbox" id="ds-sahi" checked onchange="toggleDataSource('sahi', this.checked)" />
+                    <label for="ds-sahi">📰 Sahi.com News</label>
+                </div>
+                <span class="status" id="ds-status"></span>
+            </div>
+
             <!-- Live Raw Source Feed (Previous Tweets / Telegram Messages) -->
             <div class="feed-section">
                 <div class="feed-header">
-                    <div class="feed-title">
-                        <span class="live-dot"></span> Live Source Feed (Raw Tweets / Messages)
+                    <div class="feed-title" style="cursor:pointer;" onclick="toggleFeedDisplay('tweets', this)">
+                        <span class="toggle-icon" style="font-size:0.8rem;color:var(--text-muted);margin-right:4px;">▼</span>
+                        <span class="live-dot" id="telegram-live-dot"></span> Live Source Feed (Raw Tweets / Messages)
                         <span class="badge BUY" id="feed-count-badge">0 Messages</span>
                     </div>
                     <div style="display:flex; gap:10px; align-items:center;">
@@ -173,6 +272,24 @@
                 </div>
                 <div class="feed-grid" id="tweets-feed">
                     <div class="empty">Loading raw channel feed…</div>
+                </div>
+            </div>
+
+            <!-- Sahi.com Breaking News Feed -->
+            <div class="feed-section">
+                <div class="feed-header">
+                    <div class="feed-title" style="cursor:pointer;" onclick="toggleFeedDisplay('sahi', this)">
+                        <span class="toggle-icon" style="font-size:0.8rem;color:var(--text-muted);margin-right:4px;">▼</span>
+                        <span class="live-dot" id="sahi-live-dot" style="background:var(--accent-green);box-shadow:0 0 10px var(--accent-green)"></span> Sahi.com Breaking News
+                        <span class="badge sahi" id="sahi-count-badge">0 Headlines</span>
+                    </div>
+                    <div style="display:flex; gap:10px; align-items:center;">
+                        <span class="status" id="sahi-status">Loading sahi.com headlines…</span>
+                        <button class="btn" style="background:var(--bg-card-hover); border:1px solid var(--glass-border); color:var(--text-primary); font-size:0.78rem; padding:6px 12px;" onclick="loadSahiHeadlines(true)">⚡ Fetch & Classify Now</button>
+                    </div>
+                </div>
+                <div class="feed-grid" id="sahi-feed">
+                    <div class="empty">Loading sahi.com headlines…</div>
                 </div>
             </div>
 
@@ -190,8 +307,14 @@
                     <option value="MEDIUM">MEDIUM</option>
                     <option value="LOW">LOW</option>
                 </select>
+                <select id="datasource-filter" onchange="applyFilters()">
+                    <option value="">All Data Sources</option>
+                    <option value="sahi">📰 Sahi.com News</option>
+                    <option value="telegram">✈️ Telegram Channels</option>
+                </select>
                 <button class="btn" onclick="refresh()">↻ Refresh</button>
                 <button class="btn" onclick="runVerdictScan()" style="margin-left:6px; background:linear-gradient(135deg,#3b82f6,#2563eb)">⚡ Run Verdict Scan Now</button>
+                <button class="btn" onclick="clearVerdicts()" style="margin-left:6px; background:rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.4); color: #ef4444;">🗑️ Clear Table</button>
                 <span class="status" id="status"></span>
             </div>
 
@@ -205,6 +328,7 @@
                         <th>News / Event</th>
                         <th>Type</th>
                         <th>Sentiment</th>
+                        <th>Source</th>
                         <th>Verdict</th>
                         <th>Confidence</th>
                         <th>Rationale</th>
@@ -218,6 +342,7 @@
 
         <script>
             let ALL_ROWS = [];
+            let FILTERED_ROWS = [];
             let AUTO_REFRESH_MS = 300000;
 
             async function loadSummary() {
@@ -238,34 +363,89 @@
                 try {
                     const r = await fetch("/api/investment/verdicts");
                     const d = await r.json();
-                    if (d.error) { status.textContent = "Error: " + d.error; return; }
+                    if (d.error) { status.textContent = "Error: " + d.error; return new Set(); }
                     ALL_ROWS = [];
+                    const scanIds = new Set();
                     (d.scans || []).forEach(scan => {
+                        scanIds.add(scan.scan_id);
                         (scan.verdicts || []).forEach(v => {
                             ALL_ROWS.push(Object.assign({ scan_id: scan.scan_id, scan_ts: scan.scan_ts }, v));
                         });
                     });
                     applyFilters();
                     status.textContent = `${ALL_ROWS.length} verdicts · ${new Date().toLocaleTimeString()}`;
+                    return scanIds;
                 } catch (e) {
                     status.textContent = "Fetch failed: " + e.message;
+                    return new Set();
                 }
+            }
+
+            // Poll the verdicts endpoint until a scan newer than `beforeIds`
+            // appears (the scan runs in a background thread and the LLM fusion +
+            // rate-limited fundamentals fetch can take a while). This guarantees
+            // the LLM analysis and verdict show up in the table once ready,
+            // instead of a single too-early refresh that misses them.
+            async function pollForNewScan(beforeIds, maxAttempts = 12, intervalMs = 6000) {
+                const status = document.getElementById("status");
+                for (let i = 0; i < maxAttempts; i++) {
+                    await new Promise(res => setTimeout(res, intervalMs));
+                    const ids = await refresh();
+                    let hasNew = false;
+                    ids.forEach(id => { if (!beforeIds.has(id)) hasNew = true; });
+                    if (hasNew) {
+                        status.textContent = `Verdicts refreshed · ${new Date().toLocaleTimeString()}`;
+                        // Refresh sahi cards too so badges pick up the new verdicts.
+                        loadSahiHeadlines(false);
+                        return true;
+                    }
+                    status.textContent = `Waiting for scan to complete… (${i + 1}/${maxAttempts})`;
+                }
+                status.textContent = `Scan may still be running · ${new Date().toLocaleTimeString()}`;
+                return false;
             }
 
             async function runVerdictScan() {
                 const status = document.getElementById("status");
-                status.textContent = "Executing LLM + Screener.in Verdict Scan…";
+                status.textContent = "Executing LLM + Screener.in Verdict Scan in background…";
                 try {
-                    const r = await fetch("/api/investment/scan/run", { method: "POST" });
+                    // Remember which scans already exist so we can detect the new one.
+                    const beforeIds = await refresh();
+                    const r = await fetch("/api/investment/scan/run", {
+                        method: "POST",
+                        headers: { "X-Requested-With": "XMLHttpRequest" }
+                    });
                     const d = await r.json();
                     if (d.error) {
                         status.textContent = "Scan Error: " + d.error;
                     } else {
-                        status.textContent = `Scan Complete! (${d.verdicts || 0} verdicts generated)`;
-                        await refresh();
+                        status.textContent = "Scan running in background… waiting for results…";
+                        pollForNewScan(beforeIds);
                     }
                 } catch (e) {
                     status.textContent = "Scan failed: " + e.message;
+                }
+            }
+
+            async function clearVerdicts() {
+                if (!confirm("Are you sure you want to clear all investment verdicts and start fresh?")) return;
+                const status = document.getElementById("status");
+                status.textContent = "Clearing table…";
+                try {
+                    const r = await fetch("/api/investment/verdicts/clear", {
+                        method: "POST",
+                        headers: { "X-Requested-With": "XMLHttpRequest" }
+                    });
+                    const d = await r.json();
+                    if (d.error) {
+                        status.textContent = "Clear failed: " + d.error;
+                    } else {
+                        status.textContent = d.message || "Table cleared.";
+                        await loadSummary();
+                        await refresh();
+                    }
+                } catch (e) {
+                    status.textContent = "Clear error: " + e.message;
                 }
             }
 
@@ -273,38 +453,46 @@
                 const q = document.getElementById("search").value.trim().toUpperCase();
                 const vf = document.getElementById("verdict-filter").value;
                 const cf = document.getElementById("conf-filter").value;
+                const df = document.getElementById("datasource-filter") ? document.getElementById("datasource-filter").value : "";
                 const body = document.getElementById("verdicts-body");
                 const rows = ALL_ROWS.filter(v =>
                     (!q || (v.symbol || "").toUpperCase().includes(q)) &&
                     (!vf || v.verdict === vf) &&
-                    (!cf || v.confidence === cf)
+                    (!cf || v.confidence === cf) &&
+                    (!df || (v.source_platform || "telegram") === df)
                 );
-                body.innerHTML = rows.map(v => {
+                FILTERED_ROWS = rows;
+                body.innerHTML = rows.map((v, _ri) => {
                     const ratio = (v.rationale || "").replace(/</g, "&lt;");
-                    const trunc = ratio.length > 120 ? ratio.slice(0, 120) + "…" : ratio;
                     const news = (v.news_event || "").replace(/</g, "&lt;");
                     const newsTrunc = news.length > 80 ? news.slice(0, 80) + "…" : news;
-                    const sentClass = (v.sentiment_direction || "NEUTRAL") === "POSITIVE" ? "conf HIGH"
-                                    : (v.sentiment_direction || "NEUTRAL") === "NEGATIVE" ? "conf LOW"
+                    const rawSent = (v.sentiment_direction || "").toUpperCase();
+                    const effectiveSent = (rawSent === "POSITIVE" || rawSent === "NEGATIVE") ? rawSent
+                                        : (v.verdict === "BUY" ? "POSITIVE" : v.verdict === "SELL" ? "NEGATIVE" : "NEUTRAL");
+                    const sentClass = effectiveSent === "POSITIVE" ? "conf HIGH"
+                                    : effectiveSent === "NEGATIVE" ? "conf LOW"
                                     : "conf MEDIUM";
-                    const sentLabel = (v.sentiment_direction || "NEUTRAL").charAt(0) + (v.sentiment_direction || "NEUTRAL").slice(1).toLowerCase();
+                    const sentLabel = effectiveSent.charAt(0) + effectiveSent.slice(1).toLowerCase();
                     const evtType = (v.event_type || "general").charAt(0).toUpperCase() + (v.event_type || "general").slice(1);
+                    const src = (v.source_platform || "telegram");
+                    const srcClass = src === "sahi" ? "sahi" : "telegram";
+                    const srcIcon = src === "sahi" ? "📰" : "✈️";
                     return `<tr>
                         <td><span class="scan-pill" onclick="viewScan('${v.scan_id}')" title="${v.scan_id}">${v.scan_id.slice(0,8)}</span></td>
                         <td class="mono">${formatTime(v.scan_ts)}</td>
                         <td class="mono" style="font-weight:700">${v.symbol || ""}</td>
                         <td style="font-size:0.82rem;max-width:140px">${v.company_name || '—'}</td>
-                        <td class="rationale-cell" onclick="toggleRationale(this)" style="max-width:350px">
+                        <td class="news-cell" onclick="toggleRationale(this)" style="max-width:350px">
                             <span class="trunc">${newsTrunc || '—'}</span>
                             <span class="full">${news || '—'}</span>
                         </td>
                         <td style="font-size:0.78rem">${evtType}</td>
                         <td class="${sentClass}" style="font-size:0.78rem">${sentLabel}</td>
+                        <td><span class="platform-tag ${srcClass}" style="font-size:0.7rem">${srcIcon} ${src}</span></td>
                         <td><span class="badge ${v.verdict || ''}">${v.verdict || ''}</span></td>
                         <td class="conf ${v.confidence || ''}">${v.confidence || ''}</td>
-                        <td class="rationale-cell" onclick="toggleRationale(this)">
-                            <span class="trunc">${trunc || '—'}</span>
-                            <span class="full">${ratio || '—'}</span>
+                        <td>
+                            ${ratio ? `<span class="rationale-link" onclick="openRationalePopup(${_ri})">View Rationale</span>` : '—'}
                         </td>
                         <td class="mono" style="font-size:0.75rem; white-space:nowrap; line-height:1.4;">
                             <div style="color:var(--text-primary)">Entry: ${v.entry_zone || '—'}</div>
@@ -313,9 +501,30 @@
                         </td>
                     </tr>`;
                 }).join("");
-                document.getElementById("empty-msg").style.display = ALL_ROWS.length ? "none" : "block";
+
+                // Update summary card counts for current view
+                const buyCount = rows.filter(r => r.verdict === "BUY").length;
+                const sellCount = rows.filter(r => r.verdict === "SELL").length;
+                const avoidCount = rows.filter(r => r.verdict === "AVOID").length;
+                const scanCount = new Set(rows.map(r => r.scan_id)).size;
+                document.getElementById("sum-scans").textContent = scanCount || (ALL_ROWS.length ? new Set(ALL_ROWS.map(r => r.scan_id)).size : "—");
+                document.getElementById("sum-buy").textContent = buyCount;
+                document.getElementById("sum-sell").textContent = sellCount;
+                document.getElementById("sum-avoid").textContent = avoidCount;
+
+                document.getElementById("empty-msg").style.display = rows.length ? "none" : "block";
             }
 
+            function openRationalePopup(idx) {
+                const v = FILTERED_ROWS[idx];
+                if (!v) return;
+                document.getElementById("popup-symbol").textContent = (v.symbol || "—") + " — Rationale";
+                document.getElementById("popup-body").textContent = v.rationale || "No rationale available.";
+                document.getElementById("rationale-overlay").classList.add("open");
+            }
+            function closeRationalePopup() {
+                document.getElementById("rationale-overlay").classList.remove("open");
+            }
             function toggleRationale(el) { el.classList.toggle("open"); }
 
             function formatTime(ts) {
@@ -339,10 +548,45 @@
                 window.open("/api/investment/verdicts/" + scanId, "_blank");
             }
 
+            function toggleFeedDisplay(sourceId, headerElement) {
+                const grid = document.getElementById(sourceId + "-feed");
+                const icon = headerElement.querySelector(".toggle-icon");
+                if (grid.style.display === "none") {
+                    grid.style.display = "grid";
+                    if (icon) icon.textContent = "▼";
+                } else {
+                    grid.style.display = "none";
+                    if (icon) icon.textContent = "▶";
+                }
+            }
+
+            function updateLiveDot(id, active) {
+                const dot = document.getElementById(id);
+                if (!dot) return;
+                if (active) {
+                    dot.style.background = "var(--accent-green)";
+                    dot.style.boxShadow = "0 0 10px var(--accent-green)";
+                    dot.style.animation = "pulse 2s infinite";
+                } else {
+                    dot.style.background = "var(--accent-red)";
+                    dot.style.boxShadow = "0 0 10px var(--accent-red)";
+                    dot.style.animation = "none";
+                }
+            }
+
             async function loadFeed(isLive = false) {
                 const status = document.getElementById("feed-status");
                 const feedContainer = document.getElementById("tweets-feed");
                 const countBadge = document.getElementById("feed-count-badge");
+                
+                if (!document.getElementById("ds-telegram").checked) {
+                    status.textContent = "Telegram source disabled";
+                    feedContainer.innerHTML = '<div class="empty">Telegram source is disabled. Toggle it on above.</div>';
+                    countBadge.textContent = '0 Messages';
+                    updateLiveDot('telegram-live-dot', false);
+                    return;
+                }
+                updateLiveDot('telegram-live-dot', true);
                 if (isLive) status.textContent = "Scraping X / Telegram live…";
 
                 try {
@@ -351,6 +595,7 @@
                     const d = await r.json();
                     if (d.error) {
                         status.textContent = "Error: " + d.error;
+                        updateLiveDot('telegram-live-dot', false);
                         return;
                     }
                     const msgs = d.messages || [];
@@ -382,13 +627,177 @@
                     }).join("");
                 } catch (e) {
                     status.textContent = "Feed load failed: " + e.message;
+                    updateLiveDot('telegram-live-dot', false);
                 }
             }
 
+            async function loadSahiHeadlines(isLive = false) {
+                const status = document.getElementById("sahi-status");
+                const feedContainer = document.getElementById("sahi-feed");
+                const countBadge = document.getElementById("sahi-count-badge");
+                // Respect the toggle — skip if disabled
+                if (!document.getElementById("ds-sahi").checked) {
+                    status.textContent = "Sahi.com disabled";
+                    feedContainer.innerHTML = '<div class="empty">Sahi.com source is disabled. Toggle it on above.</div>';
+                    countBadge.textContent = '0 Headlines';
+                    updateLiveDot('sahi-live-dot', false);
+                    return;
+                }
+                updateLiveDot('sahi-live-dot', true);
+                if (isLive) status.textContent = "Fetching & classifying sahi.com headlines…";
+
+                try {
+                    const url = "/api/investment/sahi-headlines?limit=30" + (isLive ? "&live=true" : "");
+                    const r = await fetch(url);
+                    const d = await r.json();
+                    if (d.error) {
+                        status.textContent = "Error: " + d.error;
+                        updateLiveDot('sahi-live-dot', false);
+                        return;
+                    }
+                    const headlines = d.headlines || [];
+                    const extracted = d.extracted || [];
+                    countBadge.textContent = `${headlines.length} Headlines`;
+                    status.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+
+                    if (isLive) {
+                        // The classify pass kicked off a background verdict scan on
+                        // the server; poll until its results land so both the verdict
+                        // table and the card badges refresh with the LLM analysis.
+                        refresh().then(beforeIds => pollForNewScan(beforeIds));
+                    }
+
+                    if (!headlines.length) {
+                        feedContainer.innerHTML = '<div class="empty">No sahi.com headlines fetched yet. Click "⚡ Fetch & Classify Now" above.</div>';
+                        return;
+                    }
+
+                    // Build a lookup of extracted symbols for verdict badges
+                    // Use both fresh extraction AND already-loaded verdicts for matching
+                    const extractedMap = {};
+                    extracted.forEach(t => { extractedMap[t.symbol] = t; });
+                    // Also pull from the verdicts table so badges work on default load
+                    ALL_ROWS.forEach(v => {
+                        if (!extractedMap[v.symbol]) {
+                            extractedMap[v.symbol] = {
+                                symbol: v.symbol,
+                                sentiment: v.sentiment_direction || 'NEUTRAL',
+                                company_name: v.company_name || '',
+                                news_event: v.news_event || '',
+                            };
+                        }
+                    });
+
+                    feedContainer.innerHTML = headlines.map(h => {
+                        const title = (h.title || "").replace(/</g, "&lt;");
+                        const summary = (h.summary || "").replace(/</g, "&lt;");
+                        const summaryTrunc = summary.length > 120 ? summary.slice(0, 120) + "…" : summary;
+                        const age = h.age || "";
+                        const titleLower = title.toLowerCase();
+                        const summaryLower = summary.toLowerCase();
+                        // Prefer the server-provided persistent classification so the
+                        // badge survives reloads; fall back to fuzzy matching only when
+                        // the server did not attach a classification to this headline.
+                        let badgeHtml = '';
+                        const hVerdict = (h.verdict || '').toUpperCase();
+                        const hSent = (h.sentiment || '').toUpperCase();
+                        const hSymbol = h.symbol || '';
+                        if (hVerdict) {
+                            badgeHtml = `<span class="badge ${hVerdict}" style="margin-left:8px;font-size:0.68rem" title="${hSymbol}">${hVerdict}</span>`;
+                        } else if (hSent) {
+                            const sentClass = hSent === 'POSITIVE' ? 'BUY' : hSent === 'NEGATIVE' ? 'SELL' : 'AVOID';
+                            const sentLabel = hSent.charAt(0) + hSent.slice(1).toLowerCase();
+                            badgeHtml = `<span class="badge ${sentClass}" style="margin-left:8px;font-size:0.68rem" title="${hSymbol}">${hSymbol || sentLabel}</span>`;
+                        } else {
+                            for (const [sym, t] of Object.entries(extractedMap)) {
+                                const symClean = sym.replace(/\.(NS|BO)$/i, '').replace(/-EQ$/i, '').toLowerCase();
+                                const companyLower = (t.company_name || "").toLowerCase();
+                                const newsLower = (t.news_event || "").toLowerCase();
+                                const match = (symClean.length >= 3 && (titleLower.includes(symClean) || summaryLower.includes(symClean)))
+                                    || (companyLower && companyLower.length >= 3 && (titleLower.includes(companyLower) || summaryLower.includes(companyLower)))
+                                    || (newsLower && newsLower.length > 5 && titleLower.substring(0, 20) === newsLower.substring(0, 20));
+                                if (match) {
+                                    const sent = (t.sentiment || t.sentiment_direction || 'NEUTRAL').toUpperCase();
+                                    const sentClass = sent === 'POSITIVE' ? 'BUY' : sent === 'NEGATIVE' ? 'SELL' : 'AVOID';
+                                    badgeHtml = `<span class="badge ${sentClass}" style="margin-left:8px;font-size:0.68rem">${sent}</span>`;
+                                    break;
+                                }
+                            }
+                        }
+                        return `<div class="feed-card">
+                            <div class="feed-meta">
+                                <div>
+                                    <span class="platform-tag sahi">📰 Sahi.com</span>
+                                    ${badgeHtml}
+                                </div>
+                                <span class="feed-time">${age}</span>
+                            </div>
+                            <div class="feed-text" style="font-weight:600;margin-bottom:6px">${title}</div>
+                            ${h.url ? `<a href="${h.url}" target="_blank" rel="noopener" style="color:var(--accent-blue);font-size:0.75rem;text-decoration:none;margin-top:6px;display:inline-block">Read full article →</a>` : ''}
+                        </div>`;
+                    }).join("");
+                } catch (e) {
+                    status.textContent = "Sahi feed load failed: " + e.message;
+                    updateLiveDot('sahi-live-dot', false);
+                }
+            }
+
+            async function loadDatasources() {
+                try {
+                    const r = await fetch("/api/investment/datasources");
+                    const d = await r.json();
+                    if (d.error) return;
+                    document.getElementById("ds-telegram").checked = d.telegram?.enabled ?? true;
+                    document.getElementById("ds-sahi").checked = d.sahi?.enabled ?? true;
+                    if (!document.getElementById("ds-telegram").checked) updateLiveDot('telegram-live-dot', false);
+                    if (!document.getElementById("ds-sahi").checked) updateLiveDot('sahi-live-dot', false);
+                } catch (e) { /* ignore */ }
+            }
+
+            async function toggleDataSource(source, enabled) {
+                const status = document.getElementById("ds-status");
+                status.textContent = `Updating ${source}…`;
+                try {
+                    const r = await fetch("/api/investment/datasources", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json", "X-Requested-With": "XMLHttpRequest" },
+                        body: JSON.stringify({ [source]: enabled }),
+                    });
+                    const d = await r.json();
+                    if (d.error) {
+                        status.textContent = "Error: " + d.error;
+                    } else {
+                        status.textContent = `${source} ${enabled ? 'enabled' : 'disabled'}`;
+                        if (source === 'telegram') {
+                            if (enabled) { updateLiveDot('telegram-live-dot', true); loadFeed(); }
+                            else { updateLiveDot('telegram-live-dot', false); loadFeed(); }
+                        }
+                        if (source === 'sahi') {
+                            if (enabled) { updateLiveDot('sahi-live-dot', true); loadSahiHeadlines(); }
+                            else { updateLiveDot('sahi-live-dot', false); loadSahiHeadlines(); }
+                        }
+                        setTimeout(() => { status.textContent = ''; }, 2000);
+                    }
+                } catch (e) {
+                    status.textContent = "Update failed: " + e.message;
+                }
+            }
+
+            function toggleTheme() {
+                const current = document.documentElement.getAttribute("data-theme") || "dark";
+                const target = current === "light" ? "dark" : "light";
+                document.documentElement.setAttribute("data-theme", target);
+                localStorage.setItem("stockminded-theme", target);
+            }
+
+            document.addEventListener("keydown", e => { if (e.key === "Escape") closeRationalePopup(); });
+
             async function init() {
+                await loadDatasources();
                 await loadSummary();
                 await refresh();
                 await loadFeed();
+                await loadSahiHeadlines();
                 const health = await fetch("/api/investment/health").then(r => r.json()).catch(() => ({}));
                 if (health.auto_refresh_seconds) AUTO_REFRESH_MS = health.auto_refresh_seconds * 1000;
                 setInterval(() => { refresh(); loadFeed(); }, AUTO_REFRESH_MS);
@@ -396,5 +805,15 @@
 
             init();
         </script>
+
+        <div class="rationale-overlay" id="rationale-overlay" onclick="if(event.target===this)closeRationalePopup()">
+            <div class="rationale-popup">
+                <div class="popup-header">
+                    <span class="popup-symbol" id="popup-symbol"></span>
+                    <button class="popup-close" onclick="closeRationalePopup()">&times;</button>
+                </div>
+                <div class="popup-body" id="popup-body"></div>
+            </div>
+        </div>
     </body>
 </html>

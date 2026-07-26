@@ -1,21 +1,40 @@
-pandas>=2.1,<3.0
-numpy>=1.26,<3.0
-pyyaml>=6.0,<7.0
-requests>=2.31,<3.0
-beautifulsoup4>=4.12,<5.0
-curl_cffi>=0.7.0
-nsepython>=2.95
-yfinance>=0.2.40,<2.0
-pandas-ta>=0.3.14b0
-APScheduler>=3.10,<4.0
-python-telegram-bot>=21.0,<22.0
-pydantic>=2.6,<3.0
-kiteconnect>=5.0
-python-dotenv>=1.0,<2.0
-flask>=3.0,<4.0
-scrapegraphai>=1.0.0
-playwright>=1.40.0
-scrapegraph-py>=2.1.0
-langchain-google-genai>=1.0.0
-tenacity>=8.2,<9.0
-telethon>=1.30,<2.0
+# ─────────────────────────────────────────────────────────────────────────────
+# StockMinded — CORE runtime dependencies (lean signal + paper-trading engine).
+#
+# L7 FIX: dependencies are now pinned to exact versions and split into 3 files:
+#   requirements.txt           -> core runtime (this file)
+#   requirements-optional.txt  -> heavy scraping/AI deps (advanced features only)
+#   requirements-dev.txt       -> test / dev tooling
+#
+# ⚠️  IMPORTANT: the exact pins below are set to the LOWER BOUNDS of the loose
+# ranges this project previously declared. They were NOT regenerated against a
+# live `pip freeze` (the reviewer had no access to the venv). Before you rely on
+# this file for a reproducible build, regenerate a lock file from your working
+# environment and install from it:
+#
+#     pip freeze > requirements.lock.txt
+#     pip install -r requirements.lock.txt
+#
+# If a pin below does not match a version you can install, bump it to the exact
+# version `pip freeze` reports for that package.
+# ─────────────────────────────────────────────────────────────────────────────
+pandas==2.1.4
+numpy==1.26.4
+pyyaml==6.0.1
+requests==2.31.0
+beautifulsoup4==4.12.3
+curl_cffi==0.7.0
+nsepython==2.95
+yfinance==0.2.40
+pandas-ta==0.3.14b0
+APScheduler==3.10.4
+python-telegram-bot==21.0.1
+pydantic==2.6.0
+kiteconnect==5.0.0
+python-dotenv==1.0.1
+flask==3.0.3
+tenacity==8.2.3
+telethon==1.30.0
+# Runtime dep that was previously MISSING from requirements but is imported by
+# data/shoonya_fetcher.py (TOTP generation for Shoonya OAuth).
+pyotp==2.9.0

@@ -1,19 +1,16 @@
 """Fundamental data fetcher for the Telegram pipeline.
 
-Screener.in does NOT expose a free, unauthenticated JSON financials API
-(only a lightweight search-suggest endpoint). Therefore this module scrapes
-the public company page HTML:
+Two scraping strategies:
+1. **Structured parse** (default): extracts specific fields from known HTML
+   selectors (#top-ratios, #quarters, #ratios). Fast and token-free.
+2. **Adaptive LLM** (optional): grabs ALL tables as raw Markdown and passes
+   them to the LLM with a sector-agnostic prompt. The LLM deduces the
+   business model from row labels (e.g. "Financing Profit" → banking,
+   "Operating Profit" → corporate). Zero maintenance — new metrics or
+   exotic sectors (REITs, InvITs) require no code changes.
 
-  * ``#quarters`` <section> for the quarterly P&L (Sales, OPM %, Net Profit)
-    — used to compute Qtr Sales/Profit YoY variance and the OPM trend.
-  * ``#top-ratios`` / ``#ratios`` for whatever consolidated ratios are present
-    in the free page (typically ROCE %; Debt/Equity, Pledged %, and 3Y growth
-    are often absent on the unauthenticated page).
-
-Because the free page frequently omits core ratios, MISSING fields are treated
-as "no opinion" (the corresponding hard filter is skipped) rather than an
-automatic AVOID. The margin-compression checks (which rely only on the
-quarterly table) remain fully enforced.
+The adaptive path is triggered when ``call_llm`` is passed to
+``fetch_fundamentals``. Without it, the structured parse is used as before.
 
 FALLBACK: yfinance key ratios when HTML scraping fails.
 Caching: SQLite ``fundamentals_cache`` table via ``ops.journal.Journal`` with
@@ -178,6 +175,215 @@ def fetch_screener(symbol: str, timeout: int = 20, company_name: str = "") -> di
         return None
 
 
+# ---------------------------------------------------------------------------
+# Adaptive LLM-based fundamental analysis
+# ---------------------------------------------------------------------------
+
+def scrape_raw_tables(symbol: str, timeout: int = 20) -> str | None:
+    """Scrape core financial tables from the Screener page as Markdown.
+
+    Uses pandas to grab <table> tags, then filters to only core financial
+    tables (P&L, Balance Sheet, Cash Flows, Ratios, Shareholding) to avoid
+    token bloat from Peer Comparison, Documents, etc.
+
+    The Markdown string preserves the exact row labels Screener provides
+    (which vary by sector — e.g. "Financing Profit" for banks, "Operating
+    Profit" for corporates). Returns None on fetch failure.
+    """
+    try:
+        from curl_cffi import requests as curl_requests
+        url = _BASE.format(symbol=symbol)
+        r = curl_requests.get(url, impersonate="chrome", timeout=timeout)
+        if r.status_code != 200:
+            logger.warning("Screener raw tables %s -> HTTP %s", symbol, r.status_code)
+            return None
+        html = r.text
+    except Exception:
+        try:
+            import requests as _req
+            r = _req.get(_BASE.format(symbol=symbol), headers=_HEADERS, timeout=timeout)
+            if r.status_code != 200:
+                return None
+            r.encoding = r.apparent_encoding or "utf-8"
+            html = r.text
+        except Exception as e:
+            logger.warning("Screener raw tables %s failed: %s", symbol, e)
+            return None
+
+    try:
+        import pandas as pd
+        from io import StringIO
+
+        tables = pd.read_html(StringIO(html))
+        if not tables:
+            return None
+
+        # Keywords that indicate a core financial table worth sending to LLM.
+        # Matches in header row or first column of each table.
+        _KEEP_KEYWORDS = {
+            "sales", "revenue", "profit", "loss", "ebitda", "eps",
+            "operating", "financing", "interest", "depreciation",
+            "dividend", "equity", "assets", "liabilities", "cash",
+            "debt", "roce", "roe", "ronw", "npa", "nim", "casa",
+            "capital adequacy", "promoter", "pledge", "holding",
+            "ratio", "mcap", "price", "book", "yield",
+            # Screener section headers (appear as first row)
+            "quarterly results", "profit & loss", "balance sheet",
+            "cash flow", "ratios", "shareholding",
+        }
+
+        # Dates in header → likely a financial table (e.g. "Mar 2024", "Jun 2025")
+        _DATE_PATTERN = re.compile(r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}\b")
+
+        def _is_financial_table(df: pd.DataFrame) -> bool:
+            """Return True if the DataFrame looks like core financial data."""
+            if df.empty or len(df.columns) < 2:
+                return False
+            # Sample header row and first column values
+            header_text = " ".join(str(c).lower() for c in df.columns)
+            first_col_text = " ".join(str(v).lower() for v in df.iloc[:, 0].head(20).tolist())
+            combined = header_text + " " + first_col_text
+            # Check for financial keywords
+            if any(kw in combined for kw in _KEEP_KEYWORDS):
+                return True
+            # Check for date-heavy headers (annual/quarterly tables)
+            if _DATE_PATTERN.search(header_text):
+                return True
+            return False
+
+        sections = []
+        for idx, df in enumerate(tables):
+            df = df.dropna(how="all")
+            if df.empty:
+                continue
+            if not _is_financial_table(df):
+                continue
+            sections.append(f"Table {idx + 1}:\n{df.to_string(index=False)}")
+
+        return "\n\n".join(sections) if sections else None
+    except Exception as e:
+        logger.warning("Screener raw tables parse %s failed: %s", symbol, e)
+        return None
+
+
+_ADAPTIVE_SYSTEM_PROMPT = """\
+You are an expert fundamental equity analyst specializing in Indian markets.
+
+I will provide raw financial tables scraped from Screener.in for a company.
+The tables use Screener's native labels which vary by sector:
+- Banks/NBFCs: "Financing Profit", "Interest", "NPA", "Capital Adequacy"
+- Corporate/Manufacturing: "Operating Profit", "Material Cost", "ROCE"
+- IT/Services: "Revenue", "EBITDA Margin", "Employee Cost"
+- REITs/InvITs: "Distributable Income", "Distribution Yield"
+
+Your task:
+1. IDENTIFY the business model from row labels (do NOT assume — deduce from vocabulary)
+2. EXTRACT the latest 4 quarters and latest 3 years of key metrics
+3. COMPUTE:
+   - Sales/Revenue growth trend (quarterly YoY and multi-year)
+   - Profitability trend (margin direction, not just absolute level)
+   - Balance sheet health using ONLY metrics present in the data
+     (skip metrics that are absent — do NOT flag as "missing data")
+4. FLAG risks visible in the numbers (margin decay, debt trajectory, pledge %, etc.)
+5. Return a JSON object with EXACTLY these keys:
+{
+  "business_model": "banking|nbfc|corporate|it_services|reit|other",
+  "confidence": "HIGH|MEDIUM|LOW",
+  "key_metrics": {
+    "metric_name": {"latest": value, "trend": "improving|stable|declining"}
+  },
+  "thesis": "2-3 sentence investment thesis",
+  "risk": "Biggest fundamental risk visible in the numbers",
+  "verdict": "STRONG_BUY|BUY|HOLD|AVOID"
+}
+
+Rules:
+- Use ONLY data present in the tables. Never hallucinate missing metrics.
+- If a metric is not available, omit it from key_metrics.
+- For banks: focus on NIM, ROA, NPA trend, CASA ratio — ignore Debt/Equity.
+- For corporates: focus on ROCE, OPM trend, D/E, promoter pledge.
+- Reply with ONLY the JSON object. No preamble, no markdown fences."""
+
+
+def adaptive_fundamental_analysis(
+    symbol: str,
+    call_llm: callable,
+    company_name: str = "",
+    timeout: int = 20,
+) -> dict | None:
+    """Scrape raw Screener tables and use LLM for sector-agnostic analysis.
+
+    Args:
+        symbol: NSE/BSE ticker
+        call_llm: callable(prompt, system_prompt, json_mode, max_tokens) -> (str, str)
+        company_name: optional company name for Screener search fallback
+        timeout: HTTP timeout in seconds
+
+    Returns:
+        dict with keys: business_model, confidence, key_metrics, thesis, risk, verdict
+        or None on failure.
+    """
+    raw = scrape_raw_tables(symbol, timeout=timeout)
+    if not raw:
+        return None
+
+    # Truncate to ~12k chars (~3k tokens) to stay within provider limits.
+    # The LLM only needs the latest 4 quarters + latest 3 years for analysis;
+    # full peer comparison/shareholding bloat is already filtered out.
+    _MAX_CHARS = 12000
+    if len(raw) > _MAX_CHARS:
+        raw = raw[:_MAX_CHARS] + f"\n\n[truncated at {_MAX_CHARS} chars]"
+
+    label = company_name or symbol
+    prompt = (
+        f"Analyze the fundamentals of {label} ({symbol}.NS) based on the "
+        f"following Screener.in data:\n\n{raw}"
+    )
+
+    try:
+        resp, provider = call_llm(
+            prompt=prompt,
+            system_prompt=_ADAPTIVE_SYSTEM_PROMPT,
+            json_mode=True,
+            max_tokens=512,
+            return_provider=True,
+        )
+    except Exception as e:
+        logger.warning("Adaptive analysis LLM call failed for %s: %s", symbol, e)
+        return None
+
+    if not resp:
+        return None
+
+    # Handle both dict (pre-parsed) and string responses
+    if isinstance(resp, dict):
+        resp["_provider"] = provider
+        logger.debug("Adaptive analysis OK for %s (%s): model=%s", symbol, resp.get("business_model"), resp.get("verdict"))
+        return resp
+
+    # Parse JSON string response
+    try:
+        import json
+        text = str(resp).strip()
+        # Strip markdown fences if present
+        if text.startswith("```"):
+            text = text.split("\n", 1)[1]
+            if text.endswith("```"):
+                text = text[:-3]
+        # Handle Python repr strings (single quotes → double quotes)
+        if text.startswith("{") and "'" in text and '"' not in text:
+            text = text.replace("'", '"')
+        result = json.loads(text)
+        if isinstance(result, dict):
+            result["_provider"] = provider
+            logger.debug("Adaptive analysis OK for %s (%s): model=%s", symbol, result.get("business_model"), result.get("verdict"))
+            return result
+    except (json.JSONDecodeError, IndexError):
+        logger.warning("Adaptive analysis LLM returned non-JSON for %s: %s", symbol, str(resp)[:100])
+
+    return None
+
+
 def _extract_quarterly(soup) -> dict:
     """Return dict with sales/profit/opm series (newest-first) + YoY vars."""
     out = {"sales": [], "profit": [], "opm": []}
@@ -280,14 +486,27 @@ def fetch_fundamentals(
     cache_ttl_hours: int = 24,
     rate_limit_delay: float = 2.0,
     company_name: str = "",
+    call_llm: callable | None = None,
 ) -> dict | None:
     """Return fundamentals for ``symbol``: cache -> Screener HTML -> yfinance.
+
+    When ``call_llm`` is provided, the adaptive LLM analysis is also run
+    and its output is included as ``adaptive_analysis`` in the result dict.
 
     When ``journal`` is provided, results are cached in the shared SQLite DB.
     """
     if journal is not None:
         cached = journal.get_cached_fundamentals(symbol, max_age_hours=cache_ttl_hours)
         if cached and cached.get("available_fields"):
+            # Even for cached data, run adaptive analysis if call_llm is available
+            if call_llm is not None and "adaptive_analysis" not in cached:
+                adaptive = adaptive_fundamental_analysis(symbol, call_llm, company_name)
+                if adaptive:
+                    cached["adaptive_analysis"] = adaptive
+                    try:
+                        journal.cache_fundamentals(symbol, cached, datetime.now(timezone.utc).isoformat())
+                    except Exception:
+                        pass
             return cached
 
     data = fetch_screener(symbol, company_name=company_name)
@@ -299,6 +518,15 @@ def fetch_fundamentals(
     if data is None:
         logger.warning("Fundamentals unavailable for %s", symbol)
         return None
+
+    # Run adaptive LLM analysis if provider available
+    if call_llm is not None:
+        try:
+            adaptive = adaptive_fundamental_analysis(symbol, call_llm, company_name)
+            if adaptive:
+                data["adaptive_analysis"] = adaptive
+        except Exception as e:
+            logger.debug("Adaptive analysis skipped for %s: %s", symbol, e)
 
     if journal is not None:
         journal.cache_fundamentals(symbol, data, datetime.now(timezone.utc).isoformat())

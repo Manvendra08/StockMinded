@@ -92,7 +92,9 @@ def load_config(path: str | None = None) -> dict:
 
 
 def fetch_fno200_symbols() -> list[str]:
-    import logging
+    # L8 FIX: removed the redundant function-local `import logging` — the module
+    # already imports `logging` at the top.
+    logger = logging.getLogger(__name__)
     try:
         import nsepython
         import threading
@@ -103,14 +105,23 @@ def fetch_fno200_symbols() -> list[str]:
                 symbols = nsepython.fnolist()
                 if symbols:
                     result.extend(symbols)
-            except (KeyError, TypeError, AttributeError, Exception) as e:
-                # NSE API response format may have changed
-                logging.getLogger(__name__).debug(f"nsepython.fnolist() failed: {e}")
-                pass
+            except Exception as e:
+                # L8 FIX: `Exception` already subsumes KeyError/TypeError/AttributeError;
+                # listing the subclasses first was redundant noise. Surface the real
+                # failure at WARNING (was DEBUG) so a broken NSE response is visible.
+                logging.getLogger(__name__).warning(
+                    "[universe] nsepython.fnolist() failed: %s", e
+                )
             
-        t = threading.Thread(target=fetch)
+        t = threading.Thread(target=fetch, daemon=True)
         t.start()
         t.join(timeout=5)
+        # L8 FIX: a 5s join() that times out used to fall through silently. Log the
+        # actual outcome (timeout vs. exception) instead of hiding it.
+        if t.is_alive():
+            logging.getLogger(__name__).warning(
+                "[universe] nsepython.fnolist() timed out after 5s; falling back"
+            )
         if result:
             valid = [s.strip() for s in result if isinstance(s, str) and s.strip() and s != "Symbol"]
             if valid:
@@ -119,8 +130,9 @@ def fetch_fno200_symbols() -> list[str]:
         logging.getLogger(__name__).debug("nsepython not installed")
         pass
     except Exception as e:
-        logging.getLogger(__name__).debug(f"fetch_fno200_symbols unexpected error: {e}")
-        pass
+        logging.getLogger(__name__).warning(
+            "[universe] fetch_fno200_symbols unexpected error: %s", e
+        )
         
     logging.getLogger(__name__).warning("[universe] Failed to fetch FNO universe from nsepython, falling back to FO_SAMPLE")
     # Use hardcoded FO sample list as fallback
@@ -150,7 +162,9 @@ def load_universe(cfg: dict) -> list[str]:
             if symbols:
                 return symbols
         except Exception as e:
-            print(f"[config] Failed to load fno200.csv: {e}")
+            logging.getLogger(__name__).warning(
+                "[config] Failed to load fno200.csv: %s", e
+            )
 
         # Fallback to NSE API
         try:
@@ -158,7 +172,9 @@ def load_universe(cfg: dict) -> list[str]:
             if symbols:
                 return symbols
         except Exception as e:
-            print(f"[config] Failed to fetch from nsepython: {e}")
+            logging.getLogger(__name__).warning(
+                "[config] Failed to fetch from nsepython: %s", e
+            )
 
         # Final fallback
         fallback = cfg.get("universe_fo_sample", [])
@@ -192,5 +208,7 @@ def load_sector_map(cfg: dict | None = None) -> dict[str, str]:
                 if row.get("symbol", "").strip() and row.get("sector", "").strip()
             }
     except Exception as e:
-        print(f"[config] WARNING: could not load sector map from fno200.csv: {e}")
+        logging.getLogger(__name__).warning(
+            "[config] could not load sector map from fno200.csv: %s", e
+        )
         return {}

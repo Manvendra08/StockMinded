@@ -37,8 +37,9 @@ class TestTrailingStopLoss:
     @patch("dashboard.paper_trader._get_ltp_batch")
     @patch("dashboard.paper_trader.is_market_open", return_value=True)
     def test_trailing_sl_does_not_choke_on_small_gain(self, mock_market_open, mock_ltp_batch, tmp_path):
-        """Standard trailing SL should update peak and SL but not choke the trade."""
-        # Entry price = 100, sl_pct = 3%, initial stop loss = 97
+        """Trailing SL must NOT move below the trail_activation_pct threshold."""
+        # Entry price = 100, sl_pct = 3%, trail_activation_pct = 2.0%
+        # A tiny gain of 0.10% is below the 2% threshold → SL must stay at initial 97.0
         trade = {
             "id": 1,
             "symbol": "TEST",
@@ -55,13 +56,12 @@ class TestTrailingStopLoss:
             "entry_date": "2026-06-09"
         }
 
-        # Initialize mock DB state
         mock_data = {
             "trades": [trade],
             "option_trades": [],
             "daily_summaries": [],
             "strategy_notes": [],
-            "settings": {"trail_sl": True, "sl_pct": 3.0, "auto_close_eod": False},
+            "settings": {"trail_sl": True, "trail_activation_pct": 2.0, "sl_pct": 3.0, "auto_close_eod": False},
             "cumulative_pnl": 0.0,
             "version": 1
         }
@@ -69,24 +69,77 @@ class TestTrailingStopLoss:
         with patch("dashboard.paper_trader._load_db", return_value=mock_data), \
              patch("dashboard.paper_trader._save_db") as mock_save:
             
-            # Step 1: Price ticks up slightly to 100.10
+            # Step 1: Price ticks up slightly to 100.10 (+0.10%, below 2% threshold)
             mock_ltp_batch.return_value = {"TEST": 100.10}
             closed = check_and_close_trades()
             
-            # Trade should stay open
+            # Trade must stay open; SL must NOT have moved (still 97.0)
             assert len(closed) == 0
             assert trade["status"] == "OPEN"
-            assert trade["peak_price"] == 100.10
-            # Under standard trailing stop: 100.10 * (1 - 0.03) = 97.097 ~ 97.10
-            assert trade["sl_price"] == 97.10  # Raised slightly, but not choked to 100.05 like old profit lock
+            assert trade["sl_price"] == 97.0, "SL must not trail below trail_activation_pct"
             
-            # Step 2: Price ticks back down to 100.00
-            # Old logic (SL = 100.05) would have stopped out. New logic (SL = 97.10) should stay open.
+            # Step 2: Price ticks back down to 100.00 — still safe at SL=97.0
             mock_ltp_batch.return_value = {"TEST": 100.00}
             closed = check_and_close_trades()
             assert len(closed) == 0
             assert trade["status"] == "OPEN"
-            assert trade["sl_price"] == 97.10  # Stop loss stays at maximum trailed level
+            assert trade["sl_price"] == 97.0
+
+    @patch("dashboard.paper_trader._get_ltp_batch")
+    @patch("dashboard.paper_trader.is_market_open", return_value=True)
+    def test_trailing_sl_activates_after_threshold(self, mock_market_open, mock_ltp_batch):
+        """Trailing SL should only activate once profit exceeds trail_activation_pct."""
+        trade = {
+            "id": 1,
+            "symbol": "TEST",
+            "direction": "LONG",
+            "status": "OPEN",
+            "entry_price": 100.0,
+            "peak_price": 100.0,
+            "sl_price": 97.0,
+            "sl_pct": 3.0,
+            "tgt_price": 120.0,
+            "tgt_pct": 20.0,
+            "qty": 100,
+            "entry_time": "2026-06-09 10:00:00",
+            "entry_date": "2026-06-09"
+        }
+
+        mock_data = {
+            "trades": [trade],
+            "option_trades": [],
+            "daily_summaries": [],
+            "strategy_notes": [],
+            "settings": {"trail_sl": True, "trail_activation_pct": 2.0, "sl_pct": 3.0, "auto_close_eod": False},
+            "cumulative_pnl": 0.0,
+            "version": 1
+        }
+
+        with patch("dashboard.paper_trader._load_db", return_value=mock_data), \
+             patch("dashboard.paper_trader._save_db") as mock_save:
+            
+            # Step 1: Price goes to 101.50 (+1.50%) — still BELOW 2% threshold → no trail
+            mock_ltp_batch.return_value = {"TEST": 101.50}
+            closed = check_and_close_trades()
+            assert len(closed) == 0
+            assert trade["status"] == "OPEN"
+            assert trade["sl_price"] == 97.0, "SL must not trail below trail_activation_pct"
+
+            # Step 2: Price goes to 102.50 (+2.50%) — ABOVE 2% threshold → trail activates
+            mock_ltp_batch.return_value = {"TEST": 102.50}
+            closed = check_and_close_trades()
+            assert len(closed) == 0
+            assert trade["status"] == "OPEN"
+            assert trade["peak_price"] == 102.50
+            assert trade["sl_price"] == round(102.50 * 0.97, 2)  # 99.43
+            
+            # Step 2: Price ticks back down to 100.00 (below activation threshold)
+            # Trail SL holds at last trailed value; does NOT regress to original SL.
+            mock_ltp_batch.return_value = {"TEST": 100.00}
+            closed = check_and_close_trades()
+            assert len(closed) == 0
+            assert trade["status"] == "OPEN"
+            assert trade["sl_price"] == round(102.50 * 0.97, 2)  # 99.42 — lock held below threshold
 
     @patch("dashboard.paper_trader._get_ltp_batch")
     @patch("dashboard.paper_trader.is_market_open", return_value=True)
@@ -113,7 +166,7 @@ class TestTrailingStopLoss:
             "option_trades": [],
             "daily_summaries": [],
             "strategy_notes": [],
-            "settings": {"trail_sl": True, "sl_pct": 3.0, "auto_close_eod": False},
+            "settings": {"trail_sl": True, "trail_activation_pct": 2.0, "sl_pct": 3.0, "auto_close_eod": False},
             "cumulative_pnl": 0.0,
             "version": 1
         }

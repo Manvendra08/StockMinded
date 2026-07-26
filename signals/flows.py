@@ -497,13 +497,15 @@ def snapshot(
 
         # BUG-F04 FIX: Wrap AI sentiment call in ThreadPoolExecutor with timeout
         # to prevent hanging the critical dashboard path.
+        # OpenCode Zen tries big-pickle first (reliable, ~11s); 30s covers
+        # one retry if the first model fails.
         try:
             with ThreadPoolExecutor(max_workers=1) as ex:
                 future = ex.submit(
                     ai_scraper.get_market_news_sentiment,
                     market_context=_market_ctx if _market_ctx else None,
                 )
-                ai_sentiment = future.result(timeout=10)
+                ai_sentiment = future.result(timeout=45)
         except (FuturesTimeout, Exception):
             ai_sentiment = None
             logging.getLogger(__name__).warning(

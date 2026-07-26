@@ -1,0 +1,9 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# StockMinded — DEVELOPMENT / TEST tooling (not required at runtime).
+#
+# L7 FIX: dev-only deps split out of the runtime requirements.
+#     pip install -r requirements-dev.txt
+#
+# Same pin caveat as requirements.txt applies: verify against `pip freeze`.
+# ─────────────────────────────────────────────────────────────────────────────
+pytest==8.0.0

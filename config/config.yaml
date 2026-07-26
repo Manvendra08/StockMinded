@@ -1,321 +1,262 @@
 account:
   capital: 7000000
   currency: INR
-
-risk:
-  per_trade_pct: 0.0075
-  concurrent_open_pct: 0.03
-  daily_stop_pct: 0.02
-  monthly_stop_pct: 0.06
-  margin_util_cap: 0.60
-  correlation_max: 0.70
-
-targets:
-  monthly_net_pct: 0.05
-  weekly_net_pct: 0.0125
-
-indices:
-  - NIFTY
-  - BANKNIFTY
-
-sectors:
-  - NIFTY IT
-  - NIFTY BANK
-  - NIFTY AUTO
-  - NIFTY PHARMA
-  - NIFTY FMCG
-  - NIFTY METAL
-  - NIFTY ENERGY
-  - NIFTY REALTY
-  - NIFTY INFRA
-  - NIFTY PSE
-  - NIFTY PVT BANK
-
-universe_source: fno200 # fno200 | fo_sample
-intraday_top_n: 30
-
-universe_fo_sample:
-  - RELIANCE
-  - HDFCBANK
-  - ICICIBANK
-  - INFY
-  - TCS
-  - LT
-  - SBIN
-  - AXISBANK
-  - KOTAKBANK
-  - ITC
-  - HINDUNILVR
-  - BHARTIARTL
-  - MARUTI
-  - M&M
-  - SUNPHARMA
-  - BAJFINANCE
-  - ASIANPAINT
-  - TITAN
-  - ADANIENT
-
-schedule_ist:
-  morning_dashboard: "08:45"
-  entry_window_open: "09:20"
-  midday_check: "12:30"
-  eod_review: "15:20"
-
-broker:
-  provider: dhan # kite | dhan | fyers
-  api_key: "${BROKER_API_KEY}"
-  api_secret: "${BROKER_API_SECRET}"
-  access_token: "${BROKER_ACCESS_TOKEN}"
-  dhan:
-    client_id: "${DHAN_CLIENT_ID}"
-    access_token: "${DHAN_ACCESS_TOKEN}"
-
 alerts:
-  telegram_bot_token: "${TELEGRAM_BOT_TOKEN}"
-  telegram_chat_id: "${TELEGRAM_CHAT_ID}"
-
-paths:
-  journal_db: "./data/journal.sqlite"
-  cache_dir: "./data/cache"
-
-data_sources:
-  dhan:
-    enabled: false # Dhan API is not subscribed (paid). Using Dhan Public scraper instead.
-    primary: false
-    instrument_master_url: "https://images.dhan.co/api-data/api-scrip-master.csv"
-    underlyings:
-      NIFTY: { security_id: 13, segment: IDX_I }
-      BANKNIFTY: { security_id: 25, segment: IDX_I }
-      FINNIFTY: { security_id: 27, segment: IDX_I }
-
-  local_files:
-    option_chain: "./data/manual/option_chain_NIFTY.csv"
-
-  scrapegraphai:
-    enabled: true
-    model: "google_genai/gemini-2.5-flash-lite"
-    model_tokens: 8192
-    api_key: "${GOOGLE_API_KEY}"
-    hf_api_key: "${HF_API_TOKEN}"
-    bedrock_api_key: "${BEDROCK_API_KEY}"
-    groq_api_key: "${GROQ_API_KEY}"
-    openrouter_api_key: "${OPENROUTER_API_KEY}"
-    sambanova_api_key: "${SAMBANOVA_API_KEY}"
-    saas_api_key: "${SCRAPEGRAPHAI_API_KEY}"
-    opencode_api_key: "${OPENCODE_API_KEY}"
-    nvidia_api_key: "${NVIDIA_API_KEY}"
-    cf_api_token: "${CLOUDFLARE_API_TOKEN}"
-    cf_account_id: "${CLOUDFLARE_ACCOUNT_ID}"
-    github_api_key: "${GITHUB_TOKEN}"
-
-options:
-  enabled: true
-  underlyings: [NIFTY, BANKNIFTY]
-  lot_size: { NIFTY: 65, BANKNIFTY: 30, FINNIFTY: 60 }
-  strike_step: { NIFTY: 50, BANKNIFTY: 100 }
-  expiry_preference: weekly # weekly | monthly
-  max_risk_per_structure_pct: 0.0075
-  max_concurrent_structures: 10
-  iv_history_db: ./data/iv_history.sqlite # Per user choice - initial structures
-  enabled_structures:
-    - BULL_CALL_SPREAD
-    - BEAR_PUT_SPREAD
-    - LONG_STRADDLE
-    - SHORT_STRANGLE_WINGED # short strangle + protective wings (defined risk)
-
-# NIFTY Option Selling - Defined Risk Only
-nifty_options:
-  enabled: true
-  # Minimum lot count per leg (10 means 10 * lot_size contracts per leg)
-  min_lots_per_leg: 10
-  # Trade modes: intraday | positional
-  mode: positional
-  # Intraday window
-  intraday_entry_start: "09:45"
-  intraday_entry_end: "14:30"
-  intraday_exit_by: "15:25"
-  # Positional window - All weekdays enabled for paper trading (0=Mon, 4=Fri)
-  positional_entry_days: [0, 1, 2, 3, 4]
-  positional_exit_expiry_cutoff: "15:15"
-  # Max concurrent NIFTY structures
-  max_nifty_structures: 2
-  # Strategy wings
-  iron_condor_wing_width: 300 # Rs distance for Iron Condor wings
-  spread_width: 200 # Rs distance for credit spreads
-  # Risk per structure (% of account capital)
-  max_risk_per_pct: 0.01 # 1% max risk per NIFTY structure
-  # Avoid conditions
-  avoid_vol_expansion: true # Don't sell when VIX expanding
-  vol_expansion_threshold: 5.0 # % VIX change to block entry
-  # Exit rules
-  profit_take_pct: 0.50 # Book profit at 50% of max credit
-  stop_loss_mult: 1.25 # Stop loss at 1.25x credit received (matches banknifty; defined-risk credit spreads)
-  vix_spike_exit_pct: 10.0 # Close if VIX jumps >10% intraday
-  # Minimum short-leg premium (per share): skip strikes where premium < this
-  #   (walk TOWARDS ATM to get adequate credit; reject if ATM also below floor)
-  min_short_premium: 15.0
-  # Maximum short-leg premium (per share): skip strikes where premium >= this
-  #   (walk further OTM to reduce risk; reject if can't get below cap)
-  max_short_premium: 150.0
-
-# BANKNIFTY Option Selling - Defined Risk Only
+  telegram_bot_token: ${TELEGRAM_BOT_TOKEN}
+  telegram_chat_id: ${TELEGRAM_CHAT_ID}
 banknifty_options:
-  enabled: true
-  min_lots_per_leg: 5
-  mode: positional
-  intraday_entry_start: "09:45"
-  intraday_entry_end: "14:30"
-  intraday_exit_by: "15:25"
-  positional_entry_days: [0, 1, 2, 3, 4]
-  positional_exit_expiry_cutoff: "15:15"
-  max_banknifty_structures: 2
-  iron_condor_wing_width: 600
-  spread_width: 400
-  max_risk_per_pct: 0.01
   avoid_vol_expansion: true
-  vol_expansion_threshold: 5.0
-  profit_take_pct: 0.50
+  enabled: true
+  intraday_entry_end: '15:15'
+  intraday_entry_start: 09:15
+  intraday_exit_by: '15:25'
+  iron_condor_wing_width: 600
+  max_banknifty_structures: 2
+  max_risk_per_pct: 0.01
+  max_short_premium: 500.0
+  min_lots_per_leg: 5
+  min_short_premium: 15.0
+  mode: positional
+  positional_entry_days:
+  - 0
+  - 1
+  - 2
+  - 3
+  - 4
+  positional_exit_expiry_cutoff: '15:15'
+  profit_take_pct: 0.5
+  spread_width: 400
   stop_loss_mult: 1.25
   vix_spike_exit_pct: 10.0
-  min_short_premium: 15.0
-  max_short_premium: 500.0
-
-# FII Derivatives Thresholds (₹Cr) for bias scoring
-# Normalized by 5-day rolling average volume in future enhancement
+  vol_expansion_threshold: 5.0
+broker:
+  access_token: ${BROKER_ACCESS_TOKEN}
+  api_key: ${BROKER_API_KEY}
+  api_secret: ${BROKER_API_SECRET}
+  dhan:
+    access_token: ${DHAN_ACCESS_TOKEN}
+    client_id: ${DHAN_CLIENT_ID}
+  provider: dhan
+data_sources:
+  dhan:
+    enabled: false
+    instrument_master_url: https://images.dhan.co/api-data/api-scrip-master.csv
+    primary: false
+    underlyings:
+      BANKNIFTY:
+        security_id: 25
+        segment: IDX_I
+      FINNIFTY:
+        security_id: 27
+        segment: IDX_I
+      NIFTY:
+        security_id: 13
+        segment: IDX_I
+  local_files:
+    option_chain: ./data/manual/option_chain_NIFTY.csv
+  scrapegraphai:
+    api_key: ${GOOGLE_API_KEY}
+    bedrock_api_key: ${BEDROCK_API_KEY}
+    cf_account_id: ${CLOUDFLARE_ACCOUNT_ID}
+    cf_api_token: ${CLOUDFLARE_API_TOKEN}
+    enabled: true
+    github_api_key: ${GITHUB_TOKEN}
+    groq_api_key: ${GROQ_API_KEY}
+    hf_api_key: ${HF_API_TOKEN}
+    model: google_genai/gemini-2.5-flash-lite
+    model_tokens: 8192
+    nvidia_api_key: ${NVIDIA_API_KEY}
+    opencode_api_key: ${OPENCODE_API_KEY}
+    openrouter_api_key: ${OPENROUTER_API_KEY}
+    saas_api_key: ${SCRAPEGRAPHAI_API_KEY}
+    sambanova_api_key: ${SAMBANOVA_API_KEY}
 fii_derivatives_thresholds:
   index_futures_5d_cr: 1000.0
   index_options_5d_cr: 2000.0
   stock_futures_5d_cr: 2000.0
-
-# Timing Engine - Overextension & Market Exhaustion Filters
-timing_engine:
+indices:
+- NIFTY
+- BANKNIFTY
+intraday_top_n: 30
+investment_dashboard:
+  auto_refresh_seconds: 300
   enabled: true
-  sentiment_refresh_minutes: 20
-
-  late_entry_filter:
-    enabled: true
-    # Price must be within X% of VWAP (e.g., 1.0%)
-    max_vwap_dist_pct: 1.0
-    # RSI levels: LONG fails if RSI > threshold, SHORT fails if RSI < threshold
-    rsi_threshold_long: 70
-    rsi_threshold_short: 30
-    # Price distance from day open (avoid chasing after big gaps)
-    max_move_from_open_pct: 1.2
-    # Max extension in ATRs from open (1.0 = 1 ATR away from open)
-    max_intraday_atr_extension: 1.0
-
-  market_exhaustion:
-    enabled: true
-    # Breadth ratio threshold (advances drop >X% of prior 20-session avg)
-    breadth_drop_threshold_pct: 8
-    # VIX intraday spike (>X% from yesterday close) signals risk-off
-    vix_intraday_spike_pct: 5
-
-  event_risk_mode:
-    enabled: true
-    # Reduce position size by this factor when event risk is elevated
-    size_multiplier: 0.5
-    # Soft cutoff: no new EQUITY entries after this time (option spreads allowed)
-    no_fresh_equity_after: "11:30"
-    # Trigger event-risk mode if sentiment flip (detected via AI review)
-    sentiment_flip_cooldown_minutes: 30
-
-  # [PHASE 2] AI Timing Review
+  max_history_scans: 50
+nifty_options:
+  avoid_vol_expansion: true
+  enabled: true
+  intraday_entry_end: '15:15'
+  intraday_entry_start: 09:15
+  intraday_exit_by: '15:25'
+  iron_condor_wing_width: 300
+  max_nifty_structures: 2
+  max_risk_per_pct: 0.01
+  max_short_premium: 150.0
+  min_lots_per_leg: 10
+  min_short_premium: 15.0
+  mode: positional
+  positional_entry_days:
+  - 0
+  - 1
+  - 2
+  - 3
+  - 4
+  positional_exit_expiry_cutoff: '15:15'
+  profit_take_pct: 0.5
+  spread_width: 200
+  stop_loss_mult: 1.25
+  vix_spike_exit_pct: 10.0
+  vol_expansion_threshold: 5.0
+options:
+  enabled: true
+  enabled_structures:
+  - BULL_CALL_SPREAD
+  - BEAR_PUT_SPREAD
+  - LONG_STRADDLE
+  - SHORT_STRANGLE_WINGED
+  expiry_preference: weekly
+  iv_history_db: ./data/iv_history.sqlite
+  lot_size:
+    BANKNIFTY: 15
+    FINNIFTY: 40
+    NIFTY: 75
+  margin:
+    cross_hedge_retention_pct: 0.15
+    hedged_spread_per_lot:
+      BANKNIFTY: 30000.0
+      NIFTY: 30000.0
+      _default: 30000.0
+    lot_size:
+      BANKNIFTY: 15
+      NIFTY: 75
+      NIFTY_large: 75
+      NIFTY_small: 25
+      _default: 75
+    naked_short_per_lot:
+      BANKNIFTY: 120000.0
+      NIFTY: 120000.0
+      _default: 120000.0
+  max_concurrent_structures: 10
+  max_risk_per_structure_pct: 0.0075
+  strike_step:
+    BANKNIFTY: 100
+    NIFTY: 50
+  underlyings:
+  - NIFTY
+  - BANKNIFTY
+paths:
+  cache_dir: ./data/cache
+  journal_db: ./data/journal.sqlite
+risk:
+  concurrent_open_pct: 0.03
+  correlation_max: 0.7
+  daily_stop_pct: 0.02
+  margin_util_cap: 0.6
+  monthly_stop_pct: 0.06
+  per_trade_pct: 0.0075
+sahi_news:
+  enabled: true
+  max_headlines: 60
+  max_pages: 4
+  min_confidence: 0.4
+  min_interval_seconds: 3600
+  window_minutes: 60
+schedule_ist:
+  entry_window_open: 09:20
+  eod_review: '15:20'
+  midday_check: '12:30'
+  morning_dashboard: 08:45
+sectors:
+- NIFTY IT
+- NIFTY BANK
+- NIFTY AUTO
+- NIFTY PHARMA
+- NIFTY FMCG
+- NIFTY METAL
+- NIFTY ENERGY
+- NIFTY REALTY
+- NIFTY INFRA
+- NIFTY PSE
+- NIFTY PVT BANK
+targets:
+  monthly_net_pct: 0.05
+  weekly_net_pct: 0.0125
+telegram_pipeline:
+  channels:
+  - enabled: true
+    name: redbox_global
+    username: Indiaredboxglobal
+  enabled: true
+  max_messages_per_run: 20
+timing_engine:
   ai_review:
-    enabled: false # Set to true after Phase 1 validation
-    provider: groq # groq | gemini | openrouter
-    model: "mixtral-8x7b-32768" # Groq model
-    temperature: 0.3 # Deterministic responses
-    timeout_sec: 3
-    fallback_on_error: true
-
-  # [PHASE 2] Dynamic Threshold Adjustment
-  dynamic_thresholds:
-    enabled: false # Set to true after Phase 1 analysis
-    adjustment_rules:
-      TREND_UP:
-        # In uptrends, be more lenient on VWAP deviation
-        max_vwap_dist_pct: 1.5
-        rsi_threshold_long: 75
-      TREND_DOWN:
-        # In downtrends, stricter on shorts
-        max_vwap_dist_pct: 0.8
-        rsi_threshold_short: 25
-      RANGE_LOW_VOL:
-        # In ranges, tight around VWAP
-        max_vwap_dist_pct: 0.7
-        max_intraday_atr_extension: 0.7
-      VOL_CONTRACTION:
-        max_vwap_dist_pct: 0.9
-        breadth_drop_threshold_pct: 5
-
-  # [PHASE 2] Sentiment Tracking
-  # Disabled: previous_sentiment is always None → detect_sentiment_flip() always
-  # returns flip_detected=False, making the per-stock call pure overhead (~0.5s × N stocks).
-  sentiment_tracking:
     enabled: false
-    flip_detection: false
-    flip_cooldown_minutes: 30
-    tracking_window_trades: 20
-
-  # [PHASE 2] Backtest Configuration
+    fallback_on_error: true
+    model: mixtral-8x7b-32768
+    provider: groq
+    temperature: 0.3
+    timeout_sec: 3
   backtest:
+    correlation_threshold: 0.6
     enabled: true
     min_trades_for_analysis: 20
-    correlation_threshold: 0.6
-    output_dir: "./data/backtest"
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Dual-Engine Telegram → LLM → Screener → Verdict Pipeline
-# (Additive module. Disabled by default; does not affect existing engines.)
-# ─────────────────────────────────────────────────────────────────────────────
-telegram_pipeline:
-  enabled: true  # master switch — set true to activate
-  # No credentials required: uses the public Telegram Web Preview
-  # (https://t.me/s/{username}) — zero auth, no phone, no API key.
-  channels:
-    - name: "redbox_global"
-      username: "Indiaredboxglobal"  # @Indiaredboxglobal Telegram channel
-      enabled: true
-    - name: "nabor_tips"
-      username: "naborstocktips"  # F&O calls, text-based
-      enabled: true
-    - name: "stock_ideas"
-      username: "StockMarketTradingIdeas"  # Intraday + FNO
-      enabled: true
-    - name: "options_signals"
-      username: "OptionsTradingSignals"  # Options-focused
-      enabled: true
-  max_messages_per_run: 100
-  parser:
-    model: "llama-3.3-70b-versatile"  # via call_llm()
-    temperature: 0.1
-    max_tokens: 1024
-  screener:
+    output_dir: ./data/backtest
+  dynamic_thresholds:
+    adjustment_rules:
+      RANGE_LOW_VOL:
+        max_intraday_atr_extension: 0.7
+        max_vwap_dist_pct: 0.7
+      TREND_DOWN:
+        max_vwap_dist_pct: 0.8
+        rsi_threshold_short: 25
+      TREND_UP:
+        max_vwap_dist_pct: 1.5
+        rsi_threshold_long: 75
+      VOL_CONTRACTION:
+        breadth_drop_threshold_pct: 5
+        max_vwap_dist_pct: 0.9
+    enabled: false
+  enabled: true
+  event_risk_mode:
     enabled: true
-    cache_ttl_hours: 24
-    rate_limit_delay: 2.0  # seconds between requests
-  fusion:
-    model: "llama-3.3-70b-versatile"
-    temperature: 0.3
-    max_tokens: 2048
-    # Moderate profile (plan §2.4). Margin compression auto-reject is on.
-    hard_filters:
-      max_debt_to_equity: 0.75          # skipped for Banking/Financial/NBFC
-      min_roce_pct: 15
-      max_promoter_pledge_pct: 5
-      min_sales_growth_3y_pct: 10
-      min_profit_growth_3y_pct: 10
-      min_qtr_sales_var_pct: 10
-      min_qtr_profit_var_pct: 0
-      margin_compression_reject: true   # Qtr Profit < 0.85x Qtr Sales -> AVOID
-    universe_filter: false  # only keep tickers present in load_universe()
-  # Localhost-only: alerts are displayed on the Investment dashboard page.
-  # No outbound Telegram alerts are sent (no bot token required).
-  alerts:
-    min_confidence: "MEDIUM"  # only surface MEDIUM/HIGH on the dashboard
-
-investment_dashboard:
-  enabled: true  # UI link hidden when false
-  max_history_scans: 50  # retain last N scans
-  auto_refresh_seconds: 300  # UI poll interval
+    no_fresh_equity_after: '11:30'
+    sentiment_flip_cooldown_minutes: 30
+    size_multiplier: 0.5
+  late_entry_filter:
+    enabled: true
+    max_intraday_atr_extension: 1.0
+    max_move_from_open_pct: 1.2
+    max_vwap_dist_pct: 1.0
+    rsi_threshold_long: 70
+    rsi_threshold_short: 30
+  market_exhaustion:
+    breadth_drop_threshold_pct: 8
+    enabled: true
+    vix_intraday_spike_pct: 5
+  sentiment_refresh_minutes: 20
+  sentiment_tracking:
+    enabled: false
+    flip_cooldown_minutes: 30
+    flip_detection: false
+    tracking_window_trades: 20
+universe_fo_sample:
+- RELIANCE
+- HDFCBANK
+- ICICIBANK
+- INFY
+- TCS
+- LT
+- SBIN
+- AXISBANK
+- KOTAKBANK
+- ITC
+- HINDUNILVR
+- BHARTIARTL
+- MARUTI
+- M&M
+- SUNPHARMA
+- BAJFINANCE
+- ASIANPAINT
+- TITAN
+- ADANIENT
+universe_source: fno200

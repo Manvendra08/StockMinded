@@ -56,23 +56,55 @@ def get_notifier_config() -> dict:
         }
     }
 
-def send_telegram_alert(message: str) -> bool:
-    """Send a message via Telegram Bot API."""
+def _escape_html(text: str) -> str:
+    """Escape the three characters Telegram's HTML parse mode treats as special.
+
+    M8 FIX: any unescaped ``&``, ``<`` or ``>`` in the message body makes
+    Telegram reject the request with HTTP 400 (``can't parse entities``), which
+    previously caused alerts to be silently dropped. Escaping the data content
+    keeps the intentional markup added by callers (e.g. ``broadcast_alert``)
+    intact while neutralising everything else.
+    """
+    if text is None:
+        return ""
+    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def send_telegram_alert(message: str, parse_mode: str | None = "HTML") -> bool:
+    """Send a message via Telegram Bot API.
+
+    M8 FIX: ``parse_mode`` is now explicit (default HTML, matching this module's
+    formatting) and a formatted send that Telegram rejects -- most often a 400
+    ``can't parse entities`` caused by a format mismatch -- now falls back to a
+    plain-text send so the alert is still delivered instead of being silently
+    dropped. This mirrors the proven try-formatted-then-plain pattern already
+    used by ``ops.alerts.Alerter``.
+    """
     config = get_notifier_config()["telegram"]
     if not config["enabled"] or not config["token"] or not config["chat_id"]:
         return False
 
     url = f"https://api.telegram.org/bot{config['token']}/sendMessage"
-    payload = {
-        "chat_id": config["chat_id"],
-        "text": message,
-        "parse_mode": "HTML"
-    }
+    session = _create_retry_session()
+
+    payload = {"chat_id": config["chat_id"], "text": message}
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
     
     try:
-        session = _create_retry_session()
         response = session.post(url, json=payload, timeout=10)
-        response.raise_for_status()
+        if response.ok:
+            return True
+        # Formatted send rejected (most often a 400 parse error). Retry once as
+        # plain text so the alert is delivered rather than lost.
+        logger.warning(
+            "Telegram alert failed with parse_mode=%s (HTTP %s); retrying as plain text.",
+            parse_mode, response.status_code,
+        )
+        fallback = session.post(
+            url, json={"chat_id": config["chat_id"], "text": message}, timeout=10
+        )
+        fallback.raise_for_status()
         return True
     except Exception as e:
         logger.error(f"Telegram alert failed: {e}")
@@ -115,9 +147,17 @@ def broadcast_alert(message: str, subject: Optional[str] = None, sentiment: str 
         subject: Optional title for the alert.
         sentiment: BULLISH, BEARISH, or NEUTRAL for color coding.
     """
-    formatted_msg = f"<b>{subject}</b>\n\n{message}" if subject else message
+    # M8 FIX: escape the data content so the HTML payload is always well-formed.
+    # The subject is escaped first and THEN wrapped in <b> so the bold markup is
+    # intentional while any special characters in the subject/body can no longer
+    # trigger a Telegram 400 parse error that previously dropped the alert.
+    safe_message = _escape_html(message)
+    if subject:
+        formatted_msg = f"<b>{_escape_html(subject)}</b>\n\n{safe_message}"
+    else:
+        formatted_msg = safe_message
     
-    tg_status = send_telegram_alert(formatted_msg)
+    tg_status = send_telegram_alert(formatted_msg, parse_mode="HTML")
     
     # Pass raw text to Discord as Embeds handle formatting differently
     ds_status = send_discord_alert(message, subject=subject, sentiment=sentiment)

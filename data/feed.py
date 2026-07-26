@@ -1571,14 +1571,24 @@ def option_chain(symbol: str = "NIFTY", _skip_atm_filter: bool = False) -> dict:
             if cache_file.exists():
                 cached = json.loads(cache_file.read_text(encoding="utf-8"))
                 data = cached.get("data") or {}
-                if data.get("records", {}).get("data"):
-                    # BUG-06 FIX: Removed duplicate _filter_atm_strikes call.
-                    # _save_chain() already filters before writing to disk.
-                    # Filtering again on load with a potentially different spot
-                    # price could produce a narrower/different strike range.
+                ts = cached.get("ts", 0)
+                age = time.time() - ts
+                # Use cache if less than 90 seconds old
+                if data.get("records", {}).get("data") and age < 90:
                     data.setdefault("_cache", {})
-                    data["_cache"].update({"stale": True, "ts": cached.get("ts")})
-                    # Prefix _source so dashboard badge shows "cache:shoonya" etc.
+                    data["_cache"].update({"stale": False, "ts": ts, "age": int(age)})
+                    orig_src = data.get("_source") or "unknown"
+                    if not orig_src.startswith("cache"):
+                        data["_source"] = f"cache:{orig_src}"
+                    with _SOURCE_LOCK:
+                        _OPTION_CHAIN_SOURCE[symbol] = data["_source"]
+                    logging.getLogger(__name__).debug(
+                        "[option_chain cache] %s: cache hit (age=%ds)", symbol, int(age)
+                    )
+                    return data
+                elif data.get("records", {}).get("data"):
+                    data.setdefault("_cache", {})
+                    data["_cache"].update({"stale": True, "ts": ts, "age": int(age)})
                     orig_src = data.get("_source") or "unknown"
                     if not orig_src.startswith("cache"):
                         data["_source"] = f"cache:{orig_src}"
@@ -1763,7 +1773,9 @@ def option_chain(symbol: str = "NIFTY", _skip_atm_filter: bool = False) -> dict:
                 )
         return {"records": {"data": []}}
 
-    # 0. Sensibull (PRIMARY: free, no auth, fast, live derivatives prices + greeks).
+    # 0. Cache hit: return fresh cache if < 90s old (avoids hammering Sensibull on every tick)
+
+    # 1. Sensibull (PRIMARY: free, no auth, fast, live derivatives prices + greeks).
     try:
         from data.sensibull_fetcher import fetch_option_chain as _sensibull_fetch
         raw_sb = _sensibull_fetch(symbol)
@@ -1815,7 +1827,7 @@ def option_chain(symbol: str = "NIFTY", _skip_atm_filter: bool = False) -> dict:
             "[option_chain sensibull] failed for %s: %s", symbol, e
         )
 
-    # 1. Shoonya (SECONDARY: OAuth authenticated, full data but slow when unreachable).
+    # 2. Shoonya (SECONDARY: OAuth authenticated, full data but slow when unreachable).
     try:
         data = _try_shoonya()
         if data and data.get("records", {}).get("data"):
@@ -1826,7 +1838,7 @@ def option_chain(symbol: str = "NIFTY", _skip_atm_filter: bool = False) -> dict:
             "[option_chain shoonya] failed for %s: %s", symbol, e
         )
 
-    # 2. Direct NSE/nsepython (fallback 2: direct API + nsepython library).
+    # 3. Direct NSE/nsepython (fallback: direct API + nsepython library).
     # Try robust direct fetch (NSE) first
     session = _get_nse_session()
     if session:

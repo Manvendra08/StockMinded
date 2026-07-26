@@ -1,13 +1,1 @@
-{
-  "servers": {
-    "github.com/modelcontextprotocol/servers/tree/main/src/memory": {
-      "command": "cmd",
-      "args": [
-        "/c",
-        "npx",
-        "-y",
-        "@modelcontextprotocol/server-memory"
-      ]
-    }
-  }
-}
+{"servers":{"github.com/modelcontextprotocol/servers/tree/main/src/memory":{"command":"cmd","args":["/c","npx","-y","@modelcontextprotocol/server-memory"]},"github.com/modelcontextprotocol/servers/tree/main/src/sequentialthinking":{"command":"cmd","args":["/c","npx","-y","@modelcontextprotocol/server-sequential-thinking"]}}}

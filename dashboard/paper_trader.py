@@ -12,8 +12,8 @@ import contextlib
 import datetime as dt_mod  # Use this for the time class if needed, or just datetime.time
 import json
 import logging
-import msvcrt
 import os
+import sys
 import threading
 import time
 import traceback
@@ -26,6 +26,50 @@ import yfinance as yf
 
 # Standardized IST timezone
 IST = timezone(timedelta(hours=5, minutes=30))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# H3 FIX: Cross-platform advisory file locking.
+#
+# The module previously did a hard `import msvcrt` at the top. `msvcrt` only
+# exists on Windows, so importing paper_trader on Linux (the VPS target in
+# setup_vps.sh) raised ImportError and took down the whole engine. `fcntl`
+# (POSIX) and `msvcrt` (Windows) provide equivalent advisory locks; we select
+# the right backend once at import time and expose two tiny helpers used by
+# atomic_db_update(). Behaviour is preserved: non-blocking attempts first, then
+# a blocking acquire, with the existing retry/sleep loop handling contention.
+# ─────────────────────────────────────────────────────────────────────────────
+if sys.platform == "win32":
+    import msvcrt
+
+    def _lock_file(f, blocking: bool) -> None:
+        # msvcrt.locking locks bytes relative to the current file position; lock
+        # a single byte at offset 0. LK_LOCK blocks, LK_NBLCK raises OSError if
+        # the region is already locked.
+        f.seek(0)
+        mode = msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK
+        msvcrt.locking(f.fileno(), mode, 1)
+
+    def _unlock_file(f) -> None:
+        try:
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+else:
+    import fcntl
+
+    def _lock_file(f, blocking: bool) -> None:
+        # flock raises BlockingIOError (an OSError subclass) when LOCK_NB is set
+        # and the lock is held elsewhere — the caller's retry loop catches it.
+        flags = fcntl.LOCK_EX if blocking else (fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(f.fileno(), flags)
+
+    def _unlock_file(f) -> None:
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
 
 
 def _safe_int(val) -> int | None:
@@ -71,6 +115,7 @@ DEFAULT_SETTINGS = {
     "sl_pct": 2.0,
     "tgt_pct": 4.0,
     "trail_sl": True,
+    "trail_activation_pct": 2.0,  # Only start trailing once profit exceeds this %
     # MEDIUM matches the verdict engine's baseline for a valid directional trend
     # setup (TREND_UP/TREND_DOWN issue MEDIUM by default, upgrading to HIGH only
     # when AI + smart-money bias align). HIGH here would filter out nearly every
@@ -335,10 +380,11 @@ def atomic_db_update():
     for attempt in range(20):
         try:
             lock_f = open(LOCK_FILE, "r+")
-            # Non-blocking (LK_NBLCK) for first 3 attempts, then blocking (LK_LOCK)
-            # to avoid PermissionError stamping on heavily contended files
-            lock_mode = msvcrt.LK_NBLCK if attempt < 3 else msvcrt.LK_LOCK
-            msvcrt.locking(lock_f.fileno(), lock_mode, 1)
+            # H3 FIX: cross-platform lock helper. Non-blocking for the first 3
+            # attempts, then blocking to avoid busy-spinning on heavily
+            # contended files (preserves the original msvcrt LK_NBLCK→LK_LOCK
+            # escalation without being Windows-specific).
+            _lock_file(lock_f, blocking=(attempt >= 3))
             _tls.held = True
             break  # Lock acquired
         except (PermissionError, OSError) as lock_err:
@@ -375,8 +421,7 @@ def atomic_db_update():
         # Release lock
         if lock_f:
             try:
-                lock_f.seek(0)
-                msvcrt.locking(lock_f.fileno(), msvcrt.LK_UNLCK, 1)
+                _unlock_file(lock_f)
             except Exception as e:
                 logging.getLogger(__name__).warning(
                     "[atomic_db_update] lock release failed: %s", e
@@ -457,8 +502,6 @@ def is_eod_window(now: datetime | None = None) -> bool:
         return False
     from signals.options import _is_holiday
 
-    if _is_holiday(n.date()):
-        return False
     t = n.timetz().replace(tzinfo=None)
     return EOD_WINDOW_START <= t <= EOD_WINDOW_END
 
@@ -471,58 +514,97 @@ def get_settings() -> dict:
     return settings
 
 
+SETTINGS_SCHEMA = {
+    "capital_per_trade": (float, 1000.0, 100000000.0),
+    "capital_per_trade_stocks": (float, 1000.0, 100000000.0),
+    "capital_per_trade_options": (float, 1000.0, 100000000.0),
+    "sl_pct": (float, 0.1, 50.0),
+    "tgt_pct": (float, 0.1, 200.0),
+    "trail_activation_pct": (float, 0.0, 50.0),
+    "min_confidence": ("enum", ["LOW", "MEDIUM", "HIGH"], None),
+    "max_trades_per_day": (int, 1, 100),
+    "max_new_entries_per_cycle": (int, 1, 50),
+    "regime_filter": (bool, None, None),
+    "auto_close_eod": (bool, None, None),
+    "trail_sl": (bool, None, None),
+    "atr_multiplier": (float, 0.1, 10.0),
+    "telegram_bot_token": (str, 0, 100),
+    "telegram_chat_id": (str, 0, 50),
+    "options_sl_pct": (float, 0.1, 500.0),
+    "options_tgt_pct": (float, 0.1, 500.0),
+    "smart_exits_enabled": (bool, None, None),
+    "smart_exit_vix_spike_pct": (float, 0.1, 100.0),
+    "smart_exit_vix_floor": (float, 0.0, 50.0),
+    "smart_exit_delta_threshold": (float, 0.0, 1.0),
+    "smart_exit_trail_lock_pct": (float, 0.0, 100.0),
+    "smart_exit_trail_floor_pct": (float, 0.0, 100.0),
+    "smart_reentry_enabled": (bool, None, None),
+    "options_lots_per_trade": (int, 1, 500),
+    "rg_daily_stop_pct": (float, 0.001, 0.20),
+    "rg_monthly_stop_pct": (float, 0.001, 0.50),
+    "rg_concurrent_open_pct": (float, 0.001, 0.50),
+    "rg_margin_util_cap": (float, 0.05, 1.0),
+    "rg_correlation_max": (float, 0.05, 1.0),
+}
+
+
+def validate_settings(new_settings: dict) -> dict:
+    """Validate new_settings dict against SETTINGS_SCHEMA.
+
+    Raises ValueError with descriptive message if validation fails.
+    Returns cleaned/casted settings dictionary.
+    """
+    if not isinstance(new_settings, dict):
+        raise ValueError("Settings payload must be a JSON object.")
+
+    validated = {}
+    for k, v in new_settings.items():
+        if k not in SETTINGS_SCHEMA:
+            raise ValueError(f"Unknown settings key: '{k}'")
+
+        rule_type, min_val, max_val = SETTINGS_SCHEMA[k]
+
+        if rule_type == bool:
+            if isinstance(v, bool):
+                validated[k] = v
+            elif isinstance(v, str) and v.lower() in ("true", "false"):
+                validated[k] = (v.lower() == "true")
+            else:
+                raise ValueError(f"Setting '{k}' must be a boolean.")
+        elif rule_type == "enum":
+            v_str = str(v).upper()
+            if v_str not in min_val:
+                raise ValueError(f"Setting '{k}' must be one of {min_val}.")
+            validated[k] = v_str
+        elif rule_type == str:
+            v_str = str(v).strip()
+            if len(v_str) > max_val:
+                raise ValueError(f"Setting '{k}' exceeds maximum length of {max_val}.")
+            validated[k] = v_str
+        elif rule_type in (float, int):
+            if v is None or str(v).strip() == "":
+                raise ValueError(f"Setting '{k}' cannot be empty.")
+            try:
+                num_v = float(v) if rule_type == float else int(v)
+            except (ValueError, TypeError):
+                raise ValueError(f"Setting '{k}' must be a valid {rule_type.__name__}.")
+            if min_val is not None and num_v < min_val:
+                raise ValueError(f"Setting '{k}' ({num_v}) must be >= {min_val}.")
+            if max_val is not None and num_v > max_val:
+                raise ValueError(f"Setting '{k}' ({num_v}) must be <= {max_val}.")
+            validated[k] = num_v
+
+    return validated
+
+
 def save_settings(new_settings: dict) -> dict:
     """Update and persist paper trader settings."""
+    validated = validate_settings(new_settings)
     with atomic_db_update() as db:
         if "settings" not in db:
             db["settings"] = DEFAULT_SETTINGS.copy()
-        for k, v in new_settings.items():
-            if k in DEFAULT_SETTINGS:
-                if k in (
-                    "capital_per_trade",
-                    "capital_per_trade_stocks",
-                    "capital_per_trade_options",
-                    "sl_pct",
-                    "tgt_pct",
-                    "rg_daily_stop_pct",
-                    "rg_monthly_stop_pct",
-                    "rg_concurrent_open_pct",
-                    "rg_margin_util_cap",
-                    "rg_correlation_max",
-                    "options_sl_pct",
-                    "options_tgt_pct",
-                    "smart_exit_vix_spike_pct",
-                    "smart_exit_delta_threshold",
-                    "atr_multiplier",
-                    "smart_exit_trail_lock_pct",
-                    "smart_exit_trail_floor_pct",
-                    "smart_exit_vix_floor",
-                ):
-                    if v is not None and str(v).strip() != "":
-                        try:
-                            db["settings"][k] = float(v)
-                        except (ValueError, TypeError):
-                            pass
-                elif k in (
-                    "max_trades_per_day",
-                    "max_new_entries_per_cycle",
-                    "options_lots_per_trade",
-                ):
-                    if v is not None and str(v).strip() != "":
-                        try:
-                            db["settings"][k] = int(v)
-                        except (ValueError, TypeError):
-                            pass
-                elif k in (
-                    "trail_sl",
-                    "regime_filter",
-                    "auto_close_eod",
-                    "smart_exits_enabled",
-                    "smart_reentry_enabled",
-                ):
-                    db["settings"][k] = bool(v)
-                else:
-                    db["settings"][k] = str(v)
+        for k, v in validated.items():
+            db["settings"][k] = v
         return db["settings"]
 
 
@@ -2330,26 +2412,36 @@ def check_and_close_trades() -> list[dict]:
             # We use local variable `best_price` to avoid the misleading "peak" name
             # for SHORT trades. The stored field name is kept for backward compatibility.
             if settings.get("trail_sl", True):
-                if "peak_price" not in trade:
-                    trade["peak_price"] = trade["entry_price"]
-                best_price = trade["peak_price"]
-                sl_pct = trade.get("sl_pct", settings.get("sl_pct", 2.0))
+                trail_activation_pct = settings.get("trail_activation_pct", 2.0)
+                entry_price_ref = trade["entry_price"]
                 if direction == "LONG":
-                    # For LONG: track highest price, trail stop upward
-                    if ltp > best_price:
-                        best_price = ltp
-                        trade["peak_price"] = best_price
-                        new_sl = ltp * (1 - sl_pct / 100)
-                        if new_sl > trade["sl_price"]:
-                            trade["sl_price"] = round(new_sl, 2)
+                    # Only start trailing once price is at least trail_activation_pct above entry
+                    profit_pct = (ltp - entry_price_ref) / entry_price_ref * 100.0
+                    if profit_pct >= trail_activation_pct:
+                        if "peak_price" not in trade:
+                            trade["peak_price"] = entry_price_ref
+                        best_price = trade["peak_price"]
+                        sl_pct = trade.get("sl_pct", settings.get("sl_pct", 2.0))
+                        if ltp > best_price:
+                            best_price = ltp
+                            trade["peak_price"] = best_price
+                            new_sl = ltp * (1 - sl_pct / 100)
+                            if new_sl > trade["sl_price"]:
+                                trade["sl_price"] = round(new_sl, 2)
                 else:
-                    # For SHORT: track lowest price (trough), trail stop downward
-                    if ltp < best_price:
-                        best_price = ltp
-                        trade["peak_price"] = best_price
-                        new_sl = ltp * (1 + sl_pct / 100)
-                        if new_sl < trade["sl_price"]:
-                            trade["sl_price"] = round(new_sl, 2)
+                    # Only start trailing once price is at least trail_activation_pct below entry
+                    profit_pct = (entry_price_ref - ltp) / entry_price_ref * 100.0
+                    if profit_pct >= trail_activation_pct:
+                        if "peak_price" not in trade:
+                            trade["peak_price"] = entry_price_ref
+                        best_price = trade["peak_price"]
+                        sl_pct = trade.get("sl_pct", settings.get("sl_pct", 2.0))
+                        if ltp < best_price:
+                            best_price = ltp
+                            trade["peak_price"] = best_price
+                            new_sl = ltp * (1 + sl_pct / 100)
+                            if new_sl < trade["sl_price"]:
+                                trade["sl_price"] = round(new_sl, 2)
 
             # Respect EOD close setting
             eod_trigger = is_eod and auto_close
@@ -2386,7 +2478,23 @@ def check_and_close_trades() -> list[dict]:
                     exit_reason = "EOD_CLOSE"
 
             if exit_reason:
-                trade["exit_price"] = ltp
+                # Cap exit_price for TARGET_HIT/SL_HIT to prevent bad-LTP corruption:
+                #   TARGET_HIT LONG → at most 1% above target (gap-through guard)
+                #   TARGET_HIT SHORT → at least 1% below target
+                #   SL_HIT LONG → at least 1% below SL
+                #   SL_HIT SHORT → at most 1% above SL
+                if exit_reason == "TARGET_HIT":
+                    if direction == "LONG":
+                        trade["exit_price"] = min(ltp, round(trade["tgt_price"] * 1.01, 2))
+                    else:
+                        trade["exit_price"] = max(ltp, round(trade["tgt_price"] * 0.99, 2))
+                elif exit_reason == "SL_HIT":
+                    if direction == "LONG":
+                        trade["exit_price"] = max(ltp, round(trade["sl_price"] * 0.99, 2))
+                    else:
+                        trade["exit_price"] = min(ltp, round(trade["sl_price"] * 1.01, 2))
+                else:
+                    trade["exit_price"] = ltp
                 trade["exit_time"] = now_ist.strftime("%Y-%m-%d %H:%M:%S")
                 trade["exit_reason"] = exit_reason
                 trade["status"] = "CLOSED"
@@ -2639,7 +2747,7 @@ def auto_enter_from_alerts(alerts: list[dict], cfg: dict | None = None) -> list[
     missing_symbols = []
     for alert in alerts:
         ep = alert.get("entry_price")
-        if ep is None or ep <= 0:
+        if ep is None or not isinstance(ep, (int, float)) or ep <= 0:
             missing_symbols.append(alert.get("symbol"))
     if missing_symbols:
         prefetched_prices = _get_ltp_batch(list(set(missing_symbols)))
@@ -2703,7 +2811,9 @@ def auto_enter_from_alerts(alerts: list[dict], cfg: dict | None = None) -> list[
         today_trade_count = len(
             [t for t in db["trades"] if t.get("entry_date") == today_str]
         )
-        open_trades_count = len([t for t in db["trades"] if t.get("status") == "OPEN"])
+        open_trades_count = len(
+            [t for t in db["trades"] if t.get("status") == "OPEN" and t.get("symbol") not in ("NIFTY", "BANKNIFTY", "FINNIFTY")]
+        )
 
         for alert in alerts:
             if today_trade_count + len(entered) >= max_trades_per_day:
@@ -2735,16 +2845,13 @@ def auto_enter_from_alerts(alerts: list[dict], cfg: dict | None = None) -> list[
                 sym in ("NIFTY", "BANKNIFTY", "FINNIFTY")
                 or alert.get("type") == "INDEX"
             ):
-                journal.log_skipped_trade(
-                    sym,
-                    direction,
-                    conf,
-                    "INDEX_BYPASS",
-                    regime,
-                    flow_bias,
-                    "equity_worker",
-                    "Index handled by options worker",
-                )
+                try:
+                    setups = _get_option_setups(data, cfg, symbol=sym)
+                    for setup in setups:
+                        if setup.get("suitable") and setup.get("legs"):
+                            _enter_option_structure(setup, setup["legs"], cfg, symbol=sym)
+                except Exception:
+                    pass
                 continue
             if direction not in ("LONG", "SHORT"):
                 journal.log_skipped_trade(
@@ -2886,10 +2993,10 @@ def auto_enter_from_alerts(alerts: list[dict], cfg: dict | None = None) -> list[
             entry_price = alert.get("entry_price")
             stop = alert.get("stop")
 
-            # Fallback for missing prices (common for stock alerts)
-            if entry_price is None or entry_price <= 0:
+            # Fallback for missing prices or string entry_zone (common for stock alerts)
+            if entry_price is None or not isinstance(entry_price, (int, float)) or entry_price <= 0:
                 entry_price = prefetched_prices.get(sym) or _get_ltp(sym)
-                if entry_price is None or entry_price <= 0:
+                if entry_price is None or not isinstance(entry_price, (int, float)) or entry_price <= 0:
                     journal.log_skipped_trade(
                         sym,
                         direction,
@@ -2951,7 +3058,7 @@ def auto_enter_from_alerts(alerts: list[dict], cfg: dict | None = None) -> list[
                 capital_cap = settings.get("capital_per_trade_stocks", settings.get("capital_per_trade", 500000.0))
                 max_qty_by_cap = int(capital_cap / entry_price)
                 if lot_size > 1:
-                    max_qty_by_cap = (max_qty_by_cap // lot_size) * lot_size
+                    max_qty_by_cap = max(lot_size, (max_qty_by_cap // lot_size) * lot_size)
 
                 # Apply size multiplier from timing gate (event risk mode)
                 adjusted_qty = int(size_result.qty * size_multiplier)
@@ -3227,6 +3334,14 @@ def generate_eod_summary(target_date: str | None = None) -> dict:
                 t for t in closed_today if t.get("exit_reason") in standard_reasons
             ]
 
+            def _is_option(t):
+                s = str(t.get("structure") or t.get("type") or "").upper()
+                return any(kw in s for kw in (
+                    "IRON_CONDOR", "IRON_BUTTERFLY", "IRON_FLY", "VERTICAL_SPREAD",
+                    "CALENDAR", "DIAGONAL", "COVERED_CALL", "PROTECTIVE_PUT",
+                    "STRADDLE", "STRANGLE", "STRIP", "STRAP", "IRON",
+                ))
+
             def _get_group_stats(group):
                 if not group:
                     return {"count": 0, "pnl": 0.0, "wr": 0.0}
@@ -3236,6 +3351,13 @@ def generate_eod_summary(target_date: str | None = None) -> dict:
                     "pnl": round(sum(t.get("pnl") or 0 for t in group), 2),
                     "wr": round(len(wins) / len(group) * 100, 1),
                 }
+
+            stock_pnl = round(
+                sum(t.get("pnl", 0) or 0 for t in closed_today if not _is_option(t)), 2
+            )
+            option_pnl = round(
+                sum(t.get("pnl", 0) or 0 for t in closed_today if _is_option(t)), 2
+            )
 
             return {
                 "date": day,
@@ -3249,6 +3371,8 @@ def generate_eod_summary(target_date: str | None = None) -> dict:
                 "target_hits": target_hits,
                 "eod_exits": eod_exits,
                 "total_pnl": round(total_pnl, 2),
+                "stock_pnl": stock_pnl,
+                "option_pnl": option_pnl,
                 "trades": closed_today,
                 "cumulative_pnl": 0.0,
                 "analysis": {

@@ -1015,19 +1015,19 @@ def pick_structure(regime, bias, iv_rank, vix) -> Optional[OptionStructure]:
             max_loss_formula=lambda d: d,
             structure_type="debit_spread",
         )
-    elif regime == "VOL_EXPANSION" or (regime.startswith("RANGE_") and low_iv):
+    elif regime == "VOL_EXPANSION":
         return OptionStructure(
             name="LONG_STRADDLE",
             legs=[
                 OptionLeg("BUY", "CE", "ATM", "WEEKLY", 1),
                 OptionLeg("BUY", "PE", "ATM", "WEEKLY", 1),
             ],
-            entry_condition="VOL_EXPANSION or LOW_IV",
+            entry_condition="VOL_EXPANSION",
             exit_rules={"pct_profit": 0.4, "pct_loss": 0.3},
             max_loss_formula=lambda d: d,
             structure_type="debit_spread",
         )
-    elif regime in ("RANGE_LOW_VOL", "RANGE_HIGH_VOL") and high_iv:
+    elif regime in ("RANGE_LOW_VOL", "RANGE_HIGH_VOL", "RANGE", "VOL_CONTRACTION"):
         return OptionStructure(
             name="SHORT_STRANGLE_WINGED",
             legs=[
@@ -1036,7 +1036,7 @@ def pick_structure(regime, bias, iv_rank, vix) -> Optional[OptionStructure]:
                 OptionLeg("BUY", "CE", "DELTA_10", "WEEKLY", 1),
                 OptionLeg("BUY", "PE", "DELTA_10", "WEEKLY", 1),
             ],
-            entry_condition="RANGE & HIGH_IV",
+            entry_condition="RANGE & CREDIT_SELL",
             exit_rules={"pct_profit": 0.5, "pct_loss": 1.5},
             max_loss_formula=lambda c, w=0: w - c,
             structure_type="iron_condor",

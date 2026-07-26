@@ -54,6 +54,8 @@ def directional_size(
         return SizeResult(0, 0.0, 0.0, "invalid stop")
     raw_qty = risk_budget / per_unit_risk
     lots = math.floor(raw_qty / lot_size)
+    if lots == 0 and raw_qty >= lot_size * 0.5:
+        lots = 1
     qty = lots * lot_size
     return SizeResult(
         qty=qty,
