@@ -345,17 +345,7 @@
             let FILTERED_ROWS = [];
             let AUTO_REFRESH_MS = 300000;
 
-            async function loadSummary() {
-                try {
-                    const r = await fetch("/api/investment/summary");
-                    const d = await r.json();
-                    if (d.error) return;
-                    document.getElementById("sum-scans").textContent = d.total_scans ?? "—";
-                    document.getElementById("sum-buy").textContent = d.by_verdict?.BUY ?? "—";
-                    document.getElementById("sum-sell").textContent = d.by_verdict?.SELL ?? "—";
-                    document.getElementById("sum-avoid").textContent = d.by_verdict?.AVOID ?? "—";
-                } catch (e) { /* ignore */ }
-            }
+
 
             async function refresh() {
                 const status = document.getElementById("status");
@@ -441,7 +431,7 @@
                         status.textContent = "Clear failed: " + d.error;
                     } else {
                         status.textContent = d.message || "Table cleared.";
-                        await loadSummary();
+                        await refresh();
                         await refresh();
                     }
                 } catch (e) {
@@ -477,6 +467,12 @@
                     const src = (v.source_platform || "telegram");
                     const srcClass = src === "sahi" ? "sahi" : "telegram";
                     const srcIcon = src === "sahi" ? "📰" : "✈️";
+                    const hasLevels = (v.entry_zone && v.entry_zone.trim()) || (v.stop_loss && v.stop_loss.trim()) || (v.target && v.target.trim());
+                    const levelsHtml = hasLevels ? `
+                        <div style="color:var(--text-primary)">Entry: ${v.entry_zone || '—'}</div>
+                        <div style="color:#ef4444">SL: ${v.stop_loss || '—'}</div>
+                        <div style="color:#22c55e">Tgt: ${v.target || '—'}</div>`
+                        : `<span style="color:var(--text-muted);font-size:0.75rem;font-style:italic;background:var(--bg-secondary);padding:2px 6px;border-radius:4px;">No Levels Available</span>`;
                     return `<tr>
                         <td><span class="scan-pill" onclick="viewScan('${v.scan_id}')" title="${v.scan_id}">${v.scan_id.slice(0,8)}</span></td>
                         <td class="mono">${formatTime(v.scan_ts)}</td>
@@ -495,9 +491,7 @@
                             ${ratio ? `<span class="rationale-link" onclick="openRationalePopup(${_ri})">View Rationale</span>` : '—'}
                         </td>
                         <td class="mono" style="font-size:0.75rem; white-space:nowrap; line-height:1.4;">
-                            <div style="color:var(--text-primary)">Entry: ${v.entry_zone || '—'}</div>
-                            <div style="color:#ef4444">SL: ${v.stop_loss || '—'}</div>
-                            <div style="color:#22c55e">Tgt: ${v.target || '—'}</div>
+                            ${levelsHtml}
                         </td>
                     </tr>`;
                 }).join("");
@@ -794,13 +788,13 @@
 
             async function init() {
                 await loadDatasources();
-                await loadSummary();
+
                 await refresh();
                 await loadFeed();
                 await loadSahiHeadlines();
                 const health = await fetch("/api/investment/health").then(r => r.json()).catch(() => ({}));
                 if (health.auto_refresh_seconds) AUTO_REFRESH_MS = health.auto_refresh_seconds * 1000;
-                setInterval(() => { refresh(); loadFeed(); }, AUTO_REFRESH_MS);
+                setInterval(() => { refresh(); loadFeed(); loadSahiHeadlines(); }, AUTO_REFRESH_MS);
             }
 
             init();

@@ -606,12 +606,12 @@ class Journal:
                    SELECT MAX(id)
                    FROM investment_verdicts
                    WHERE news_event IS NOT NULL AND TRIM(news_event) != ''
-                   GROUP BY scan_id, symbol, LOWER(SUBSTR(TRIM(news_event), 1, 35))
+                   GROUP BY scan_id, symbol, source_platform, LOWER(SUBSTR(TRIM(news_event), 1, 35))
                )
                AND news_event IS NOT NULL AND TRIM(news_event) != ''
                AND id NOT IN (
-                   -- Also keep the latest row per scan_id even if news_event matches
-                   SELECT MAX(id) FROM investment_verdicts GROUP BY scan_id, symbol
+                   -- Also keep the latest row per scan_id + source_platform even if news_event matches
+                   SELECT MAX(id) FROM investment_verdicts GROUP BY scan_id, symbol, source_platform
                )"""
         )
         deleted = cur.rowcount

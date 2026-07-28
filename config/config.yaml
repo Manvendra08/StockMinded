@@ -28,7 +28,7 @@ banknifty_options:
   spread_width: 400
   stop_loss_mult: 1.25
   vix_spike_exit_pct: 10.0
-  vol_expansion_threshold: 5.0
+  vol_expansion_threshold: 8.0
 broker:
   access_token: ${BROKER_ACCESS_TOKEN}
   api_key: ${BROKER_API_KEY}
@@ -63,8 +63,9 @@ data_sources:
     github_api_key: ${GITHUB_TOKEN}
     groq_api_key: ${GROQ_API_KEY}
     hf_api_key: ${HF_API_TOKEN}
-    model: google_genai/gemini-2.5-flash-lite
+    model: kilo-auto/free
     model_tokens: 8192
+    kilo_api_key: ${KILO_API_KEY}
     nvidia_api_key: ${NVIDIA_API_KEY}
     opencode_api_key: ${OPENCODE_API_KEY}
     openrouter_api_key: ${OPENROUTER_API_KEY}
@@ -106,7 +107,7 @@ nifty_options:
   spread_width: 200
   stop_loss_mult: 1.25
   vix_spike_exit_pct: 10.0
-  vol_expansion_threshold: 5.0
+  vol_expansion_threshold: 8.0
 options:
   enabled: true
   enabled_structures:
@@ -117,9 +118,9 @@ options:
   expiry_preference: weekly
   iv_history_db: ./data/iv_history.sqlite
   lot_size:
-    BANKNIFTY: 15
-    FINNIFTY: 40
-    NIFTY: 75
+    BANKNIFTY: 30
+    FINNIFTY: 60
+    NIFTY: 65
   margin:
     cross_hedge_retention_pct: 0.15
     hedged_spread_per_lot:
@@ -127,11 +128,11 @@ options:
       NIFTY: 30000.0
       _default: 30000.0
     lot_size:
-      BANKNIFTY: 15
-      NIFTY: 75
-      NIFTY_large: 75
+      BANKNIFTY: 30
+      NIFTY: 65
+      NIFTY_large: 65
       NIFTY_small: 25
-      _default: 75
+      _default: 65
     naked_short_per_lot:
       BANKNIFTY: 120000.0
       NIFTY: 120000.0
@@ -232,7 +233,7 @@ timing_engine:
   market_exhaustion:
     breadth_drop_threshold_pct: 8
     enabled: true
-    vix_intraday_spike_pct: 5
+    vix_intraday_spike_pct: 8
   sentiment_refresh_minutes: 20
   sentiment_tracking:
     enabled: false

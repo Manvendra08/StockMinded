@@ -123,6 +123,8 @@ def _post_jdata(
                 continue
             if "Session Expired" in raw:
                 log.info("[shoonya] POST %s -> Session Expired (HTTP %s)", url, e.code)
+            elif "No Data" in raw:
+                log.debug("[shoonya] POST %s -> HTTP %s: %s", url, e.code, raw[:200])
             else:
                 log.error("[shoonya] POST %s -> HTTP %s: %s", url, e.code, raw[:200])
             try:
@@ -231,6 +233,7 @@ class ShoonyaFetcher:
         # is saved before the next call reads `access_token`.  Eliminates the race
         # that caused "Session Expired" after ~1-2 calls under concurrent MCX fetches.
         self._api_lock = threading.Lock()
+        self._login_failed_until = 0.0
 
         # Try to load cached token to avoid repeated OAuth browser launches.
         self._load_cached_token()
@@ -387,8 +390,24 @@ class ShoonyaFetcher:
                     )
 
                 final_url = page.url
-                log.debug("[shoonya] Post-login URL: %s", final_url)
+                body_text = ""
+                try:
+                    body_text = page.locator("body").inner_text()
+                except Exception:
+                    pass
+
                 browser.close()
+
+                if "blocked" in body_text.lower() or "unsuccessful login attempts" in body_text.lower():
+                    log.error(
+                        "[shoonya] ACCOUNT BLOCKED: Shoonya user '%s' is blocked by broker due to unsuccessful login attempts. Unblock via PAN + DOB on Shoonya portal: https://api.shoonya.com/OAuthlogin/investor-entry-level/login?api_key=%s",
+                        self.user_id,
+                        self.vendor_code,
+                    )
+                    self._login_failed_until = time.time() + 900
+                    return None
+
+                log.debug("[shoonya] Post-login URL: %s", final_url)
 
                 # Extract auth_code from URL candidates (both final URL and any intermediate requests)
                 for candidate in [final_url] + captured_urls:
@@ -424,7 +443,13 @@ class ShoonyaFetcher:
         if not res:
             return None
         if res.get("stat") != "Ok":
+            emsg = str(res.get("emsg", ""))
             log.error("[shoonya] GenAcsTok failed: %s", res)
+            if "INVALID_IP" in emsg.upper():
+                log.warning("[shoonya] INVALID_IP error from Shoonya API (registered API IP does not match current network IP). Pausing OAuth login for 10 minutes.")
+                self._login_failed_until = time.time() + 600
+            else:
+                self._login_failed_until = time.time() + 60
             return None
         # Prefer susertoken (legacy session token for jKey auth) over access_token
         # (OAuth Bearer token). The Noren REST API endpoints (SearchScrip, GetQuotes,
@@ -448,6 +473,11 @@ class ShoonyaFetcher:
             if self.access_token:
                 log.debug("[shoonya] using cached token — skipping OAuth")
                 return True
+
+            if time.time() < getattr(self, "_login_failed_until", 0.0):
+                rem_sec = int(self._login_failed_until - time.time())
+                log.debug("[shoonya] Login paused due to active failure cooldown (%ds remaining)", rem_sec)
+                return False
 
             missing = [
                 k

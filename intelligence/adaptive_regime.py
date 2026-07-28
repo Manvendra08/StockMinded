@@ -81,7 +81,7 @@ class AdaptiveRegimeClassifier:
             "trend_score": 3.0,
             "adx": 2.5,
             "breadth": 2.0,
-            "vix": 1.0,
+            "vix_level": 1.0,
             "ema_alignment": 2.0,
             "heavyweight_momentum": 2.5,
             "ai_sentiment": 2.0,
@@ -90,14 +90,32 @@ class AdaptiveRegimeClassifier:
             "trend_score": 3.0,
             "adx": 2.5,
             "breadth": 2.0,
-            "vix": 1.0,
+            "vix_level": 1.0,
             "ema_alignment": 2.0,
             "heavyweight_momentum": 2.5,
             "ai_sentiment": 2.0,
         },
+        Regime.TREND_EMERGING_UP: {
+            "trend_score": 2.5,
+            "adx": 2.0,
+            "breadth": 1.5,
+            "vix_level": 1.0,
+            "ema_alignment": 1.5,
+            "heavyweight_momentum": 2.0,
+            "ai_sentiment": 1.5,
+        },
+        Regime.TREND_EMERGING_DOWN: {
+            "trend_score": 2.5,
+            "adx": 2.0,
+            "breadth": 1.5,
+            "vix_level": 1.0,
+            "ema_alignment": 1.5,
+            "heavyweight_momentum": 2.0,
+            "ai_sentiment": 1.5,
+        },
         Regime.RANGE_LOW_VOL: {
             "adx": 2.0,
-            "vix": 2.5,
+            "vix_level": 2.5,
             "trend_score": 1.5,
             "breadth": 1.0,
             "volatility": 2.0,
@@ -106,7 +124,7 @@ class AdaptiveRegimeClassifier:
         },
         Regime.RANGE_HIGH_VOL: {
             "adx": 1.5,
-            "vix": 2.0,
+            "vix_level": 2.0,
             "trend_score": 1.0,
             "breadth": 1.5,
             "volatility": 2.0,
@@ -228,10 +246,10 @@ class AdaptiveRegimeClassifier:
             primary_regime = Regime.RANGE_LOW_VOL
             primary_conf = 0.3
 
-        # Calculate ambiguity (1 - gap between top 2)
+        # Calculate ambiguity (smooth scaling from 1.0 full tie down to 0.0 at 0.15 confidence gap)
         if len(top_k) >= 2:
             gap = top_k[0].confidence - top_k[1].confidence
-            ambiguity = max(0.0, 1.0 - (gap * 5))  # Scale: 0.2 gap = 0 ambiguity
+            ambiguity = max(0.0, min(1.0, 1.0 - (gap / 0.15)))
         else:
             ambiguity = 0.0
 
@@ -486,11 +504,19 @@ class AdaptiveRegimeClassifier:
             if mom >= 0.5: return 0.5
             if mom <= -1.5: return -1.0
             if mom <= -0.5: return -0.5
+        elif regime == Regime.TREND_EMERGING_UP:
+            if mom >= 1.0: return 0.8
+            if mom >= 0.3: return 0.4
+            if mom <= -1.0: return -0.8
         elif regime == Regime.TREND_DOWN:
             if mom <= -1.5: return 1.0
             if mom <= -0.5: return 0.5
             if mom >= 1.5: return -1.0
             if mom >= 0.5: return -0.5
+        elif regime == Regime.TREND_EMERGING_DOWN:
+            if mom <= -1.0: return 0.8
+            if mom <= -0.3: return 0.4
+            if mom >= 1.0: return -0.8
         elif regime == Regime.VOL_EXPANSION:
             if abs(mom) >= 1.5: return 1.0
             if abs(mom) >= 0.75: return 0.5
@@ -508,11 +534,17 @@ class AdaptiveRegimeClassifier:
             if ai_infl >= 0.4: return 0.5
             if ai_infl <= -0.8: return -1.0
             if ai_infl <= -0.4: return -0.5
+        elif regime == Regime.TREND_EMERGING_UP:
+            if ai_infl >= 0.5: return 0.8
+            if ai_infl <= -0.5: return -0.8
         elif regime == Regime.TREND_DOWN:
             if ai_infl <= -0.8: return 1.0
             if ai_infl <= -0.4: return 0.5
             if ai_infl >= 0.8: return -1.0
             if ai_infl >= 0.4: return -0.5
+        elif regime == Regime.TREND_EMERGING_DOWN:
+            if ai_infl <= -0.5: return 0.8
+            if ai_infl >= 0.5: return -0.8
         elif regime == Regime.VOL_EXPANSION:
             if abs(ai_infl) >= 0.8: return 0.8
         elif regime in (Regime.RANGE_LOW_VOL, Regime.VOL_CONTRACTION):
@@ -531,11 +563,19 @@ class AdaptiveRegimeClassifier:
             if trend >= 3: return 0.6
             if trend >= 2: return 0.2
             return -0.5 if trend <= 0 else 0.0
+        elif regime == Regime.TREND_EMERGING_UP:
+            if trend >= 3: return 0.8
+            if trend >= 1: return 0.5
+            return -0.6 if trend <= -2 else 0.0
         elif regime == Regime.TREND_DOWN:
             if trend <= -4: return 1.0
             if trend <= -3: return 0.6
             if trend <= -2: return 0.2
             return -0.5 if trend >= 0 else 0.0
+        elif regime == Regime.TREND_EMERGING_DOWN:
+            if trend <= -3: return 0.8
+            if trend <= -1: return 0.5
+            return -0.6 if trend >= 2 else 0.0
         elif regime in (Regime.RANGE_LOW_VOL, Regime.RANGE_HIGH_VOL):
             if -2 <= trend <= 2: return 0.6
             return -0.3
@@ -552,6 +592,9 @@ class AdaptiveRegimeClassifier:
             if adx >= 25: return 1.0
             if adx >= 20: return 0.5
             return -0.5  # Low ADX contradicts trend
+        elif regime in (Regime.TREND_EMERGING_UP, Regime.TREND_EMERGING_DOWN):
+            if adx >= 15: return 0.6
+            return -0.2
         elif regime in (Regime.RANGE_LOW_VOL, Regime.RANGE_HIGH_VOL):
             if adx < 20: return 0.7
             if adx < 25: return 0.3
@@ -560,7 +603,11 @@ class AdaptiveRegimeClassifier:
 
     def _score_vix_level_for_regime(self, regime: Regime, vix: float) -> float:
         """How well does VIX level support this regime?"""
-        if regime == Regime.RANGE_LOW_VOL:
+        if regime in (Regime.TREND_EMERGING_UP, Regime.TREND_EMERGING_DOWN):
+            if vix < 18: return 0.4
+            if vix > 22: return -0.4
+            return 0.0
+        elif regime == Regime.RANGE_LOW_VOL:
             if vix < 14: return 1.0
             if vix < 16: return 0.4
             return -0.5
@@ -589,7 +636,7 @@ class AdaptiveRegimeClassifier:
             if vix_chg < -20: return 1.0
             if vix_chg < -10: return 0.5
             return -0.3 if vix_chg > 10 else 0.0
-        elif regime in (Regime.RANGE_LOW_VOL, Regime.TREND_UP):
+        elif regime in (Regime.RANGE_LOW_VOL, Regime.TREND_UP, Regime.TREND_EMERGING_UP):
             if vix_chg < -5: return 0.3
             if vix_chg > 20: return -0.5
             return 0.0
@@ -602,10 +649,18 @@ class AdaptiveRegimeClassifier:
             if breadth >= 50: return 0.5
             if breadth >= 40: return 0.0
             return -0.7  # Weak breadth contradicts trend up
+        elif regime == Regime.TREND_EMERGING_UP:
+            if breadth >= 50: return 0.6
+            if breadth < 40: return -0.4
+            return 0.0
         elif regime == Regime.TREND_DOWN:
             if breadth <= 40: return 1.0
             if breadth <= 50: return 0.5
             if breadth >= 60: return -0.5
+            return 0.0
+        elif regime == Regime.TREND_EMERGING_DOWN:
+            if breadth <= 50: return 0.6
+            if breadth > 60: return -0.4
             return 0.0
         elif regime in (Regime.RANGE_LOW_VOL, Regime.RANGE_HIGH_VOL):
             if 40 <= breadth <= 60: return 0.5
@@ -614,11 +669,11 @@ class AdaptiveRegimeClassifier:
 
     def _score_ema_alignment(self, regime: Regime, bull: bool, bear: bool) -> float:
         """How well does EMA alignment support this regime?"""
-        if regime == Regime.TREND_UP:
+        if regime in (Regime.TREND_UP, Regime.TREND_EMERGING_UP):
             if bull: return 1.0
             if bear: return -0.8
             return -0.2
-        elif regime == Regime.TREND_DOWN:
+        elif regime in (Regime.TREND_DOWN, Regime.TREND_EMERGING_DOWN):
             if bear: return 1.0
             if bull: return -0.8
             return -0.2

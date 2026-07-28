@@ -95,6 +95,11 @@ def _sensibull_get(url: str, timeout: int = 15) -> dict | None:
         return resp.json()
 
 
+_SB_CACHE: dict[str, tuple[float, dict]] = {}
+_SB_CACHE_LOCK = threading.Lock()
+_SB_TTL = 60  # seconds
+
+
 def fetch_option_chain(symbol: str, expiry: str | None = None) -> dict | None:
     """Fetch option chain from Sensibull oxide API (no auth required).
 
@@ -110,6 +115,15 @@ def fetch_option_chain(symbol: str, expiry: str | None = None) -> dict | None:
     }
     """
     sym = symbol.upper().strip()
+
+    now = time.time()
+    cache_key = f"{sym}:{expiry or 'default'}"
+    with _SB_CACHE_LOCK:
+        if cache_key in _SB_CACHE:
+            cached_time, cached_res = _SB_CACHE[cache_key]
+            if now - cached_time < _SB_TTL:
+                return cached_res
+
     token = _TOKEN_MAP.get(sym)
     if not token:
         log.warning("[sensibull] no token for '%s'", sym)
@@ -324,7 +338,7 @@ def fetch_option_chain(symbol: str, expiry: str | None = None) -> dict | None:
         sym, underlying, target_expiry, len(strikes_out), len(pairs),
     )
 
-    return {
+    res_dict = {
         "symbol": sym,
         "underlying_price": float(underlying),
         "expiry": str(target_expiry),
@@ -332,6 +346,10 @@ def fetch_option_chain(symbol: str, expiry: str | None = None) -> dict | None:
         "all_expiries": all_expiries,
         "source": "sensibull",
     }
+    with _SB_CACHE_LOCK:
+        _SB_CACHE[cache_key] = (now, res_dict)
+
+    return res_dict
 
 
 if __name__ == "__main__":

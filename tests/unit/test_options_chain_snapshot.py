@@ -13,13 +13,13 @@ def test_chain_snapshot_resolves_underlying_price_keys() -> None:
             "data": [
                 {
                     "strikePrice": 24000.0,
-                    "expiryDate": "2026-07-28",
+                    "expiryDate": "2030-07-28",
                     "CE": {"lastPrice": 150.0, "impliedVolatility": 15.0},
                     "PE": {"lastPrice": 150.0, "impliedVolatility": 15.0},
                 },
                 {
                     "strikePrice": 24500.0,
-                    "expiryDate": "2026-07-28",
+                    "expiryDate": "2030-07-28",
                     "CE": {"lastPrice": 0.0, "impliedVolatility": 15.0},  # 0.0 CE ltp
                     "PE": {"lastPrice": 200.0, "impliedVolatility": 15.0},
                 }

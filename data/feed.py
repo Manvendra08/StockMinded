@@ -1573,8 +1573,8 @@ def option_chain(symbol: str = "NIFTY", _skip_atm_filter: bool = False) -> dict:
                 data = cached.get("data") or {}
                 ts = cached.get("ts", 0)
                 age = time.time() - ts
-                # Use cache if less than 90 seconds old
-                if data.get("records", {}).get("data") and age < 90:
+                # Use cache if less than 300 seconds old
+                if data.get("records", {}).get("data") and age < 300:
                     data.setdefault("_cache", {})
                     data["_cache"].update({"stale": False, "ts": ts, "age": int(age)})
                     orig_src = data.get("_source") or "unknown"
@@ -1773,7 +1773,10 @@ def option_chain(symbol: str = "NIFTY", _skip_atm_filter: bool = False) -> dict:
                 )
         return {"records": {"data": []}}
 
-    # 0. Cache hit: return fresh cache if < 90s old (avoids hammering Sensibull on every tick)
+    # 0. Cache hit: return fresh cache if < 300s old (avoids hammering Sensibull on every tick)
+    cached_data = _load_cached_chain()
+    if cached_data and cached_data.get("records", {}).get("data"):
+        return cached_data
 
     # 1. Sensibull (PRIMARY: free, no auth, fast, live derivatives prices + greeks).
     try:

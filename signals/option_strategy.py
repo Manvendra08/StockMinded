@@ -236,7 +236,7 @@ def _pick_strategy(
         return None
 
     avoid_vol_exp = sym_cfg.get("avoid_vol_expansion", True)
-    vol_exp_thresh = sym_cfg.get("vol_expansion_threshold", 5.0)
+    vol_exp_thresh = sym_cfg.get("vol_expansion_threshold", 8.0)
     vol_expansion_blocked = avoid_vol_exp and vix_change_pct > vol_exp_thresh
 
     if regime == "VOL_EXPANSION":

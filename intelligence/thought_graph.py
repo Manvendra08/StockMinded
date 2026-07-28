@@ -76,26 +76,32 @@ class ThoughtNode:
     parents: list[str] = field(default_factory=list)      # IDs of parent nodes
     branch_id: str | None = None         # Which reasoning branch this belongs to
     revision_of: str | None = None       # ID of thought this revises
+    prior_confidence: float = 0.5        # Baseline confidence prior
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     metadata: dict = field(default_factory=dict)
     _compute_time_ms: float = 0.0
 
+    def __post_init__(self) -> None:
+        if "prior_confidence" not in self.__dict__ or self.prior_confidence == 0.5:
+            self.prior_confidence = self.confidence
+
     def add_evidence(self, ev: Evidence) -> None:
-        """Add evidence and update confidence using Bayesian-like update."""
+        """Add evidence and update confidence preserving node prior."""
         self.evidence.append(ev)
         self._recalculate_confidence()
         self.updated_at = datetime.now(timezone.utc).isoformat()
 
     def _recalculate_confidence(self) -> None:
         """
-        Recalculate confidence from all evidence using weighted aggregation.
+        Recalculate confidence from all evidence using weighted aggregation
+        anchored on the node's prior confidence.
         
-        Formula: confidence = base + sum(support * weight) - sum(contradict * weight)
+        Formula: confidence = prior + (net_evidence * 0.4 * evidence_influence)
         Clamped to [0.05, 0.95] to avoid absolute certainty.
         """
         if not self.evidence:
-            self.confidence = 0.5
+            self.confidence = self.prior_confidence
             return
 
         support_sum = 0.0
@@ -110,14 +116,12 @@ class ThoughtNode:
                 contradict_sum += ev.weight
 
         if total_weight == 0:
-            self.confidence = 0.5
+            self.confidence = self.prior_confidence
             return
 
-        # Bayesian-like update: prior (0.5) + evidence influence
         net_evidence = (support_sum - contradict_sum) / total_weight
-        # Weight evidence by total weight (more evidence = more influence)
-        evidence_influence = min(total_weight / 5.0, 1.0)  # Saturates at 5 pieces
-        new_conf = 0.5 + (net_evidence * 0.4 * evidence_influence)
+        evidence_influence = min(total_weight / 10.0, 1.0)  # Saturates at 10 pieces of evidence
+        new_conf = self.prior_confidence + (net_evidence * 0.4 * evidence_influence)
         self.confidence = max(0.05, min(0.95, new_conf))
 
     def to_dict(self) -> dict:
@@ -126,6 +130,7 @@ class ThoughtNode:
             "label": self.label,
             "thought_type": self.thought_type,
             "confidence": round(self.confidence, 3),
+            "prior_confidence": round(self.prior_confidence, 3),
             "status": self.status.value,
             "evidence": [e.to_dict() for e in self.evidence],
             "children": self.children,
@@ -195,6 +200,24 @@ class ThoughtGraph:
         self._created_at = datetime.now(timezone.utc).isoformat()
         self._selectors: dict[str, Callable] = {}   # Custom selection strategies
 
+    def _has_path(self, start_id: str, target_id: str, visited: set | None = None) -> bool:
+        """Check if a path exists from start_id to target_id (for cycle detection)."""
+        if start_id == target_id:
+            return True
+        if visited is None:
+            visited = set()
+        visited.add(start_id)
+
+        start_node = self.nodes.get(start_id)
+        if not start_node:
+            return False
+
+        for child_id in start_node.children:
+            if child_id not in visited:
+                if self._has_path(child_id, target_id, visited):
+                    return True
+        return False
+
     def add_thought(
         self,
         thought_type: str = "hypothesis",
@@ -204,17 +227,19 @@ class ThoughtGraph:
         branch_id: str | None = None,
         metadata: dict | None = None,
     ) -> ThoughtNode:
-        """Add a new thought node to the graph."""
+        """Add a new thought node to the graph with DAG cycle detection."""
         node = ThoughtNode(
             label=label,
             thought_type=thought_type,
             confidence=confidence,
+            prior_confidence=confidence,
             branch_id=branch_id,
             metadata=metadata or {},
         )
-        self.nodes[node.id] = node
 
         if parent_id and parent_id in self.nodes:
+            if self._has_path(node.id, parent_id):
+                raise ValueError(f"Cycle detected in ThoughtGraph: linking {parent_id} -> {node.id} forms a cycle")
             node.parents.append(parent_id)
             self.nodes[parent_id].children.append(node.id)
             self.edges.append(ThoughtEdge(
@@ -223,6 +248,8 @@ class ThoughtGraph:
                 reasoning=f"Derived: {label}",
                 edge_type="derivation",
             ))
+
+        self.nodes[node.id] = node
 
         if branch_id:
             if branch_id not in self.branches:
@@ -254,12 +281,12 @@ class ThoughtGraph:
         )
         # Mark parent as having branched
         parent.status = ThoughtStatus.BRANCHED
-        self.edges.append(ThoughtEdge(
-            from_id=parent.id,
-            to_id=child.id,
-            reasoning=f"Branch: {label}",
-            edge_type="branch",
-        ))
+        # Update the derivation edge to edge_type="branch" to avoid duplicate edges
+        for edge in self.edges:
+            if edge.from_id == parent.id and edge.to_id == child.id:
+                edge.edge_type = "branch"
+                edge.reasoning = f"Branch: {label}"
+                break
         return child
 
     def revise(
@@ -305,29 +332,63 @@ class ThoughtGraph:
         value: Any,
         supports: bool = True,
         weight: float = 1.0,
+        propagate_downstream: bool = False,
     ) -> None:
-        """Add evidence to a specific node and propagate."""
+        """Add evidence to a specific node with optional downstream propagation."""
         if node_id not in self.nodes:
             raise ValueError(f"Unknown node: {node_id}")
 
         ev = Evidence(source=source, value=value, supports=supports, weight=weight)
-        self.nodes[node_id].add_evidence(ev)
+        target_node = self.nodes[node_id]
+        target_node.add_evidence(ev)
+
+        if propagate_downstream and target_node.children:
+            for child_id in target_node.children:
+                if child_id in self.nodes:
+                    self.add_evidence_to(
+                        child_id,
+                        source=f"{source}_propagated",
+                        value=value,
+                        supports=supports,
+                        weight=weight * 0.5,
+                        propagate_downstream=True,
+                    )
 
     def get_branch_nodes(self, branch_id: str) -> list[ThoughtNode]:
         """Get all nodes in a specific branch."""
         ids = self.branches.get(branch_id, [])
         return [self.nodes[nid] for nid in ids if nid in self.nodes]
 
+    def close_branch(self, branch_id: str, reason: str = "") -> None:
+        """Close/reject all nodes in a specific branch."""
+        for node in self.get_branch_nodes(branch_id):
+            if node.status in (ThoughtStatus.ACTIVE, ThoughtStatus.BRANCHED):
+                node.status = ThoughtStatus.REJECTED
+                node.metadata["closure_reason"] = reason
+
+    def prune_branches(self, min_confidence: float = 0.2) -> int:
+        """Prune branches where top node falls below min_confidence threshold."""
+        pruned_count = 0
+        for bid, nids in list(self.branches.items()):
+            branch_nodes = [self.nodes[nid] for nid in nids if nid in self.nodes]
+            if branch_nodes and max(n.confidence for n in branch_nodes) < min_confidence:
+                self.close_branch(bid, reason=f"Pruned (confidence < {min_confidence})")
+                pruned_count += 1
+        return pruned_count
+
     def select_best(
         self,
         branch_ids: list[str] | None = None,
         min_confidence: float = 0.3,
+        mark_confirmed: bool = True,
     ) -> ThoughtNode | None:
         """
         Select the best hypothesis from competing branches.
         
         Uses confidence-weighted scoring with a minimum threshold.
         Ties are broken by evidence count (more evidence = more reliable).
+        
+        Set mark_confirmed=False for read-only queries (prevents side effects).
         """
         candidates = []
         if branch_ids:
@@ -352,7 +413,8 @@ class ThoughtGraph:
             reverse=True,
         )
         best = candidates[0]
-        best.status = ThoughtStatus.CONFIRMED
+        if mark_confirmed:
+            best.status = ThoughtStatus.CONFIRMED
         return best
 
     def select_top_k(
@@ -401,7 +463,8 @@ class ThoughtGraph:
         return sum(c * w for c, w in zip(confidences, weights)) / total_weight
 
     def get_reasoning_trace(self) -> dict:
-        """Export the full reasoning trace for debugging/audit."""
+        """Export the full reasoning trace for debugging/audit without side-effects."""
+        best_hypothesis = self.select_best(mark_confirmed=False)
         return {
             "name": self.name,
             "session_id": self.session_id,
@@ -415,9 +478,7 @@ class ThoughtGraph:
             "branches": {bid: nids for bid, nids in self.branches.items()},
             "revision_chain": self.revision_chain,
             "aggregated_confidence": round(self.aggregate_confidence(), 3),
-            "best_hypothesis": (
-                self.select_best().to_dict() if self.select_best() else None
-            ),
+            "best_hypothesis": best_hypothesis.to_dict() if best_hypothesis else None,
         }
 
     def summary(self) -> str:

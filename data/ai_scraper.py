@@ -170,6 +170,16 @@ def _get_ai_config() -> Optional[dict]:
         if opencode_api_key:
             opencode_api_key = opencode_api_key.strip().strip("'").strip('"')
 
+        kilo_api_key = cfg.get("kilo_api_key")
+        if (
+            isinstance(kilo_api_key, str)
+            and kilo_api_key.startswith("${")
+            and kilo_api_key.endswith("}")
+        ):
+            kilo_api_key = os.getenv(kilo_api_key[2:-1])
+        if kilo_api_key:
+            kilo_api_key = kilo_api_key.strip().strip("'").strip('"')
+
         nvidia_api_key = cfg.get("nvidia_api_key")
         if (
             isinstance(nvidia_api_key, str)
@@ -231,6 +241,7 @@ def _get_ai_config() -> Optional[dict]:
             "openrouter_api_key": openrouter_api_key,
             "sambanova_api_key": sambanova_api_key,
             "opencode_api_key": opencode_api_key,
+            "kilo_api_key": kilo_api_key,
             "nvidia_api_key": nvidia_api_key,
         }
     except Exception as e:
@@ -240,7 +251,7 @@ def _get_ai_config() -> Optional[dict]:
 
 # In-memory cache: skip dead providers for 600s after failure
 _dead_providers: dict[str, float] = {}
-_DEAD_PROVIDER_TTL = 600.0  # Re-try dead provider after 10 minutes
+_DEAD_PROVIDER_TTL = 600.0  # Default: Re-try dead provider after 10 minutes (Kilo uses 1800s)
 
 # Global rate limiter for SambaNova: max 1 call per 30 seconds to avoid 429
 _sambanova_last_call_ts: float = 0.0
@@ -387,6 +398,46 @@ def _get_http_detail(exc: Exception, max_len: int = 200) -> str:
     return str(exc)[:max_len]
 
 
+def _is_rate_limit_message(text: str) -> bool:
+    """Detect rate-limit / quota errors from upstream providers (even when HTTP 200)."""
+    low = (text or "").lower()
+    return any(
+        marker in low
+        for marker in (
+            "resourceexhausted",
+            "rate limit",
+            "rate_limit",
+            "ratelimit",
+            "too many requests",
+            "quota",
+            "request limit reached",
+            "worker local total request limit",
+        )
+    )
+
+
+def _safe_json_response(resp: Any, max_preview: int = 200) -> Any:
+    """Parse a JSON response body, raising a descriptive error on empty/non-JSON bodies.
+
+    Prevents the cryptic 'Expecting value: line 1 column 1 (char 0)' JSONDecodeError
+    that occurs when a gateway returns an empty body or an HTML error page with HTTP 200.
+    """
+    try:
+        body = resp.text
+    except Exception:
+        body = ""
+    if body is None or not str(body).strip():
+        raise ValueError(
+            f"Empty response body (HTTP {getattr(resp, 'status_code', '?')}); "
+            "gateway likely rate-limited or timed out upstream"
+        )
+    try:
+        return resp.json()
+    except Exception as e:
+        preview = str(body)[:max_preview].replace("\n", " ")
+        raise ValueError(f"Non-JSON response body: {preview!r} ({e})") from e
+
+
 def _call_chat_completion(
     *,
     session: requests.Session | Any,
@@ -438,7 +489,7 @@ def call_llm(
     return_provider: bool = False,
 ) -> Any:
     """Universal LLM call with fallback:
-    OpenCode Zen -> HuggingFace -> Groq 70b -> GitHub Models -> Nvidia NIM -> Cloudflare -> Groq 8b -> Gemini -> Bedrock."""
+    Kilo Gateway (kilo-auto/free) -> OpenCode Zen -> HuggingFace -> Groq 70b -> GitHub Models -> Nvidia NIM -> Cloudflare -> Groq 8b -> Gemini -> Bedrock."""
     config = _get_ai_config()
     if not config:
         return (None, "None") if return_provider else None
@@ -449,7 +500,144 @@ def call_llm(
         dead_until = _dead_providers.get(provider)
         return bool(dead_until and time.time() < dead_until)
 
-    # ── #0. OpenCode Zen (PRIMARY — free tier, fast, reasoning-capable) ───
+    # ── #0. Kilo Gateway (PRIMARY — kilo-auto/free & top free models) ───
+    if not is_dead("kilo") and config.get("kilo_api_key"):
+        _kilo_models = [
+            ("kilo-auto/free", "kilo-auto/free (Auto Free Router)"),
+            ("openrouter/free", "openrouter/free (Router)"),
+            ("nvidia/nemotron-3-super-120b-a12b:free", "nvidia/nemotron-3-super (Nemotron 120b)"),
+            ("stepfun/step-3.7-flash:free", "stepfun/step-3.7-flash:free (Flash)"),
+        ]
+        consecutive_timeouts = 0
+        consecutive_empty = 0
+        for model_id, model_label in _kilo_models:
+            if consecutive_timeouts >= 2 or consecutive_empty >= 2:
+                _print_llm("#0 Kilo Gateway recurring failures; fast-failing to next provider.")
+                break
+            session, backend = _create_curl_cffi_llm_session()
+            try:
+                _print_llm(f"#0 trying {model_label} [Kilo Gateway] (backend={backend})")
+                logger.info("LLM #0: %s [provider=Kilo Gateway] (backend=%s)", model_label, backend)
+                url = "https://api.kilo.ai/api/gateway/chat/completions"
+                headers = {
+                    "Authorization": f"Bearer {config['kilo_api_key']}",
+                    "Content-Type": "application/json",
+                }
+                payload = {
+                    "model": model_id,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "max_tokens": max_tokens or 2048,
+                }
+                # Free-tier models rarely support response_format; omit to avoid 400s
+                if json_mode and ":free" in model_id:
+                    pass  # rely on prompt instruction for JSON output
+                elif json_mode:
+                    payload["response_format"] = {"type": "json_object"}
+                # Per-model retry loop: retries transient errors (empty body,
+                # non-JSON body, upstream rate limits) with exponential backoff
+                # before falling through to the next model.
+                data = None
+                last_exc: Exception | None = None
+                for _attempt in range(2):
+                    try:
+                        resp = session.post(url, headers=headers, json=payload, timeout=25)
+                        if resp.status_code == 400 and payload.get("response_format") is not None:
+                            payload.pop("response_format", None)
+                            resp = session.post(url, headers=headers, json=payload, timeout=25)
+                        resp.raise_for_status()
+                        data = _safe_json_response(resp)
+                        if not isinstance(data, dict) or "choices" not in data or not data["choices"]:
+                            err_msg = data.get("error", {}).get("message") if isinstance(data, dict) else str(data)
+                            raise ValueError(f"Missing choices in response: {err_msg or data}")
+                        # Validate content is parseable before exiting retry loop
+                        _msg = data["choices"][0]["message"]
+                        text = _msg.get("content") or _msg.get("reasoning") or ""
+                        if not text.strip():
+                            raise ValueError("Empty message content from model")
+                        if json_mode:
+                            text_clean = text.strip()
+                            if text_clean.startswith("```"):
+                                lines = text_clean.split("\n")
+                                text_clean = "\n".join(lines[1:-1]) if lines[-1].startswith("```") else "\n".join(lines[1:])
+                            json.loads(text_clean.strip())  # validate JSON parseability
+                        last_exc = None
+                        break
+                    except Exception as inner_e:
+                        last_exc = inner_e
+                        inner_str = str(inner_e)
+                        inner_status = _get_http_status(inner_e)
+                        transient = (
+                            inner_status in (429, 500, 502, 503, 504)
+                            or _is_rate_limit_message(inner_str)
+                            or "Empty response body" in inner_str
+                            or "Non-JSON response body" in inner_str
+                            or "timed out" in inner_str.lower()
+                            or "timeout" in inner_str.lower()
+                        )
+                        if transient and _attempt < 1:
+                            wait = 1.5 + _random.uniform(0, 0.5)
+                            _print_llm(
+                                f"#0 transient error on {model_id} (attempt {_attempt + 1}/2): "
+                                f"{inner_e}. Retrying in {wait:.1f}s."
+                            )
+                            logger.warning(
+                                "Kilo Gateway %s transient error (attempt %d/2): %s",
+                                model_id, _attempt + 1, inner_e,
+                            )
+                            time.sleep(wait)
+                            continue
+                        raise
+                if last_exc is not None:
+                    raise last_exc
+                _msg = data["choices"][0]["message"]
+                text = _msg.get("content") or _msg.get("reasoning") or ""
+                if json_mode:
+                    text_clean = text.strip()
+                    if text_clean.startswith("```"):
+                        lines = text_clean.split("\n")
+                        text_clean = "\n".join(lines[1:-1]) if lines[-1].startswith("```") else "\n".join(lines[1:])
+                    res_val = json.loads(text_clean.strip())
+                else:
+                    res_val = text
+                _print_llm(f"#0 OK: {model_label} [Kilo Gateway] (backend={backend})")
+                logger.info("LLM success: %s [provider=Kilo Gateway] (backend=%s)", model_label, backend)
+                _log_llm_call(f"Kilo Gateway ({model_label})", resp, prompt=prompt, output=text)
+                return (res_val, f"Kilo Gateway ({model_label})") if return_provider else res_val
+            except Exception as e:
+                err_str = str(e)
+                is_timeout = "timed out" in err_str.lower() or "timeout" in err_str.lower()
+                is_empty_content = (
+                    "Expecting value" in err_str
+                    or "Empty message content" in err_str
+                    or "Unterminated string" in err_str
+                )
+                if is_timeout:
+                    consecutive_timeouts += 1
+                if is_empty_content:
+                    consecutive_empty += 1
+                status = _get_http_status(e)
+                if status == 401:
+                    _print_llm("#0 Kilo API Key unauthorized/invalid (401); marking dead.")
+                    logger.warning("Kilo Gateway API key 401 unauthorized; marking dead.")
+                    _mark_provider_dead("kilo")
+                    break
+                elif _is_rate_limit_message(err_str) or status == 429:
+                    _print_llm(f"#0 rate-limited on {model_id}; backing off 5s, trying next model.")
+                    logger.warning("Kilo Gateway %s rate-limited; trying next model.", model_id)
+                    time.sleep(5)
+                elif status in (403, 500, 502, 503):
+                    _print_llm(f"#0 HTTP {status} on {model_id}; trying next model.")
+                    logger.warning("Kilo Gateway %s HTTP %s; trying next model.", model_id, status)
+                else:
+                    _print_llm(f"#0 failed on {model_id}: {e}. Trying next model.")
+                    logger.warning("Kilo Gateway %s failed: %s. Trying next model.", model_id, e)
+        _print_llm("#0 all Kilo Gateway models failed; marking dead. Trying OpenCode Zen.")
+        _dead_providers["kilo"] = time.time() + 1800.0  # 30 min for gateway-wide outage
+
+    # ── #1. OpenCode Zen (Fallback 1 — free tier, fast, reasoning-capable) ───
     if not is_dead("opencode") and config.get("opencode_api_key"):
         _opencode_models = [
             ("big-pickle", "big-pickle (reasoning/chat)"),
@@ -460,8 +648,8 @@ def call_llm(
         for model_id, model_label in _opencode_models:
             session, backend = _create_curl_cffi_llm_session()
             try:
-                _print_llm(f"#0 trying {model_label} [OpenCode Zen] (backend={backend})")
-                logger.info("LLM #0: %s [provider=OpenCode Zen] (backend=%s)", model_label, backend)
+                _print_llm(f"#1 trying {model_label} [OpenCode Zen] (backend={backend})")
+                logger.info("LLM #1: %s [provider=OpenCode Zen] (backend=%s)", model_label, backend)
                 url = "https://opencode.ai/zen/v1/chat/completions"
                 headers = {
                     "Authorization": f"Bearer {config['opencode_api_key']}",
@@ -484,27 +672,27 @@ def call_llm(
                 _msg = resp.json()["choices"][0]["message"]
                 text = _msg.get("content") or _msg.get("reasoning") or ""
                 res_val = json.loads(text) if json_mode else text
-                _print_llm(f"#0 OK: {model_label} [OpenCode Zen] (backend={backend})")
+                _print_llm(f"#1 OK: {model_label} [OpenCode Zen] (backend={backend})")
                 logger.info("LLM success: %s [provider=OpenCode Zen] (backend=%s)", model_label, backend)
                 _log_llm_call(f"OpenCode Zen ({model_label})", resp, prompt=prompt, output=text)
                 return (res_val, f"OpenCode Zen ({model_label})") if return_provider else res_val
             except Exception as e:
                 err_str = str(e)
                 if _is_ssl_transport_error(e):
-                    _print_llm(f"#0 SSL error on {model_id}; trying next model.")
+                    _print_llm(f"#1 SSL error on {model_id}; trying next model.")
                     logger.warning("OpenCode Zen %s SSL error; trying next model.", model_id)
                 elif _is_http_error(e):
                     status = _get_http_status(e)
                     if status in (401, 403, 429, 500, 502, 503):
-                        _print_llm(f"#0 HTTP {status} on {model_id}; trying next model.")
+                        _print_llm(f"#1 HTTP {status} on {model_id}; trying next model.")
                         logger.warning("OpenCode Zen %s HTTP %s; trying next model.", model_id, status)
                     else:
-                        _print_llm(f"#0 failed on {model_id}: {e}. Trying next model.")
+                        _print_llm(f"#1 failed on {model_id}: {e}. Trying next model.")
                         logger.warning("OpenCode Zen %s failed: %s. Trying next model.", model_id, e)
                 else:
-                    _print_llm(f"#0 failed on {model_id}: {e}. Trying next model.")
+                    _print_llm(f"#1 failed on {model_id}: {e}. Trying next model.")
                     logger.warning("OpenCode Zen %s failed: %s. Trying next model.", model_id, e)
-        _print_llm("#0 all OpenCode Zen models failed; marking dead. Trying HuggingFace.")
+        _print_llm("#1 all OpenCode Zen models failed; marking dead. Trying HuggingFace.")
         _dead_providers["opencode"] = time.time() + _DEAD_PROVIDER_TTL
 
     # ── #1. HuggingFace (Fallback 1 — free tier, 1000 req/day) ────────────

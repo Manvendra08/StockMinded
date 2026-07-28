@@ -1417,11 +1417,14 @@ def _build_option_price_map(open_ops: list[dict]) -> dict:
             # For indices (NIFTY ~25k, BANKNIFTY ~50k), 5000 is still reasonable.
             # For stocks, cap = max(5000, 50% of spot) to accommodate deep ITM.
             _INDEX_SYMBOLS = {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY"}
+            spot_price = _get_ltp(sym) or 0.0
             if sym in _INDEX_SYMBOLS:
                 MAX_REASONABLE_PREMIUM = 5000.0
             else:
-                spot_price = _get_ltp(sym) or 0.0
                 MAX_REASONABLE_PREMIUM = max(5000.0, spot_price * 0.50)
+
+            is_stale_chain = str(_chain_source).startswith("cache")
+
             for trade in [t for t in open_ops if t["symbol"] == sym]:
                 for leg in trade["legs"]:
                     key = (leg["strike"], leg["expiry"], leg["type"])
@@ -1430,15 +1433,34 @@ def _build_option_price_map(open_ops: list[dict]) -> dict:
                         (chain["strike"] == leg["strike"])
                         & (chain["expiry"] == leg["expiry"])
                     ]
+                    price_found = False
                     if not row.empty:
                         try:
                             raw_price = float(row.iloc[0][col])
                             # SANITY CHECK: reject spot/index contamination
-                            if raw_price > MAX_REASONABLE_PREMIUM:
+                            if raw_price <= MAX_REASONABLE_PREMIUM:
+                                # If option chain source is stale cache AND raw_price equals entry premium,
+                                # compute dynamic live BS pricing from current spot price.
+                                entry_p = float(leg.get("entry_premium") or 0.0)
+                                if is_stale_chain and spot_price > 0 and abs(raw_price - entry_p) < 0.01:
+                                    try:
+                                        from signals.options import _bs_price
+                                        exp_d = datetime.strptime(leg["expiry"], "%Y-%m-%d").date()
+                                        t_yrs = max((exp_d - ist_now.date()).days, 0.5) / 365.0
+                                        vix_vol = 0.14
+                                        bs_p = round(_bs_price(spot_price, leg["strike"], t_yrs, 0.065, vix_vol, leg["type"]), 2)
+                                        price_map[key] = bs_p
+                                        price_found = True
+                                    except Exception:
+                                        price_map[key] = raw_price
+                                        price_found = True
+                                else:
+                                    price_map[key] = raw_price
+                                    price_found = True
+                            else:
                                 logging.getLogger(__name__).error(
                                     "%s: REJECTED corrupt premium %s for %s (strike=%s, expiry=%s, type=%s) "
-                                    "- exceeds max reasonable %s (source=%s). "
-                                    "This indicates spot/index value leaked into option chain.",
+                                    "- exceeds max reasonable %s (source=%s).",
                                     sym,
                                     raw_price,
                                     key,
@@ -1448,8 +1470,6 @@ def _build_option_price_map(open_ops: list[dict]) -> dict:
                                     MAX_REASONABLE_PREMIUM,
                                     _chain_source,
                                 )
-                                continue  # Skip this leg - treat as missing price
-                            price_map[key] = raw_price
                         except Exception as e:
                             logging.getLogger(__name__).exception(
                                 "Failed to parse price for %s from chain for symbol %s: %s",
@@ -1457,11 +1477,18 @@ def _build_option_price_map(open_ops: list[dict]) -> dict:
                                 sym,
                                 e,
                             )
-                            continue
-                    else:
-                        logging.getLogger(__name__).debug(
-                            "%s: leg %s not found in chain (row empty)", sym, key
-                        )
+
+                    if not price_found and spot_price > 0:
+                        # Fallback to Black-Scholes estimate if leg missing or unparsed
+                        try:
+                            from signals.options import _bs_price
+                            exp_d = datetime.strptime(leg["expiry"], "%Y-%m-%d").date()
+                            t_yrs = max((exp_d - ist_now.date()).days, 0.5) / 365.0
+                            vix_vol = 0.14
+                            bs_p = round(_bs_price(spot_price, leg["strike"], t_yrs, 0.065, vix_vol, leg["type"]), 2)
+                            price_map[key] = bs_p
+                        except Exception:
+                            pass
         except Exception as e:
             logging.getLogger(__name__).exception(
                 "Failed to build price map for %s: %s", sym, e

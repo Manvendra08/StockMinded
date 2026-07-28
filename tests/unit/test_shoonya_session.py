@@ -18,6 +18,7 @@ def test_api_call_refreshes_expired_token_once(monkeypatch) -> None:
     fetcher = shoonya_fetcher.ShoonyaFetcher()
     fetcher.user_id = "USER1"
     fetcher.access_token = "expired-token"
+    monkeypatch.setattr(fetcher, "_load_cached_token", lambda: None)
 
     calls: list[tuple[str, dict[str, Any], str | None]] = []
     responses: list[dict[str, Any]] = [

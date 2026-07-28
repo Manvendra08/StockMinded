@@ -357,8 +357,8 @@ def run_telegram_pipeline(cfg: dict, dry_run: bool = False, force_live: bool = F
         print(f"\033[91m[{datetime.now().strftime('%H:%M:%S')}] [Telegram Pipeline] Status: FAILED. Error: {e}\033[0m")
         return {"messages": 0, "extracted": 0, "verdicts": 0, "error": str(e)}
 
-    # 2. Parse tickers from each message (dedupe by symbol, keep strongest context)
-    extracted_map: dict[str, Any] = {}
+    # 2. Parse tickers from each message (dedupe by symbol & source, keep strongest context)
+    extracted_map: dict[tuple[str, str], Any] = {}
     llm_calls = 0
     if messages:
         for m in messages:
@@ -373,8 +373,9 @@ def run_telegram_pipeline(cfg: dict, dry_run: bool = False, force_live: bool = F
                 tk.source_platform = "telegram"
                 tk.telegram_msg_id = m.msg_id
                 tk.telegram_channel = m.channel
-                if tk.symbol not in extracted_map or tk.confidence > extracted_map[tk.symbol].confidence:
-                    extracted_map[tk.symbol] = tk
+                key = (tk.symbol, "telegram")
+                if key not in extracted_map or tk.confidence > extracted_map[key].confidence:
+                    extracted_map[key] = tk
         logging.getLogger(__name__).info(
             "Parsed %d unique symbols from %d messages (LLM calls: ~%d)",
             len(extracted_map), len(messages), llm_calls,
@@ -406,22 +407,11 @@ def run_telegram_pipeline(cfg: dict, dry_run: bool = False, force_live: bool = F
                     min_confidence=sahi_cfg.get("min_confidence", 0.4),
                     journal=journal,
                 )
-                # Merge sahi tickers into extracted_map.
-                # Rule: do not overwrite a Telegram ticker with a sahi ticker of
-                # equal or lower confidence. Only upgrade to sahi when its
-                # confidence is strictly higher.
                 for tk in sahi_extracted:
                     tk.source_platform = "sahi"
-                    existing = extracted_map.get(tk.symbol)
-                    existing_conf = getattr(existing, "confidence", 0.0)
-                    existing_src = getattr(existing, "source_platform", "")
-                    if existing is None:
-                        extracted_map[tk.symbol] = tk
-                    elif tk.confidence > existing_conf and existing_src != "telegram":
-                        extracted_map[tk.symbol] = tk
-                    elif tk.confidence > existing_conf + 0.1:
-                        extracted_map[tk.symbol] = tk
-                    # else: keep existing ticker (preserves telegram-sourced ones)
+                    key = (tk.symbol, "sahi")
+                    if key not in extracted_map or tk.confidence > extracted_map[key].confidence:
+                        extracted_map[key] = tk
                 logging.getLogger(__name__).info(
                     "Sahi.com: %d headlines → %d symbols (merged into %d total)",
                     len(sahi_headlines), len(sahi_extracted), len(extracted_map),
@@ -443,7 +433,8 @@ def run_telegram_pipeline(cfg: dict, dry_run: bool = False, force_live: bool = F
             new_extracted.append(tk)
         else:
             logging.getLogger(__name__).info(
-                "Skipping duplicate verdict pass for %s (news event already processed in last 24h)", tk.symbol
+                "Skipping duplicate verdict pass for %s (%s, news event already processed in last 24h)",
+                tk.symbol, src_plat
             )
 
     if not new_extracted:
@@ -484,7 +475,12 @@ def run_telegram_pipeline(cfg: dict, dry_run: bool = False, force_live: bool = F
 
     # Attach Telegram / Sahi source metadata
     for v in verdicts:
-        src = extracted_map.get(v.symbol)
+        src = extracted_map.get((v.symbol, getattr(v, "source_platform", "telegram")))
+        if src is None:
+            for k, candidate in extracted_map.items():
+                if candidate.symbol == v.symbol:
+                    src = candidate
+                    break
         if src is not None:
             v.telegram_msg_id = getattr(src, "telegram_msg_id", None)
             v.telegram_channel = getattr(src, "telegram_channel", None)
@@ -521,9 +517,16 @@ def run_telegram_pipeline(cfg: dict, dry_run: bool = False, force_live: bool = F
     # 5. Persist
     scan_id = uuid.uuid4().hex
     scan_ts = datetime.now(timezone.utc).isoformat()
-    verdict_rows = []
-    seen_symbols: dict[str, dict] = {}
+    _CONF_RANK = {"HIGH": 3, "MEDIUM": 2, "LOW": 1}
+
+    def _conf_score(c) -> int:
+        if isinstance(c, (int, float)):
+            return int(c * 10) if c <= 1.0 else int(c)
+        return _CONF_RANK.get(str(c).strip().upper(), 1)
+
+    seen_symbols: dict[tuple[str, str], dict] = {}
     for v in verdicts:
+        src_plat = getattr(v, "source_platform", "telegram")
         row = {
             "symbol": v.symbol,
             "verdict": v.verdict,
@@ -541,11 +544,12 @@ def run_telegram_pipeline(cfg: dict, dry_run: bool = False, force_live: bool = F
             "event_type": getattr(v, "event_type", "general"),
             "sentiment_direction": getattr(v, "sentiment_direction", "NEUTRAL"),
             "company_name": getattr(v, "company_name", ""),
-            "source_platform": getattr(v, "source_platform", "telegram"),
+            "source_platform": src_plat,
         }
-        existing = seen_symbols.get(v.symbol)
-        if existing is None or v.confidence > existing["confidence"]:
-            seen_symbols[v.symbol] = row
+        key = (v.symbol, src_plat)
+        existing = seen_symbols.get(key)
+        if existing is None or _conf_score(v.confidence) > _conf_score(existing["confidence"]):
+            seen_symbols[key] = row
     verdict_rows = list(seen_symbols.values())
     journal.save_investment_verdicts(scan_id, scan_ts, verdict_rows)
     journal.deduplicate_investment_verdicts()
