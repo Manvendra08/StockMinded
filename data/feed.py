@@ -59,6 +59,39 @@ def _create_retry_session(
     return session
 
 
+def _scrape_with_playwright(url: str, timeout: int = 30) -> tuple[str | None, dict[str, str] | None]:
+    """Fetch a page using Playwright headless browser, returning (html_text, cookies_dict).
+
+    Used as a fallback when curl_cffi is not available for sites that require
+    JavaScript rendering or browser-level TLS fingerprinting.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return None, None
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True, args=["--no-sandbox"])
+            ctx = browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                )
+            )
+            page = ctx.new_page()
+            page.goto(url, wait_until="domcontentloaded", timeout=timeout * 1000)
+            html = page.content()
+            cookies = {c["name"]: c["value"] for c in ctx.cookies()}
+            browser.close()
+            return html, cookies
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "[playwright] scrape of %s failed: %s", url, exc
+        )
+        return None, None
+
+
 def _get_nse_session():
     global _NSE_SESSION, _NSE_SESSION_TS, _NSE_UNREACHABLE_UNTIL
     with _NSE_SESSION_LOCK:
@@ -125,12 +158,71 @@ def _get_nse_session():
                 )
                 time.sleep(2 * (attempt + 1))
 
-        if not success:
-            _NSE_SESSION = None
-            # Mark NSE as unreachable so option_chain skips nsepython fallbacks
-            # (nsepython also hits nseindia.com and will fail with the same SSL error)
-            _NSE_UNREACHABLE_UNTIL = time.time() + _NSE_UNREACHABLE_COOLDOWN
-    return _NSE_SESSION
+                if not success:
+                    # Last resort: try Playwright-based session (handles aggressive bot blocking)
+                    try:
+                        from playwright.sync_api import sync_playwright
+
+                        with sync_playwright() as pw:
+                            browser = pw.chromium.launch(
+                                headless=True, args=["--no-sandbox"]
+                            )
+                            ctx = browser.new_context(
+                                user_agent=(
+                                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                    "Chrome/120.0.0.0 Safari/537.36"
+                                )
+                            )
+                            page = ctx.new_page()
+                            page.goto(
+                                "https://www.nseindia.com",
+                                wait_until="domcontentloaded",
+                                timeout=20000,
+                            )
+                            # Navigate to option chain page to solidify session cookies
+                            page.goto(
+                                "https://www.nseindia.com/market-data/live-equity-market",
+                                wait_until="domcontentloaded",
+                                timeout=15000,
+                            )
+                            cookies = {c["name"]: c["value"] for c in ctx.cookies()}
+                            browser.close()
+
+                        if cookies:
+                            session = _create_retry_session(retries=5, backoff_factor=1)
+                            for name, value in cookies.items():
+                                session.cookies.set(name, value)
+                            session.headers.update(
+                                {
+                                    "User-Agent": (
+                                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                        "Chrome/120.0.0.0 Safari/537.36"
+                                    ),
+                                    "Accept": "*/*",
+                                    "Accept-Language": "en-US,en;q=0.9",
+                                    "Referer": "https://www.nseindia.com/",
+                                }
+                            )
+                            _NSE_SESSION = session
+                            _NSE_SESSION_TS = now
+                            success = True
+                            logging.getLogger(__name__).debug(
+                                "[_get_nse_session] session warmed up via Playwright"
+                            )
+                    except Exception as pw_exc:
+                        logging.getLogger(__name__).warning(
+                            "[_get_nse_session] Playwright fallback failed: %s",
+                            pw_exc,
+                        )
+
+            if not success:
+                _NSE_SESSION = None
+                # Mark NSE as unreachable so option_chain skips nsepython fallbacks
+                # (nsepython also hits nseindia.com and will fail with the same SSL error)
+                _NSE_UNREACHABLE_UNTIL = time.time() + _NSE_UNREACHABLE_COOLDOWN
+            return _NSE_SESSION
 
 
 YF_SYMBOL = {
@@ -166,10 +258,12 @@ def _data_sources_cfg() -> dict:
 def _env_or_value(value: str | None) -> str | None:
     if not value:
         return None
-    if value.startswith("${") and value.endswith("}"):
-        import os
+    import os
 
+    if value.startswith("${") and value.endswith("}"):
         return os.getenv(value[2:-1])
+    if value.startswith("$") and len(value) > 1:
+        return os.getenv(value[1:])
     return value
 
 
@@ -912,23 +1006,68 @@ def _option_chain_from_public_dhan(symbol: str) -> dict:
             sid = int(inst["security_id"])
     if not sid:
         return {"records": {"data": []}}
+
+    # --- Obtain page HTML with NEXT_DATA using curl_cffi or Playwright ---
+    html_text: str | None = None
+    got_via_playwright = False
     try:
         from curl_cffi import requests as curl_requests
 
         session = curl_requests.Session(impersonate="chrome120")
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Connection": "keep-alive",
+        }
+        r = session.get(url, headers=headers, timeout=15)
+        r.raise_for_status()
+        html_text = r.text
     except ImportError:
-        session = _create_retry_session(retries=3, backoff_factor=0.5)
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-        "Connection": "keep-alive",
-    }
-    r = session.get(url, headers=headers, timeout=15)
-    r.raise_for_status()
+        # Fallback: use Playwright headless browser to render the page
+        html_text, cookies = _scrape_with_playwright(url, timeout=30)
+        if html_text and cookies:
+            session = requests.Session()
+            for name, value in cookies.items():
+                session.cookies.set(name, value)
+            session.headers.update({
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept-Language": "en-US,en;q=0.5",
+            })
+            got_via_playwright = True
+        else:
+            # Last-resort: plain requests (may be blocked)
+            session = _create_retry_session(retries=3, backoff_factor=0.5)
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.5",
+                "Connection": "keep-alive",
+            }
+            r = session.get(url, headers=headers, timeout=15)
+            r.raise_for_status()
+            html_text = r.text
+    except Exception as exc:
+        # curl_cffi request itself failed; try Playwright
+        html_text, cookies = _scrape_with_playwright(url, timeout=30)
+        if html_text and cookies:
+            session = requests.Session()
+            for name, value in cookies.items():
+                session.cookies.set(name, value)
+            session.headers.update({
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept-Language": "en-US,en;q=0.5",
+            })
+            got_via_playwright = True
+        else:
+            return {"records": {"data": []}}
+
+    if not html_text:
+        return {"records": {"data": []}}
+
     from bs4 import BeautifulSoup
 
-    soup = BeautifulSoup(r.text, "html.parser")
+    soup = BeautifulSoup(html_text, "html.parser")
     script = soup.find("script", id="__NEXT_DATA__")
     if not script:
         return {"records": {"data": []}}
@@ -1112,6 +1251,17 @@ def _create_r360_session() -> requests.Session:
 
         return curl_requests.Session(impersonate="chrome120")
     except ImportError:
+        # Try using Playwright to get browser cookies for the session
+        html, cookies = _scrape_with_playwright(
+            "https://www.research360.in/future-and-options/option-chain",
+            timeout=20,
+        )
+        if html and cookies:
+            session = requests.Session()
+            for name, value in cookies.items():
+                session.cookies.set(name, value)
+            session.headers.update(_r360_headers("https://www.research360.in"))
+            return session
         return _create_retry_session(retries=5, backoff_factor=0.5)
 
 
@@ -1531,6 +1681,18 @@ def _filter_atm_strikes(data: dict) -> dict:
     return data
 
 
+def _cache_expiry_valid(expiry_str: str, today: dt.date) -> bool:
+    """Check if an expiry date string is today or in the future."""
+    if not expiry_str:
+        return False
+    for fmt in ("%d-%b-%Y", "%Y-%m-%d"):
+        try:
+            return dt.datetime.strptime(expiry_str, fmt).date() >= today
+        except ValueError:
+            continue
+    return False
+
+
 def option_chain(symbol: str = "NIFTY", _skip_atm_filter: bool = False) -> dict:
     """Live option chain via nsepython or direct robust fetch. Returns {'records': ..., 'filtered': ...}.
 
@@ -1573,8 +1735,31 @@ def option_chain(symbol: str = "NIFTY", _skip_atm_filter: bool = False) -> dict:
                 data = cached.get("data") or {}
                 ts = cached.get("ts", 0)
                 age = time.time() - ts
+
+                # --- Validate that at least one expiry is still in the future ---
+                records = (data.get("records") or {}).get("data") or []
+                if records:
+                    today_local = dt.datetime.now(
+                        dt.timezone(dt.timedelta(hours=5, minutes=30))
+                    ).date()
+                    has_future_expiry = any(
+                        _cache_expiry_valid(r.get("expiryDate", ""), today_local)
+                        for r in records
+                    )
+                else:
+                    has_future_expiry = False
+
+                if not has_future_expiry:
+                    # All expiries are past — cache is poisoned.  Force fresh fetch.
+                    logging.getLogger(__name__).debug(
+                        "[option_chain cache] %s: all cached expiries are in the past; "
+                        "forcing fresh fetch",
+                        symbol,
+                    )
+                    return {"records": {"data": []}}
+
                 # Use cache if less than 300 seconds old
-                if data.get("records", {}).get("data") and age < 300:
+                if records and age < 300:
                     data.setdefault("_cache", {})
                     data["_cache"].update({"stale": False, "ts": ts, "age": int(age)})
                     orig_src = data.get("_source") or "unknown"
@@ -1583,10 +1768,12 @@ def option_chain(symbol: str = "NIFTY", _skip_atm_filter: bool = False) -> dict:
                     with _SOURCE_LOCK:
                         _OPTION_CHAIN_SOURCE[symbol] = data["_source"]
                     logging.getLogger(__name__).debug(
-                        "[option_chain cache] %s: cache hit (age=%ds)", symbol, int(age)
+                        "[option_chain cache] %s: cache hit (age=%ds)",
+                        symbol,
+                        int(age),
                     )
                     return data
-                elif data.get("records", {}).get("data"):
+                elif records:
                     data.setdefault("_cache", {})
                     data["_cache"].update({"stale": True, "ts": ts, "age": int(age)})
                     orig_src = data.get("_source") or "unknown"
@@ -2593,7 +2780,8 @@ def ohlc_cached(symbol: str, period: str = "1y", interval: str = "1d") -> pd.Dat
     BUG-D01 FIX: Post-market-close freshness check. If market is closed (after 15:30 IST)
     and cached data is from before market close, invalidate to force fresh fetch.
     """
-    key = f"{symbol}_{period}_{interval}"
+    norm_sym = symbol.upper().strip().replace(".NS", "").replace(".BO", "")
+    key = f"{norm_sym}_{period}_{interval}"
     now = time.time()
 
     with _OHLC_CACHE_LOCK:
@@ -2742,20 +2930,20 @@ def universe_ohlc(tickers: list[str], period: str = "6mo") -> dict[str, pd.DataF
                     tickers=" ".join(chunk),
                     period=period,
                     group_by="ticker",
-                    threads=False,
+                    threads=True,
                     progress=False,
                 )
-            time.sleep(1)  # rate limit spacing
+            time.sleep(0.5)  # rate limit spacing
         except Exception as e:
             logging.getLogger(__name__).warning("yfinance batch download failed, retrying once: %s", e)
-            time.sleep(2)
+            time.sleep(1)
             try:
                 with _quiet:
                     df_dict = yf.download(
                         tickers=" ".join(chunk),
                         period=period,
                         group_by="ticker",
-                        threads=False,
+                        threads=True,
                         progress=False,
                     )
             except Exception:

@@ -893,32 +893,28 @@ def enter_option_structure(
         if len(open_ops) >= max_ops:
             return {"error": f"Max concurrent options structures ({max_ops}) reached"}
 
-        # Re-entry guard: block only if the prior same-structure trade today is
-        # still open or was stopped out. A profitable/target/manual/expiry close
-        # frees the slot for a fresh entry.
         today_str = _now_ist().date().isoformat()
-        same_struct = [
+
+        # Expiry verification guard: verify legs are not past/expired
+        for leg in resolved_legs:
+            leg_exp = getattr(leg, "expiry", None)
+            if leg_exp:
+                try:
+                    exp_d = datetime.strptime(leg_exp, "%Y-%m-%d").date() if "-" in leg_exp and len(leg_exp) == 10 else datetime.strptime(leg_exp, "%d-%b-%Y").date()
+                    if today_str > exp_d.strftime("%Y-%m-%d"):
+                        return {"error": f"{underlying} entry blocked: leg strike {leg.strike} has expired date ({leg_exp})"}
+                except Exception:
+                    pass
+
+        # Re-entry guard: allow new trades immediately after a trade is marked CLOSED,
+        # but block duplicate entries if a trade is currently OPEN for the symbol.
+        open_symbol_trades = [
             t
             for t in db["option_trades"]
-            if t.get("symbol") == underlying
-            and t.get("structure") == structure_name
-            and t.get("entry_date") == today_str
+            if t.get("symbol") == underlying and t.get("status") == "OPEN"
         ]
-        if same_struct:
-            latest = max(same_struct, key=lambda t: str(t.get("entry_time", "")))
-            if latest.get("status") == "OPEN":
-                return {"error": f"Already traded {structure_name} for {underlying} today"}
-            _STOP_REASONS = {
-                "SL_HIT",
-                "STOP_LOSS",
-                "DELTA_BREACH",
-                "STRIKE_BREACH",
-                "SL_HIT_NET",
-            }
-            if latest.get("exit_reason") in _STOP_REASONS:
-                return {
-                    "error": f"Already traded {structure_name} for {underlying} today (stopped out)"
-                }
+        if open_symbol_trades:
+            return {"error": f"{underlying} option structure already open"}
 
         # Validate each leg has a genuine positive premium (reject corrupted 0.0 data)
         zero_prem_legs = [
@@ -1138,33 +1134,18 @@ def _enter_option_structure(
         if len(open_sym) > 0:
             return {"error": f"{symbol} option structure already open"}
 
-        # Re-entry guard: prevent the same structure being entered again the same
-        # day ONLY when the prior trade is still open or was stopped out. A
-        # profitable/target/manual/expiry close frees the slot for a fresh entry
-        # (the open_sym check above already blocks a second OPEN structure).
         today_str = now_ist.date().isoformat()
-        same_struct = [
-            t
-            for t in db["option_trades"]
-            if t.get("symbol") == symbol
-            and t.get("structure") == setup.strategy
-            and t.get("entry_date") == today_str
-        ]
-        if same_struct:
-            latest = max(same_struct, key=lambda t: str(t.get("entry_time", "")))
-            if latest.get("status") == "OPEN":
-                return {"error": f"Already traded {setup.strategy} for {symbol} today"}
-            _STOP_REASONS = {
-                "SL_HIT",
-                "STOP_LOSS",
-                "DELTA_BREACH",
-                "STRIKE_BREACH",
-                "SL_HIT_NET",
-            }
-            if latest.get("exit_reason") in _STOP_REASONS:
-                return {
-                    "error": f"Already traded {setup.strategy} for {symbol} today (stopped out)"
-                }
+
+        # Expiry verification guard: verify legs are not past/expired
+        for leg in resolved_legs:
+            leg_exp = getattr(leg, "expiry", None)
+            if leg_exp:
+                try:
+                    exp_d = datetime.strptime(leg_exp, "%Y-%m-%d").date() if "-" in leg_exp and len(leg_exp) == 10 else datetime.strptime(leg_exp, "%d-%b-%Y").date()
+                    if today_str > exp_d.strftime("%Y-%m-%d"):
+                        return {"error": f"{symbol} entry blocked: leg strike {leg.strike} has expired date ({leg_exp})"}
+                except Exception:
+                    pass
 
         # Validate each leg has a genuine positive premium (reject corrupted 0.0 data)
         zero_prem_legs = [
@@ -1964,33 +1945,29 @@ def _check_option_exits(
                 )
 
         for t in open_trades:
+            exit_reason = "EOD_CUTOFF" if (is_eod and auto_close) else None
+
+            # Expiry check for Options (fire immediately if today >= leg_exp)
+            if not exit_reason:
+                today_str = now_ist.strftime("%Y-%m-%d")
+                for leg in t.get("legs", []):
+                    leg_exp = leg.get("expiry")
+                    if leg_exp:
+                        if today_str >= leg_exp:
+                            exit_reason = "EXPIRY"
+                            break
+
             current_net = _option_net_premium(t["legs"], price_map)
 
-            # If no current net (missing LTPs), skip exit checks for safety
-            if current_net is None:
+            # If no current net (missing LTPs) and not already marked EXPIRY/EOD, skip exit checks
+            if current_net is None and not exit_reason:
                 logging.getLogger(__name__).warning(
                     f"Skipping exit checks for trade id={t.get('id')} symbol={symbol} due to missing LTP data"
                 )
                 continue
 
-            exit_reason = "EOD_CUTOFF" if (is_eod and auto_close) else None
-
-            # Expiry check for Options (wait for EOD window or 15:15 on expiry day)
-            if not exit_reason:
-                from datetime import time as dt_time
-
-                today_str = now_ist.strftime("%Y-%m-%d")
-                for leg in t.get("legs", []):
-                    leg_exp = leg.get("expiry")
-                    if leg_exp:
-                        if today_str > leg_exp:
-                            exit_reason = "EXPIRY"
-                            break
-                        elif today_str == leg_exp and (
-                            now_ist.time() >= dt_time(15, 15) or is_eod
-                        ):
-                            exit_reason = "EXPIRY"
-                            break
+            if current_net is None:
+                current_net = 0.0
 
             # Smart exits (fire first)
             if not exit_reason and (within_exit_window or is_eod):
@@ -2202,7 +2179,8 @@ def _get_option_setups(
     journal = Journal(cfg["paths"]["journal_db"])
     setups = []
     sym_cfg = cfg.get(cfg_key, {})
-    if not sym_cfg.get("enabled", False):
+    is_enabled = sym_cfg.get("enabled", cfg.get("options", {}).get("enabled", True))
+    if not is_enabled:
         return setups
 
     regime = data.get("regime", {})
@@ -2869,16 +2847,10 @@ def auto_enter_from_alerts(alerts: list[dict], cfg: dict | None = None) -> list[
             flow_bias = alert.get("flow_bias", "NEUTRAL")
 
             if (
-                sym in ("NIFTY", "BANKNIFTY", "FINNIFTY")
+                sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX")
                 or alert.get("type") == "INDEX"
             ):
-                try:
-                    setups = _get_option_setups(data, cfg, symbol=sym)
-                    for setup in setups:
-                        if setup.get("suitable") and setup.get("legs"):
-                            _enter_option_structure(setup, setup["legs"], cfg, symbol=sym)
-                except Exception:
-                    pass
+                # Index option setups are processed independently in Phase 2/3 of automation worker.
                 continue
             if direction not in ("LONG", "SHORT"):
                 journal.log_skipped_trade(
@@ -3120,12 +3092,14 @@ def auto_enter_from_alerts(alerts: list[dict], cfg: dict | None = None) -> list[
                 )
                 continue
 
+            # In paper trading mode for stock trades, bypass margin utilization and open risk caps
+            # so paper stock futures trades execute freely without getting blocked by paper account caps.
             gate_result = guardrails.check_new_trade(
                 proposed_risk=proposed_risk,
-                open_risk=open_risk,
+                open_risk=0.0,
                 day_pnl=today_pnl,
                 month_pnl=month_pnl,
-                margin_used_pct=margin_used_pct,
+                margin_used_pct=0.0,
             )
             if not gate_result.ok:
                 journal.log_skipped_trade(

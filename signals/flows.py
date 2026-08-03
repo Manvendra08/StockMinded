@@ -506,10 +506,15 @@ def snapshot(
                     market_context=_market_ctx if _market_ctx else None,
                 )
                 ai_sentiment = future.result(timeout=90)
-        except (FuturesTimeout, Exception):
+        except FuturesTimeout:
             ai_sentiment = None
             logging.getLogger(__name__).warning(
-                "AI sentiment fetch timed out or failed; continuing without it"
+                "AI sentiment fetch timed out (>90s); continuing without it"
+            )
+        except Exception as fe:
+            ai_sentiment = None
+            logging.getLogger(__name__).warning(
+                "AI sentiment fetch failed (%s); continuing without it", fe
             )
     except Exception as e:
         logging.getLogger(__name__).warning("AI sentiment setup failed: %s", e)

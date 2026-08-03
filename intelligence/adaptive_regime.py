@@ -295,7 +295,7 @@ class AdaptiveRegimeClassifier:
         bearish_alignment = px < ema20 < ema50 < ema200
 
         # Volatility: 20-day realized vol
-        returns = close.pct_change().dropna()
+        returns = close.pct_change(fill_method=None).dropna()
         realized_vol = float(returns.tail(20).std() * np.sqrt(252) * 100) if len(returns) >= 20 else 0.0
 
         vix_rank_val = _vix_rank(vix_df["close"])
@@ -752,6 +752,8 @@ class AdaptiveRegimeClassifier:
 
 # --- Integration with existing system ---
 
+_shared_classifier: AdaptiveRegimeClassifier | None = None
+
 def classify_adaptive(
     index_symbol: str = "NIFTY",
     stock_universe_data: dict | None = None,
@@ -762,8 +764,10 @@ def classify_adaptive(
     Returns AdaptiveRegimeResult which contains a .snapshot field
     compatible with the existing RegimeSnapshot dataclass.
     """
-    classifier = AdaptiveRegimeClassifier()
-    return classifier.classify(
+    global _shared_classifier
+    if _shared_classifier is None:
+        _shared_classifier = AdaptiveRegimeClassifier()
+    return _shared_classifier.classify(
         index_symbol=index_symbol,
         stock_universe_data=stock_universe_data,
     )

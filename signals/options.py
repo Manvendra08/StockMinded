@@ -142,8 +142,10 @@ def _next_expiry(symbol: str = "NIFTY", preference: str = "weekly") -> str:
                 exp_date = date(next_year, next_month, last_week[calendar.TUESDAY])
             else:
                 exp_date = date(next_year, next_month, cal[-2][calendar.TUESDAY])
-    while _is_holiday(exp_date) or exp_date.weekday() >= 5:
+    _attempts = 0
+    while (_is_holiday(exp_date) or exp_date.weekday() >= 5) and _attempts < 15:
         exp_date -= timedelta(days=1)
+        _attempts += 1
     return exp_date.strftime("%d-%b-%Y")
 
 
@@ -244,9 +246,12 @@ def chain_snapshot(symbol, target_expiries=None, target_strikes=None) -> pd.Data
         return datetime.max
 
     expiries.sort(key=parse_exp)
-    # Issue #4: on expiry day, avoid 0-DTE chain (gamma risk / illiquidity);
-    # prefer next week's expiry so signals are stable throughout the session.
     today_local = datetime.now(timezone(timedelta(hours=5, minutes=30))).date()
+
+    # Filter out expired / past contracts
+    valid_expiries = [e for e in expiries if parse_exp(e) != datetime.max and parse_exp(e).date() >= today_local]
+    if not valid_expiries:
+        return pd.DataFrame()
 
     def _is_today(s):
         try:
@@ -254,8 +259,8 @@ def chain_snapshot(symbol, target_expiries=None, target_strikes=None) -> pd.Data
         except Exception:
             return False
 
-    non_zero_dte = [e for e in expiries if not _is_today(e)]
-    closest_expiry = non_zero_dte[0] if non_zero_dte else expiries[0]
+    non_zero_dte = [e for e in valid_expiries if not _is_today(e)]
+    closest_expiry = non_zero_dte[0] if non_zero_dte else valid_expiries[0]
 
     # Filter target_expiries: only keep future expiries (or today's)
     today_local_date = today_local
@@ -545,8 +550,10 @@ def _expiry_date_for_symbol(symbol: str) -> str | None:
             exp_date = today - timedelta(days=days_since)
 
         # Holiday rollback: if expiry lands on a holiday/weekend, move to previous trading day
-        while _is_holiday(exp_date) or exp_date.weekday() >= 5:
+        _attempts = 0
+        while (_is_holiday(exp_date) or exp_date.weekday() >= 5) and _attempts < 15:
             exp_date -= timedelta(days=1)
+            _attempts += 1
             if exp_date.month != today.month and symbol == "BANKNIFTY":
                 # Monthly expiry rolled into previous month — find next month's
                 next_month = today.month + 1 if today.month < 12 else 1
@@ -556,8 +563,10 @@ def _expiry_date_for_symbol(symbol: str) -> str | None:
                     week[cal.TUESDAY] for week in month_cal if week[cal.TUESDAY] != 0
                 )
                 exp_date = dt_date(next_year, next_month, last_tuesday)
-                while _is_holiday(exp_date) or exp_date.weekday() >= 5:
+                _sub_attempts = 0
+                while (_is_holiday(exp_date) or exp_date.weekday() >= 5) and _sub_attempts < 15:
                     exp_date -= timedelta(days=1)
+                    _sub_attempts += 1
                 break
 
         return exp_date.strftime("%d-%b-%Y")

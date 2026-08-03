@@ -75,19 +75,56 @@ def _get_session():
 
 
 def _sensibull_get(url: str, timeout: int = 15) -> dict | None:
-    """GET request to Sensibull oxide API using persistent warmed-up session, with retry."""
+    """GET request to Sensibull oxide API using persistent warmed-up session, with retry.
+
+    Handles 401 / invalid platform access token by fully clearing session cookies
+    and forcing a fresh warm-up on retry.
+    """
     global _SESSION
     session = _get_session()
     try:
         resp = session.get(url, timeout=timeout)
+        # Detect 401 explicitly — token may have expired or be invalid
+        if resp.status_code == 401:
+            log.warning(
+                "[sensibull] 401 on %s — forcing full session re-warmup", url
+            )
+            with _SESSION_LOCK:
+                _SESSION = None
+            # Create a completely fresh session (skip warm-up cache)
+            try:
+                from curl_cffi import requests as curl_requests
+                session = curl_requests.Session(impersonate="chrome120")
+            except ImportError:
+                import requests
+                session = requests.Session()
+            session.headers.update(_REQ_HEADERS)
+            # Warm up and assign
+            r = session.get(
+                "https://oxide.sensibull.com/v1/pluto/auth/web/session/a/platform/identify",
+                timeout=timeout,
+            )
+            r.raise_for_status()
+            with _SESSION_LOCK:
+                _SESSION = session
+                _SESSION_TS = time.time()
+            # Retry once with the brand-new session
+            resp = session.get(url, timeout=timeout)
+            resp.raise_for_status()
+            return resp.json()
+
         resp.raise_for_status()
         return resp.json()
     except Exception as e:
-        log.warning("[sensibull] GET request to %s failed: %s. Clearing session and retrying.", url, e)
+        log.warning(
+            "[sensibull] GET request to %s failed: %s. Clearing session and retrying.",
+            url,
+            e,
+        )
         # Clear the session so the next call to _get_session() warms up a new one
         with _SESSION_LOCK:
             _SESSION = None
-        
+
         # Re-initialize and retry once
         session = _get_session()
         resp = session.get(url, timeout=timeout)

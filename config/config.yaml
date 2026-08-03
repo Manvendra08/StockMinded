@@ -225,11 +225,11 @@ timing_engine:
     size_multiplier: 0.5
   late_entry_filter:
     enabled: true
-    max_intraday_atr_extension: 1.0
+    max_intraday_atr_extension: 2.5
     max_move_from_open_pct: 1.2
-    max_vwap_dist_pct: 1.0
-    rsi_threshold_long: 70
-    rsi_threshold_short: 30
+    max_vwap_dist_pct: 2.0
+    rsi_threshold_long: 75
+    rsi_threshold_short: 25
   market_exhaustion:
     breadth_drop_threshold_pct: 8
     enabled: true

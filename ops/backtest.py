@@ -236,7 +236,7 @@ class TimingBacktester:
                 regime_wr = regime_trades["pnl_positive"].mean()
 
                 # If uptrend trades underperform, suggest tighter thresholds
-                if "TREND_UP" in str(regime) and regime_wr < 0.55:
+                if str(regime) == "TREND_UP" and regime_wr < 0.55:
                     adjustments[f"regime_{regime}_adjustment"] = {
                         "current": "relaxed",
                         "suggested": "normal",

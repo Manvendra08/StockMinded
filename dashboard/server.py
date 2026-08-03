@@ -24,6 +24,10 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+import warnings
+warnings.filterwarnings("ignore", message=".*Pydantic.*")
+warnings.filterwarnings("ignore", message=".*validator.*")
+
 from dotenv import load_dotenv
 
 load_dotenv(PROJECT_ROOT / ".env")
@@ -32,6 +36,9 @@ import logging
 
 from core.log import setup_logging
 setup_logging()
+
+if not (PROJECT_ROOT / ".env").exists():
+    logging.getLogger(__name__).warning(".env file not found at %s; running with environment defaults", PROJECT_ROOT / ".env")
 
 # L4 FIX: module-level logger so exception handlers log through the logging
 # system (message + full traceback) instead of dumping raw tracebacks to
@@ -562,7 +569,7 @@ def _run_engine() -> dict:
         high_20d = df["high"].iloc[:-1].tail(20).max()
         is_breakout = df["close"].iloc[-1] >= (high_20d * 0.99)
         # Volatility Score: Annualized volatility (20D window) for beta analysis
-        vol_score = round(df["close"].pct_change().tail(20).std() * (252**0.5) * 100, 2)
+        vol_score = round(df["close"].pct_change(fill_method=None).tail(20).std() * (252**0.5) * 100, 2)
 
         # Momentum Score: Prioritize RS + Breakout + Volume
         # This moves breakout candidates to the top of the A-Grade list
@@ -1181,7 +1188,7 @@ def _generate_trade_alerts(data: dict) -> list[dict]:
 
         def _prefetch_ohlc(_sym: str) -> None:
             try:
-                _local_ohlc_5m[_sym] = feed.ohlc_cached(_sym, interval="5m", period="1d")
+                _local_ohlc_5m[_sym] = feed.ohlc_cached(_sym, interval="5m", period="5d")
             except Exception as _e:
                 logging.getLogger(__name__).debug("[M3] 5m prefetch failed for %s: %s", _sym, _e)
             try:
@@ -1221,15 +1228,23 @@ def _generate_trade_alerts(data: dict) -> list[dict]:
         timing_ok = True
         timing_reason = ""
         timing_result = {}
-        price = stock.get("ltp", 0)
+        price = float(stock.get("ltp") or stock.get("price") or stock.get("close") or 0)
         if timing_engine_cfg.get("enabled", True):
             try:
                 if sym not in _local_ohlc_5m:
-                    _local_ohlc_5m[sym] = feed.ohlc_cached(sym, interval="5m", period="1d")
+                    _local_ohlc_5m[sym] = feed.ohlc_cached(sym, interval="5m", period="5d")
                 if sym not in _local_ohlc_1d:
                     _local_ohlc_1d[sym] = feed.ohlc_cached(sym, interval="1d", period="6mo")
                 df_5m = _local_ohlc_5m[sym]
                 df_1d = _local_ohlc_1d[sym]
+
+                # Fallback price resolution if stock dict had 0 / None
+                if price <= 0 or pd.isna(price):
+                    if df_5m is not None and not df_5m.empty and "close" in df_5m.columns:
+                        price = float(df_5m.sort_index(ascending=True)["close"].iloc[-1])
+                    elif df_1d is not None and not df_1d.empty and "close" in df_1d.columns:
+                        price = float(df_1d.sort_index(ascending=True)["close"].iloc[-1])
+
                 vwap_5m = None
                 if (
                     df_5m is not None
@@ -1259,7 +1274,9 @@ def _generate_trade_alerts(data: dict) -> list[dict]:
                 timing_reason = timing_result.get("reason", "")
 
                 if not timing_ok:
-                    logging.debug(f"[TIMING] {sym} {direction} skipped: {timing_reason}")
+                    logging.getLogger(__name__).warning(
+                        "[TIMING] %s %s BLOCKED — %s", sym, direction, timing_reason
+                    )
                     return None
             except Exception as e:
                 # H4: the timing gate is a risk-reduction guard — fail CLOSED.
@@ -3383,6 +3400,11 @@ def _automation_worker():
 
                     # ---- Phase 2: NIFTY options auto-entry ----
                     option_entered_this_tick = False
+                    regime_name = data.get("regime", {}).get("name", "")
+                    bias = data.get("flows", {}).get("bias", "NEUTRAL")
+                    vix = data.get("regime", {}).get("vix", 15)
+                    vix_disp = f"{vix:.1f}" if vix is not None else "N/A"
+
                     try:
                         setups = pt.get_nifty_option_setups(data, cfg)
                         nifty_entered = []
@@ -3402,11 +3424,6 @@ def _automation_worker():
                             option_entered_this_tick = True
                             token = cfg.get("alerts", {}).get("telegram_bot_token")
                             chat_id = cfg.get("alerts", {}).get("telegram_chat_id")
-
-                            regime_name = data.get("regime", {}).get("name", "")
-                            bias = data.get("flows", {}).get("bias", "NEUTRAL")
-                            vix = data.get("regime", {}).get("vix", 15)
-                            vix_disp = f"{vix:.1f}" if vix is not None else "N/A"
 
                             for res in nifty_entered:
                                 msg = _format_options_telegram_alert(
@@ -4194,12 +4211,9 @@ if __name__ == "__main__":
         )
         app.run(host="0.0.0.0", port=5050, debug=False)
     else:
-        # Start automation thread
+        # Start automation thread (runs initial engine tick & periodic ticks)
         worker = threading.Thread(target=_automation_worker, daemon=True)
         worker.start()
-
-        # Pre-warm engine cache in background so first dashboard load is instant
-        threading.Thread(target=_preamble, daemon=True).start()
 
         logging.getLogger(__name__).info(
             "StockMinded Dashboard -> http://localhost:5050"

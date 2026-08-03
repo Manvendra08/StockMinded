@@ -135,8 +135,8 @@ class TestAutoEntryRiskGates:
 
     @patch("dashboard.paper_trader._get_ltp")
     @patch("dashboard.paper_trader.is_market_open", return_value=True)
-    def test_concurrent_risk_cap_blocks_trade(self, mock_market_open, mock_ltp, mock_db_empty, mock_config, valid_alert):
-        """Trade should be blocked if adding it exceeds concurrent risk cap."""
+    def test_concurrent_risk_cap_bypassed_in_paper_mode(self, mock_market_open, mock_ltp, mock_db_empty, mock_config, valid_alert):
+        """In paper mode, stock trades bypass open risk caps so paper entries are unblocked."""
         mock_ltp.return_value = 2500.0
         
         # Set up database with open trades near risk cap
@@ -152,7 +152,7 @@ class TestAutoEntryRiskGates:
             
             result = auto_enter_from_alerts([valid_alert], cfg=mock_config)
             
-            assert len(result) == 0
+            assert len(result) == 1
 
     @patch("dashboard.paper_trader._get_ltp")
     @patch("dashboard.paper_trader.is_market_open", return_value=True)

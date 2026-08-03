@@ -191,6 +191,10 @@ def _write_shared_token_file(filepath: str, data: dict) -> bool:
             if os.path.exists(filepath):
                 os.remove(filepath)
             os.rename(temp_filepath, filepath)
+            try:
+                os.chmod(filepath, 0o600)
+            except Exception:
+                pass
             return True
         except (PermissionError, OSError):
             time.sleep(0.05)

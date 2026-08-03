@@ -103,6 +103,9 @@ def is_price_overextended(
     Returns:
         (is_overextended: bool, reason: str)
     """
+    if price is None or price <= 0 or open_price is None or open_price <= 0:
+        return False, "Price or open price unavailable; assume OK"
+
     if atr is None or atr <= 0:
         return False, "ATR unavailable; assume OK"
 
@@ -264,6 +267,12 @@ def evaluate_timing_for_entry(
             "size_multiplier": 1.0,
         }
 
+    if price is None or price <= 0 or pd.isna(price):
+        if df_5m is not None and not df_5m.empty and "close" in df_5m.columns:
+            price = float(df_5m.sort_index(ascending=True)["close"].iloc[-1])
+        elif df_1d is not None and not df_1d.empty and "close" in df_1d.columns:
+            price = float(df_1d.sort_index(ascending=True)["close"].iloc[-1])
+
     checks = {}
     failed_checks = []
 
@@ -290,19 +299,37 @@ def evaluate_timing_for_entry(
             failed_checks.append(reason_rsi)
 
     # --- Price Distance from Open Check ---
-    if late_entry_cfg.get("enabled", True) and df_1d is not None and not df_1d.empty:
-        open_price = df_1d["open"].iloc[-1]
-        atr = compute_atr_from_df(df_1d)
-        is_price_over, reason_dist = is_price_overextended(
-            price,
-            open_price,
-            atr,
-            late_entry_cfg.get("max_intraday_atr_extension", 1.0),
-            direction,
-        )
-        checks["price_distance"] = (is_price_over, reason_dist)
-        if is_price_over:
-            failed_checks.append(reason_dist)
+    if late_entry_cfg.get("enabled", True):
+        open_price = None
+        # PRIMARY: today's session open from 5m intraday bars (filter to today's date only).
+        # This is authoritative — daily OHLC often doesn't include the current intraday bar.
+        if df_5m is not None and not df_5m.empty and "open" in df_5m.columns:
+            sorted_5m = df_5m.sort_index(ascending=True)
+            if hasattr(sorted_5m.index, "date"):
+                # Filter to only today's candles, take the first bar's open
+                last_day = sorted_5m.index[-1].date()
+                today_bars = sorted_5m[sorted_5m.index.date == last_day]
+                if not today_bars.empty:
+                    open_price = float(today_bars["open"].iloc[0])
+
+        # FALLBACK: use daily candle's last row open if 5m unavailable
+        if open_price is None and df_1d is not None and not df_1d.empty and "open" in df_1d.columns:
+            open_price = float(df_1d.sort_index(ascending=True)["open"].iloc[-1])
+
+        if open_price is not None and open_price > 0 and df_1d is not None and not df_1d.empty:
+            atr = compute_atr_from_df(df_1d)
+            if atr > 0:
+                max_ext = late_entry_cfg.get("max_intraday_atr_extension", 2.5)
+                is_price_over, reason_dist = is_price_overextended(
+                    price,
+                    open_price,
+                    atr,
+                    max_ext,
+                    direction,
+                )
+                checks["price_distance"] = (is_price_over, reason_dist)
+                if is_price_over:
+                    failed_checks.append(reason_dist)
 
     # --- Market Exhaustion Check ---
     exhaustion_cfg = config.get("market_exhaustion", {})
@@ -565,7 +592,7 @@ def get_regime_adjusted_thresholds(
             "rsi_threshold_long": base_config.get("rsi_threshold_long", 70),
             "rsi_threshold_short": base_config.get("rsi_threshold_short", 30),
             "max_intraday_atr_extension": base_config.get(
-                "max_intraday_atr_extension", 1.0
+                "max_intraday_atr_extension", 2.5
             ),
             "breadth_drop_threshold_pct": base_config.get(
                 "breadth_drop_threshold_pct", 8
@@ -614,7 +641,7 @@ def get_regime_adjusted_thresholds(
         )
 
     # ATR extension
-    base_atr = base_config.get("max_intraday_atr_extension", 1.0)
+    base_atr = base_config.get("max_intraday_atr_extension", 2.5)
     adjusted_atr = regime_rules.get("max_intraday_atr_extension", base_atr)
     adjusted["max_intraday_atr_extension"] = adjusted_atr
     multiplier["atr"] = adjusted_atr / base_atr if base_atr > 0 else 1.0

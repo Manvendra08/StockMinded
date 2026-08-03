@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 
@@ -381,10 +381,11 @@ class Journal:
         symbol + skip_reason + risk_gate combo.
         Prevents redundant logging across repeated engine cycles.
         """
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        IST = timezone(timedelta(hours=5, minutes=30))
+        today = datetime.now(IST).strftime("%Y-%m-%d")
         cur = self.conn.execute(
             """SELECT 1 FROM skipped_trades
-               WHERE date(ts) = ?
+               WHERE date(ts, '+05:30') = ?
                  AND symbol = ?
                  AND skip_reason = ?
                  AND risk_gate = ?

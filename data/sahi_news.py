@@ -325,6 +325,8 @@ def fetch_sahi_headlines(
 
     try:
         for page in range(1, max(1, max_pages) + 1):
+            if page > 1:
+                time.sleep(0.5)
             url = _paged_url(base_url, page)
             try:
                 resp = session.get(url, timeout=timeout)

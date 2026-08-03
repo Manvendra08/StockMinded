@@ -200,6 +200,14 @@ def _get_ai_config() -> Optional[dict]:
         if github_api_key:
             github_api_key = github_api_key.strip().strip("'").strip('"')
 
+        omnirouter_api_key = os.getenv("OMNIROUTER_API_KEY") or cfg.get("omnirouter_api_key")
+        if omnirouter_api_key:
+            omnirouter_api_key = omnirouter_api_key.strip().strip("'").strip('"')
+
+        omnirouter_base_url = os.getenv("OMNIROUTER_BASE_URL") or cfg.get("omnirouter_base_url", "http://localhost:3000/v1")
+        if omnirouter_base_url:
+            omnirouter_base_url = omnirouter_base_url.strip().strip("'").strip('"')
+
         hf_api_key = cfg.get("hf_api_key")
         if (
             isinstance(hf_api_key, str)
@@ -243,6 +251,8 @@ def _get_ai_config() -> Optional[dict]:
             "opencode_api_key": opencode_api_key,
             "kilo_api_key": kilo_api_key,
             "nvidia_api_key": nvidia_api_key,
+            "omnirouter_api_key": omnirouter_api_key,
+            "omnirouter_base_url": omnirouter_base_url,
         }
     except Exception as e:
         logger.error(f"Failed to load ScrapeGraphAI config: {e}")
@@ -500,20 +510,87 @@ def call_llm(
         dead_until = _dead_providers.get(provider)
         return bool(dead_until and time.time() < dead_until)
 
-    # ── #0. Kilo Gateway (PRIMARY — kilo-auto/free & top free models) ───
+    # ── #0. OmniRouter (PRIMARY — local gateway router) ───
+    if not is_dead("omnirouter") and config.get("omnirouter_api_key"):
+        _omnirouter_base = (config.get("omnirouter_base_url") or "http://localhost:3000/v1").rstrip("/")
+        if not _omnirouter_base.endswith("/chat/completions"):
+            url = f"{_omnirouter_base}/chat/completions"
+        else:
+            url = _omnirouter_base
+
+        _omnirouter_models = [
+            ("antigravity/gemini-3.6-flash-medium", "OmniRouter (Gemini 3.6 Flash Medium)"),
+            ("antigravity/gemini-3.1-pro-low", "OmniRouter (Gemini 3.1 Pro Low)"),
+            ("antigravity/gemini-3.5-flash-low", "OmniRouter (Gemini 3.5 Flash Low)"),
+            ("antigravity/gemini-2.5-flash", "OmniRouter (Gemini 2.5 Flash)"),
+            ("antigravity/gpt-oss-120b-medium", "OmniRouter (GPT-OSS 120B Medium)"),
+            ("antigravity/claude-sonnet-4-6", "OmniRouter (Claude Sonnet 4.6)"),
+        ]
+        for model_id, model_label in _omnirouter_models:
+            if "localhost" in url or "127.0.0.1" in url:
+                session = _create_llm_retry_session()
+                backend = "requests"
+            else:
+                session, backend = _create_curl_cffi_llm_session()
+            try:
+                _print_llm(f"#0 trying {model_label} [OmniRouter] (backend={backend})")
+                logger.info("LLM #0: %s [provider=OmniRouter] (backend=%s)", model_label, backend)
+                headers = {
+                    "Authorization": f"Bearer {config['omnirouter_api_key']}",
+                    "Content-Type": "application/json",
+                }
+                payload = {
+                    "model": model_id,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "max_tokens": max_tokens or 2048,
+                    "stream": False,
+                }
+                if json_mode:
+                    payload["response_format"] = {"type": "json_object"}
+                resp = session.post(url, headers=headers, json=payload, timeout=20)
+                if resp.status_code == 400 and payload.get("response_format") is not None:
+                    payload.pop("response_format", None)
+                    resp = session.post(url, headers=headers, json=payload, timeout=20)
+                resp.raise_for_status()
+                data = _safe_json_response(resp)
+                if not isinstance(data, dict) or "choices" not in data or not data["choices"]:
+                    err_msg = data.get("error", {}).get("message") if isinstance(data, dict) else str(data)
+                    raise ValueError(f"Missing choices in response: {err_msg or data}")
+                _msg = data["choices"][0]["message"]
+                text = _msg.get("content") or _msg.get("reasoning") or ""
+                if not text.strip():
+                    raise ValueError("Empty message content from OmniRouter")
+                if json_mode:
+                    text_clean = text.strip()
+                    if text_clean.startswith("```"):
+                        lines = text_clean.split("\n")
+                        text_clean = "\n".join(lines[1:-1]) if lines[-1].startswith("```") else "\n".join(lines[1:])
+                    res_val = json.loads(text_clean.strip())
+                else:
+                    res_val = text
+                _print_llm(f"#0 OK: {model_label} [OmniRouter] (backend={backend})")
+                logger.info("LLM success: %s [provider=OmniRouter] (backend=%s)", model_label, backend)
+                _log_llm_call(f"OmniRouter ({model_label})", resp, prompt=prompt, output=text)
+                return (res_val, f"OmniRouter ({model_label})") if return_provider else res_val
+            except Exception as e:
+                _print_llm(f"#0 failed on OmniRouter {model_id}: {e}. Trying next model/fallback.")
+                logger.warning("OmniRouter %s failed: %s.", model_id, e)
+
+    # ── #1. Kilo Gateway (PRIMARY FALLBACK — top free models) ───
     if not is_dead("kilo") and config.get("kilo_api_key"):
         _kilo_models = [
-            ("kilo-auto/free", "kilo-auto/free (Auto Free Router)"),
-            ("openrouter/free", "openrouter/free (Router)"),
-            ("nvidia/nemotron-3-super-120b-a12b:free", "nvidia/nemotron-3-super (Nemotron 120b)"),
             ("stepfun/step-3.7-flash:free", "stepfun/step-3.7-flash:free (Flash)"),
+            ("inclusionai/ling-3.0-flash:free", "inclusionai/ling-3.0-flash:free (Flash)"),
+            ("cohere/north-mini-code:free", "cohere/north-mini-code:free (Code)"),
+            ("poolside/laguna-xs-2.1:free", "poolside/laguna-xs-2.1:free (Laguna XS)"),
+            ("poolside/laguna-s-2.1:free", "poolside/laguna-s-2.1:free (Laguna S)"),
+            ("nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free", "nvidia/nemotron-3-nano (Reasoning 30b)"),
+            ("nvidia/nemotron-3-ultra-550b-a55b:free", "nvidia/nemotron-3-ultra (Nemotron 550b)"),
         ]
-        consecutive_timeouts = 0
-        consecutive_empty = 0
         for model_id, model_label in _kilo_models:
-            if consecutive_timeouts >= 2 or consecutive_empty >= 2:
-                _print_llm("#0 Kilo Gateway recurring failures; fast-failing to next provider.")
-                break
             session, backend = _create_curl_cffi_llm_session()
             try:
                 _print_llm(f"#0 trying {model_label} [Kilo Gateway] (backend={backend})")
@@ -543,10 +620,10 @@ def call_llm(
                 last_exc: Exception | None = None
                 for _attempt in range(2):
                     try:
-                        resp = session.post(url, headers=headers, json=payload, timeout=25)
+                        resp = session.post(url, headers=headers, json=payload, timeout=45)
                         if resp.status_code == 400 and payload.get("response_format") is not None:
                             payload.pop("response_format", None)
-                            resp = session.post(url, headers=headers, json=payload, timeout=25)
+                            resp = session.post(url, headers=headers, json=payload, timeout=45)
                         resp.raise_for_status()
                         data = _safe_json_response(resp)
                         if not isinstance(data, dict) or "choices" not in data or not data["choices"]:
@@ -569,16 +646,19 @@ def call_llm(
                         last_exc = inner_e
                         inner_str = str(inner_e)
                         inner_status = _get_http_status(inner_e)
+                        is_timeout = "timed out" in inner_str.lower() or "timeout" in inner_str.lower()
                         transient = (
                             inner_status in (429, 500, 502, 503, 504)
                             or _is_rate_limit_message(inner_str)
                             or "Empty response body" in inner_str
                             or "Non-JSON response body" in inner_str
-                            or "timed out" in inner_str.lower()
-                            or "timeout" in inner_str.lower()
+                            or "Expecting value" in inner_str
+                            or "Missing choices" in inner_str
+                            or "Empty message content" in inner_str
+                            or is_timeout  # retry timeouts once before switching models
                         )
                         if transient and _attempt < 1:
-                            wait = 1.5 + _random.uniform(0, 0.5)
+                            wait = (3.0 if is_timeout else 1.5) + _random.uniform(0, 0.5)
                             _print_llm(
                                 f"#0 transient error on {model_id} (attempt {_attempt + 1}/2): "
                                 f"{inner_e}. Retrying in {wait:.1f}s."
@@ -608,16 +688,6 @@ def call_llm(
                 return (res_val, f"Kilo Gateway ({model_label})") if return_provider else res_val
             except Exception as e:
                 err_str = str(e)
-                is_timeout = "timed out" in err_str.lower() or "timeout" in err_str.lower()
-                is_empty_content = (
-                    "Expecting value" in err_str
-                    or "Empty message content" in err_str
-                    or "Unterminated string" in err_str
-                )
-                if is_timeout:
-                    consecutive_timeouts += 1
-                if is_empty_content:
-                    consecutive_empty += 1
                 status = _get_http_status(e)
                 if status == 401:
                     _print_llm("#0 Kilo API Key unauthorized/invalid (401); marking dead.")
@@ -625,9 +695,8 @@ def call_llm(
                     _mark_provider_dead("kilo")
                     break
                 elif _is_rate_limit_message(err_str) or status == 429:
-                    _print_llm(f"#0 rate-limited on {model_id}; backing off 5s, trying next model.")
+                    _print_llm(f"#0 rate-limited on {model_id}; trying next model immediately.")
                     logger.warning("Kilo Gateway %s rate-limited; trying next model.", model_id)
-                    time.sleep(5)
                 elif status in (403, 500, 502, 503):
                     _print_llm(f"#0 HTTP {status} on {model_id}; trying next model.")
                     logger.warning("Kilo Gateway %s HTTP %s; trying next model.", model_id, status)
@@ -635,7 +704,7 @@ def call_llm(
                     _print_llm(f"#0 failed on {model_id}: {e}. Trying next model.")
                     logger.warning("Kilo Gateway %s failed: %s. Trying next model.", model_id, e)
         _print_llm("#0 all Kilo Gateway models failed; marking dead. Trying OpenCode Zen.")
-        _dead_providers["kilo"] = time.time() + 1800.0  # 30 min for gateway-wide outage
+        _dead_providers["kilo"] = time.time() + 900.0  # 15 min for gateway-wide outage
 
     # ── #1. OpenCode Zen (Fallback 1 — free tier, fast, reasoning-capable) ───
     if not is_dead("opencode") and config.get("opencode_api_key"):
@@ -695,71 +764,7 @@ def call_llm(
         _print_llm("#1 all OpenCode Zen models failed; marking dead. Trying HuggingFace.")
         _dead_providers["opencode"] = time.time() + _DEAD_PROVIDER_TTL
 
-    # ── #1. HuggingFace (Fallback 1 — free tier, 1000 req/day) ────────────
-    if not is_dead("huggingface") and config.get("hf_api_key"):
-        session, backend = _create_curl_cffi_llm_session()
-        _HF_MODELS = [
-            "Qwen/Qwen2.5-7B-Instruct",
-            "meta-llama/Meta-Llama-3.1-8B-Instruct",
-            "mistralai/Mistral-7B-Instruct-v0.3",
-        ]
-        _HF_BASE = os.getenv("HF_API_BASE", "https://router.huggingface.co")
-        for hf_model in _HF_MODELS:
-            try:
-                _print_llm(f"#1 trying {hf_model} [HuggingFace] (backend={backend})")
-                logger.info("LLM #1: %s [provider=HuggingFace]", hf_model)
-                url = f"{_HF_BASE}/v1/chat/completions"
-                headers = {
-                    "Authorization": f"Bearer {config['hf_api_key']}",
-                    "Content-Type": "application/json",
-                }
-                payload = {
-                    "model": hf_model,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": prompt},
-                    ],
-                    "max_tokens": max_tokens or 2048,
-                    "temperature": 0.3,
-                }
-                if json_mode:
-                    payload["response_format"] = {"type": "json_object"}
-                resp = session.post(url, headers=headers, json=payload, timeout=30)
-                resp.raise_for_status()
-                text = resp.json()["choices"][0]["message"]["content"]
-                res_val = json.loads(text) if json_mode else text
-                _print_llm(f"#1 OK: {hf_model} [HuggingFace] (backend={backend})")
-                logger.info("LLM success: %s [HuggingFace] (backend=%s)", hf_model, backend)
-                _log_llm_call(f"HuggingFace ({hf_model})", resp, prompt=prompt, output=text)
-                return (res_val, f"HuggingFace ({hf_model})") if return_provider else res_val
-            except Exception as e:
-                err_str = str(e)
-                if _is_ssl_transport_error(e) or "TLS" in err_str:
-                    _print_llm(f"#1 SSL/TLS error on {hf_model}; trying next model.")
-                    logger.warning("HuggingFace %s SSL error; trying next model.", hf_model)
-                elif _is_http_error(e):
-                    status = _get_http_status(e)
-                    if status in (400, 401, 402, 403):
-                        reason = ("check HF_API_TOKEN / PRO plan needed (credits exhausted)"
-                                  if status == 402
-                                  else "check HF_API_TOKEN" if status in (401, 403)
-                                  else "model not supported")
-                        _print_llm(f"#1 HTTP {status} on {hf_model} ({reason}); trying next model.")
-                        logger.warning("HuggingFace %s HTTP %s (%s); trying next model.", hf_model, status, reason)
-                    elif status in (429, 500, 502, 503):
-                        _print_llm(f"#1 HTTP {status} on {hf_model}; trying next model.")
-                        logger.warning("HuggingFace %s HTTP %s; trying next model.", hf_model, status)
-                    else:
-                        _print_llm(f"#1 failed on {hf_model}: {e}. Trying next HF model.")
-                        logger.warning("HuggingFace %s failed: %s. Trying next model.", hf_model, e)
-                elif "Could not resolve host" in err_str or "Connection refused" in err_str or "Failed to connect" in err_str:
-                    _print_llm(f"#1 DNS/connection error on {hf_model}; trying next model.")
-                    logger.warning("HuggingFace %s DNS/connection error; trying next model.", hf_model)
-                else:
-                    _print_llm(f"#1 failed on {hf_model}: {e}. Trying next HF model.")
-                    logger.warning("HuggingFace %s failed: %s. Trying next model.", hf_model, e)
-        _print_llm("#1 all HuggingFace models failed; marking dead. Trying Groq 70b.")
-        _dead_providers["huggingface"] = time.time() + _DEAD_PROVIDER_TTL
+
 
     # ── #2. Groq 70b ──────────────────────────────────────────────────────
     if not is_dead("groq_70b") and config.get("groq_api_key"):
@@ -2440,7 +2445,7 @@ def get_market_news_sentiment(market_context: dict | None = None) -> Optional[di
     # Check persistent cache
     cached_val, cached_ts, expires_at = _get_persistent_sentiment_cache()
     if expires_at == 0.0 and cached_ts > 0.0:
-        expires_at = cached_ts + 600.0
+        expires_at = cached_ts + 3600.0
 
     if cached_val is not None and now < expires_at:
         logger.info(
@@ -2493,7 +2498,7 @@ def get_market_news_sentiment(market_context: dict | None = None) -> Optional[di
             "top_catalysts": ["Low-quality or duplicate headlines filtered out."],
             "actionable_trade_ideas": [],
         }
-        _set_persistent_sentiment_cache(fallback, now, ttl=900.0)
+        _set_persistent_sentiment_cache(fallback, now, ttl=3600.0)
         return fallback
 
     logger.info(f"Fetched a total of {len(headlines)} unique headlines for analysis.")
@@ -2612,7 +2617,7 @@ def get_market_news_sentiment(market_context: dict | None = None) -> Optional[di
     except Exception as hist_err:
         logger.error("Failed to save sentiment history: %s", hist_err)
 
-    _set_persistent_sentiment_cache(sentiment, now, ttl=600.0)
+    _set_persistent_sentiment_cache(sentiment, now, ttl=3600.0)
     return sentiment
 
 

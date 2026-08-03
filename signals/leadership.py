@@ -117,11 +117,17 @@ def rank_universe(stock_data: dict[str, pd.DataFrame], bench_df: pd.DataFrame) -
                 mean_v = prev_20.mean()
                 if mean_v > 0:
                     today_vol = float(valid_vol.iloc[-1])
-                    # Apply projection multiplier if the last candle is today's date
-                    last_date = valid_vol.index[-1]
-                    if hasattr(last_date, "date"):
-                        last_date = last_date.date()
                     ist = timezone(timedelta(hours=5, minutes=30))
+                    last_idx = valid_vol.index[-1]
+                    if hasattr(last_idx, "tz_convert"):
+                        try:
+                            last_date = last_idx.tz_convert(ist).date()
+                        except Exception:
+                            last_date = last_idx.date()
+                    elif hasattr(last_idx, "date"):
+                        last_date = last_idx.date()
+                    else:
+                        last_date = last_idx
                     today_ist = dt.datetime.now(ist).date()
                     if last_date == today_ist:
                         today_vol *= _projected_volume_multiplier()
