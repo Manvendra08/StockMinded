@@ -56,6 +56,7 @@ data_sources:
     option_chain: ./data/manual/option_chain_NIFTY.csv
   scrapegraphai:
     api_key: ${GOOGLE_API_KEY}
+    omnirouter_base_url: "http://localhost:20128/v1"
     bedrock_api_key: ${BEDROCK_API_KEY}
     cf_account_id: ${CLOUDFLARE_ACCOUNT_ID}
     cf_api_token: ${CLOUDFLARE_API_TOKEN}
@@ -110,6 +111,7 @@ nifty_options:
   vol_expansion_threshold: 8.0
 options:
   enabled: true
+  omnirouter_base_url: "http://localhost:20128/v1"
   max_daily_trades_per_symbol: 2
   enabled_structures:
   - BULL_CALL_SPREAD
