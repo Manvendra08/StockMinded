@@ -1947,13 +1947,17 @@ def _check_option_exits(
         for t in open_trades:
             exit_reason = "EOD_CUTOFF" if (is_eod and auto_close) else None
 
-            # Expiry check for Options (fire immediately if today >= leg_exp)
+            # Expiry check for Options (only square off at 15:15+ IST on expiry day, or if past expiry date)
             if not exit_reason:
+                from datetime import time as dt_time
                 today_str = now_ist.strftime("%Y-%m-%d")
                 for leg in t.get("legs", []):
                     leg_exp = leg.get("expiry")
                     if leg_exp:
-                        if today_str >= leg_exp:
+                        if today_str > leg_exp:
+                            exit_reason = "EXPIRY"
+                            break
+                        elif today_str == leg_exp and (now_ist.time() >= dt_time(15, 15) or is_eod):
                             exit_reason = "EXPIRY"
                             break
 
