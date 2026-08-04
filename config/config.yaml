@@ -110,6 +110,7 @@ nifty_options:
   vol_expansion_threshold: 8.0
 options:
   enabled: true
+  max_daily_trades_per_symbol: 2
   enabled_structures:
   - BULL_CALL_SPREAD
   - BEAR_PUT_SPREAD

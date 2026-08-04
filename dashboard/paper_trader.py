@@ -1125,16 +1125,19 @@ def _enter_option_structure(
     with atomic_db_update() as db:
         if "option_trades" not in db:
             db["option_trades"] = []
-        sym_cfg = cfg.get(cfg_key, {})
-        open_sym = [
+        today_str = now_ist.date().isoformat()
+
+        # Check max total daily option trades per symbol (prevents endless re-entry loops)
+        max_daily_per_sym = cfg.get("options", {}).get("max_daily_trades_per_symbol", 2)
+        today_sym_trades = [
             t
             for t in db["option_trades"]
-            if t.get("status") == "OPEN" and t.get("symbol") == symbol
+            if t.get("symbol") == symbol and t.get("entry_date") == today_str
         ]
-        if len(open_sym) > 0:
-            return {"error": f"{symbol} option structure already open"}
-
-        today_str = now_ist.date().isoformat()
+        if len(today_sym_trades) >= max_daily_per_sym:
+            return {
+                "error": f"{symbol} max daily option trades ({max_daily_per_sym}) reached for today"
+            }
 
         # Expiry verification guard: verify legs are not past/expired
         for leg in resolved_legs:
