@@ -204,7 +204,7 @@ def _get_ai_config() -> Optional[dict]:
         if omnirouter_api_key:
             omnirouter_api_key = omnirouter_api_key.strip().strip("'").strip('"')
 
-        omnirouter_base_url = os.getenv("OMNIROUTER_BASE_URL") or cfg.get("omnirouter_base_url", "http://localhost:3000/v1")
+        omnirouter_base_url = os.getenv("OMNIROUTER_BASE_URL") or cfg.get("omnirouter_base_url", "http://localhost:20128/v1")
         if omnirouter_base_url:
             omnirouter_base_url = omnirouter_base_url.strip().strip("'").strip('"')
 
@@ -512,7 +512,7 @@ def call_llm(
 
     # ── #0. OmniRouter (PRIMARY — local gateway router) ───
     if not is_dead("omnirouter") and config.get("omnirouter_api_key"):
-        _omnirouter_base = (config.get("omnirouter_base_url") or "http://localhost:3000/v1").rstrip("/")
+        _omnirouter_base = (config.get("omnirouter_base_url") or "http://localhost:20128/v1").rstrip("/")
         if not _omnirouter_base.endswith("/chat/completions"):
             url = f"{_omnirouter_base}/chat/completions"
         else:
