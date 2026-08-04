@@ -1150,6 +1150,33 @@ def _enter_option_structure(
                 except Exception:
                     pass
 
+        # Live premium verification guard: correct stale chain opening premiums
+        # to match current live market value at entry time (prevents false MTM target hits).
+        if underlying_spot and underlying_spot > 0:
+            from signals.options import _bs_price
+            ist_now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
+            for leg in resolved_legs:
+                try:
+                    leg_exp_str = getattr(leg, "expiry", "")
+                    if leg_exp_str:
+                        exp_d = datetime.strptime(leg_exp_str, "%Y-%m-%d").date() if "-" in leg_exp_str and len(leg_exp_str) == 10 else datetime.strptime(leg_exp_str, "%d-%b-%Y").date()
+                        days_to_exp = max((exp_d - ist_now.date()).days, 0)
+                        if days_to_exp == 0:
+                            t_yrs = max((exp_d - ist_now.date()).days, 0.25) / 365.0
+                            vix_val = entry_vix / 100.0 if entry_vix > 0 else 0.13
+                            bs_p = round(_bs_price(underlying_spot, leg.strike, t_yrs, 0.065, vix_val, leg.type), 2)
+                            intrinsic = max(0.0, underlying_spot - leg.strike) if leg.type == "CE" else max(0.0, leg.strike - underlying_spot)
+                            bs_p = max(bs_p, round(intrinsic, 2))
+                            current_prem = float(getattr(leg, "premium", 0.0) or 0.0)
+                            if bs_p > 0 and abs(current_prem - bs_p) > 2.0:
+                                logging.getLogger(__name__).info(
+                                    "[enter_option_structure] %s leg %s strike=%.0f: correcting stale chain premium %.2f -> live price %.2f (spot=%.2f)",
+                                    symbol, leg.type, leg.strike, current_prem, bs_p, underlying_spot
+                                )
+                                leg.premium = bs_p
+                except Exception as ex:
+                    logging.getLogger(__name__).debug("[enter_option_structure] leg price verification skipped: %s", ex)
+
         # Validate each leg has a genuine positive premium (reject corrupted 0.0 data)
         zero_prem_legs = [
             (l.side, l.type, l.strike, l.premium)
