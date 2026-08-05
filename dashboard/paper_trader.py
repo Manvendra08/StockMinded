@@ -1109,7 +1109,17 @@ def _enter_option_structure(
         )
         return {"error": f"{symbol} entry blocked: {naked_reason}"}
 
-    # Fetch VIX outside the lock to avoid holding DB lock during slow yfinance API calls
+    # Fetch Spot and VIX outside the lock to avoid holding DB lock during slow yfinance API calls
+    underlying_spot = None
+    try:
+        from data import feed
+
+        spot_df = feed.ohlc_cached(symbol, period="5d")
+        if spot_df is not None and not spot_df.empty and "close" in spot_df.columns:
+            underlying_spot = float(spot_df["close"].iloc[-1])
+    except Exception:
+        underlying_spot = None
+
     try:
         from data import feed
 
