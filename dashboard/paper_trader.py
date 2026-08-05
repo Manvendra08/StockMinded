@@ -1137,6 +1137,16 @@ def _enter_option_structure(
             db["option_trades"] = []
         today_str = now_ist.date().isoformat()
 
+        # Re-entry guard: allow new trades after a prior trade is marked CLOSED,
+        # but block duplicate entries if a trade is currently OPEN for the symbol.
+        open_symbol_trades = [
+            t
+            for t in db["option_trades"]
+            if t.get("symbol") == symbol and t.get("status") == "OPEN"
+        ]
+        if open_symbol_trades:
+            return {"error": f"{symbol} option structure already open"}
+
         # Check max total daily option trades per symbol (prevents endless re-entry loops)
         max_daily_per_sym = cfg.get("options", {}).get("max_daily_trades_per_symbol", 2)
         today_sym_trades = [
