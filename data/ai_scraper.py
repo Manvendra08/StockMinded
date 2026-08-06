@@ -448,6 +448,57 @@ def _safe_json_response(resp: Any, max_preview: int = 200) -> Any:
         raise ValueError(f"Non-JSON response body: {preview!r} ({e})") from e
 
 
+def _extract_json_content(text: Any) -> Any:
+    """Parse a model response body into JSON, tolerating prose, fences, and reasoning text.
+
+    Tries a strict JSON parse first, then scans for the first balanced ``{...}`` or
+    ``[...]`` block (e.g. a JSON payload buried inside chain-of-thought prose or a
+    markdown code fence). Raises a descriptive ValueError if no JSON can be found.
+    """
+    if isinstance(text, list):  # OpenAI structured content / reasoning blocks
+        text = "".join(
+            b.get("text", "") for b in text if isinstance(b, dict) and b.get("text")
+        )
+    s = str(text or "").strip()
+    if not s:
+        raise ValueError("Empty message content from model")
+    if s.startswith("```"):
+        lines = s.split("\n")
+        if len(lines) >= 2:
+            s = "\n".join(lines[1:-1]) if lines[-1].strip().startswith("```") else "\n".join(lines[1:])
+        s = s.strip()
+    try:
+        return json.loads(s)
+    except json.JSONDecodeError:
+        pass
+    # Scan for the first balanced JSON object or array (prose prefix is common in reasoning).
+    for open_ch, close_ch in (("{", "}"), ("[", "]")):
+        start = s.find(open_ch)
+        if start == -1:
+            continue
+        depth = 0
+        in_str = False
+        escaped = False
+        for i in range(start, len(s)):
+            ch = s[i]
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_str = not in_str
+            elif not in_str and ch == open_ch:
+                depth += 1
+            elif not in_str and ch == close_ch:
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(s[start : i + 1])
+                    except json.JSONDecodeError:
+                        break
+    raise ValueError(f"No parseable JSON in model response (first 120 chars: {s[:120]!r})")
+
+
 def _call_chat_completion(
     *,
     session: requests.Session | Any,
@@ -510,7 +561,144 @@ def call_llm(
         dead_until = _dead_providers.get(provider)
         return bool(dead_until and time.time() < dead_until)
 
-    # ── #0. OmniRouter (PRIMARY — local gateway router) ───
+    # ── #0. Kilo Gateway (PRIMARY — top free models) ───
+    if not is_dead("kilo") and config.get("kilo_api_key"):
+        _kilo_models = [
+            ("kilo-auto/free", "kilo-auto/free (Auto-Routing)"),
+            ("stepfun/step-3.7-flash:free", "stepfun/step-3.7-flash:free (Flash)"),
+            ("inclusionai/ling-3.0-flash:free", "inclusionai/ling-3.0-flash:free (Flash)"),
+            ("cohere/north-mini-code:free", "cohere/north-mini-code:free (Code)"),
+            ("poolside/laguna-xs-2.1:free", "poolside/laguna-xs-2.1:free (Laguna XS)"),
+            ("poolside/laguna-s-2.1:free", "poolside/laguna-s-2.1:free (Laguna S)"),
+            ("nvidia/nemotron-3-ultra-550b-a55b:free", "nvidia/nemotron-3-ultra (Nemotron 550b)"),
+        ]
+        for model_id, model_label in _kilo_models:
+            session, backend = _create_curl_cffi_llm_session()
+            try:
+                _print_llm(f"#0 trying {model_label} [Kilo Gateway] (backend={backend})")
+                logger.info("LLM #0: %s [provider=Kilo Gateway] (backend=%s)", model_label, backend)
+                url = "https://api.kilo.ai/api/gateway/chat/completions"
+                headers = {
+                    "Authorization": f"Bearer {config['kilo_api_key']}",
+                    "Content-Type": "application/json",
+                }
+                payload = {
+                    "model": model_id,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "max_tokens": max_tokens or 2048,
+                }
+                # Free-tier models rarely support response_format; omit to avoid 400s
+                if json_mode and (":free" in model_id or "/free" in model_id):
+                    pass  # rely on prompt instruction for JSON output
+                elif json_mode:
+                    payload["response_format"] = {"type": "json_object"}
+                # Per-model retry loop: retries transient errors (empty body,
+                # non-JSON body, upstream rate limits) with exponential backoff
+                # before falling through to the next model.
+                data = None
+                last_exc: Exception | None = None
+                for _attempt in range(2):
+                    try:
+                        resp = session.post(url, headers=headers, json=payload, timeout=45)
+                        if resp.status_code == 400 and payload.get("response_format") is not None:
+                            payload.pop("response_format", None)
+                            resp = session.post(url, headers=headers, json=payload, timeout=45)
+                        resp.raise_for_status()
+                        data = _safe_json_response(resp)
+                        if not isinstance(data, dict) or "choices" not in data or not data["choices"]:
+                            err_msg = data.get("error", {}).get("message") if isinstance(data, dict) else str(data)
+                            raise ValueError(f"Missing choices in response: {err_msg or data}")
+                        # Validate content is parseable before exiting retry loop
+                        _msg = data["choices"][0]["message"]
+                        content = _msg.get("content")
+                        reasoning = _msg.get("reasoning") or _msg.get("reasoning_content") or ""
+                        if json_mode:
+                            try:
+                                _extract_json_content(content)
+                            except ValueError:
+                                # model may have put the answer in reasoning text
+                                _extract_json_content(reasoning)
+                        else:
+                            text = content or reasoning or ""
+                            if not text.strip():
+                                raise ValueError("Empty message content from model")
+                        last_exc = None
+                        break
+                    except Exception as inner_e:
+                        last_exc = inner_e
+                        inner_str = str(inner_e)
+                        inner_status = _get_http_status(inner_e)
+                        is_timeout = "timed out" in inner_str.lower() or "timeout" in inner_str.lower()
+                        transient = (
+                            inner_status in (429, 500, 502, 503, 504)
+                            or _is_rate_limit_message(inner_str)
+                            or "Empty response body" in inner_str
+                            or "Non-JSON response body" in inner_str
+                            or "Expecting value" in inner_str
+                            or "No parseable JSON" in inner_str
+                            or "Missing choices" in inner_str
+                            or "Empty message content" in inner_str
+                            or is_timeout  # retry timeouts once before switching models
+                        )
+                        if transient and _attempt < 1:
+                            wait = (3.0 if is_timeout else 1.5) + _random.uniform(0, 0.5)
+                            _print_llm(
+                                f"#0 transient error on {model_id} (attempt {_attempt + 1}/2): "
+                                f"{inner_e}. Retrying in {wait:.1f}s."
+                            )
+                            logger.warning(
+                                "Kilo Gateway %s transient error (attempt %d/2): %s",
+                                model_id, _attempt + 1, inner_e,
+                            )
+                            time.sleep(wait)
+                            continue
+                        raise
+                if last_exc is not None:
+                    raise last_exc
+                _msg = data["choices"][0]["message"]
+                content = _msg.get("content")
+                if isinstance(content, list):  # structured content blocks
+                    content = "".join(
+                        b.get("text", "") for b in content if isinstance(b, dict) and b.get("text")
+                    )
+                reasoning = _msg.get("reasoning") or _msg.get("reasoning_content") or ""
+                text = content or reasoning or ""
+                if json_mode:
+                    try:
+                        res_val = _extract_json_content(content)
+                    except ValueError:
+                        # model may have put the answer in reasoning text
+                        res_val = _extract_json_content(reasoning)
+                else:
+                    res_val = text
+                _print_llm(f"#0 OK: {model_label} [Kilo Gateway] (backend={backend})")
+                logger.info("LLM success: %s [provider=Kilo Gateway] (backend=%s)", model_label, backend)
+                _log_llm_call(f"Kilo Gateway ({model_label})", resp, prompt=prompt, output=text)
+                return (res_val, f"Kilo Gateway ({model_label})") if return_provider else res_val
+            except Exception as e:
+                err_str = str(e)
+                status = _get_http_status(e)
+                if status == 401:
+                    _print_llm("#0 Kilo API Key unauthorized/invalid (401); marking dead.")
+                    logger.warning("Kilo Gateway API key 401 unauthorized; marking dead.")
+                    _mark_provider_dead("kilo")
+                    break
+                elif _is_rate_limit_message(err_str) or status == 429:
+                    _print_llm(f"#0 rate-limited on {model_id}; trying next model immediately.")
+                    logger.warning("Kilo Gateway %s rate-limited; trying next model.", model_id)
+                elif status in (403, 500, 502, 503):
+                    _print_llm(f"#0 HTTP {status} on {model_id}; trying next model.")
+                    logger.warning("Kilo Gateway %s HTTP %s; trying next model.", model_id, status)
+                else:
+                    _print_llm(f"#0 failed on {model_id}: {e}. Trying next model.")
+                    logger.warning("Kilo Gateway %s failed: %s. Trying next model.", model_id, e)
+        _print_llm("#0 all Kilo Gateway models failed; marking dead. Trying OmniRouter.")
+        _dead_providers["kilo"] = time.time() + 900.0  # 15 min for gateway-wide outage
+
+    # ── #1. OmniRouter (Fallback 1 — local gateway router) ───
     if not is_dead("omnirouter") and config.get("omnirouter_api_key"):
         _omnirouter_base = (config.get("omnirouter_base_url") or "http://localhost:20128/v1").strip().rstrip("/").replace(":3000", ":20128")
         if not _omnirouter_base.endswith("/chat/completions"):
@@ -533,8 +721,8 @@ def call_llm(
             else:
                 session, backend = _create_curl_cffi_llm_session()
             try:
-                _print_llm(f"#0 trying {model_label} [OmniRouter] (backend={backend})")
-                logger.info("LLM #0: %s [provider=OmniRouter] (backend=%s)", model_label, backend)
+                _print_llm(f"#1 trying {model_label} [OmniRouter] (backend={backend})")
+                logger.info("LLM #1: %s [provider=OmniRouter] (backend=%s)", model_label, backend)
                 headers = {
                     "Authorization": f"Bearer {config['omnirouter_api_key']}",
                     "Content-Type": "application/json",
@@ -560,18 +748,24 @@ def call_llm(
                     err_msg = data.get("error", {}).get("message") if isinstance(data, dict) else str(data)
                     raise ValueError(f"Missing choices in response: {err_msg or data}")
                 _msg = data["choices"][0]["message"]
-                text = _msg.get("content") or _msg.get("reasoning") or ""
-                if not text.strip():
-                    raise ValueError("Empty message content from OmniRouter")
+                content = _msg.get("content")
+                if isinstance(content, list):  # structured content blocks
+                    content = "".join(
+                        b.get("text", "") for b in content if isinstance(b, dict) and b.get("text")
+                    )
+                reasoning = _msg.get("reasoning") or _msg.get("reasoning_content") or ""
+                text = content or reasoning or ""
                 if json_mode:
-                    text_clean = text.strip()
-                    if text_clean.startswith("```"):
-                        lines = text_clean.split("\n")
-                        text_clean = "\n".join(lines[1:-1]) if lines[-1].startswith("```") else "\n".join(lines[1:])
-                    res_val = json.loads(text_clean.strip())
+                    try:
+                        res_val = _extract_json_content(content)
+                    except ValueError:
+                        # model may have put the answer in reasoning text
+                        res_val = _extract_json_content(reasoning)
                 else:
+                    if not text.strip():
+                        raise ValueError("Empty message content from OmniRouter")
                     res_val = text
-                _print_llm(f"#0 OK: {model_label} [OmniRouter] (backend={backend})")
+                _print_llm(f"#1 OK: {model_label} [OmniRouter] (backend={backend})")
                 logger.info("LLM success: %s [provider=OmniRouter] (backend=%s)", model_label, backend)
                 _log_llm_call(f"OmniRouter ({model_label})", resp, prompt=prompt, output=text)
                 return (res_val, f"OmniRouter ({model_label})") if return_provider else res_val
@@ -579,134 +773,7 @@ def call_llm(
                 _print_llm(f"#0 failed on OmniRouter {model_id}: {e}. Trying next model/fallback.")
                 logger.warning("OmniRouter %s failed: %s.", model_id, e)
 
-    # ── #1. Kilo Gateway (PRIMARY FALLBACK — top free models) ───
-    if not is_dead("kilo") and config.get("kilo_api_key"):
-        _kilo_models = [
-            ("stepfun/step-3.7-flash:free", "stepfun/step-3.7-flash:free (Flash)"),
-            ("inclusionai/ling-3.0-flash:free", "inclusionai/ling-3.0-flash:free (Flash)"),
-            ("cohere/north-mini-code:free", "cohere/north-mini-code:free (Code)"),
-            ("poolside/laguna-xs-2.1:free", "poolside/laguna-xs-2.1:free (Laguna XS)"),
-            ("poolside/laguna-s-2.1:free", "poolside/laguna-s-2.1:free (Laguna S)"),
-            ("nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free", "nvidia/nemotron-3-nano (Reasoning 30b)"),
-            ("nvidia/nemotron-3-ultra-550b-a55b:free", "nvidia/nemotron-3-ultra (Nemotron 550b)"),
-        ]
-        for model_id, model_label in _kilo_models:
-            session, backend = _create_curl_cffi_llm_session()
-            try:
-                _print_llm(f"#0 trying {model_label} [Kilo Gateway] (backend={backend})")
-                logger.info("LLM #0: %s [provider=Kilo Gateway] (backend=%s)", model_label, backend)
-                url = "https://api.kilo.ai/api/gateway/chat/completions"
-                headers = {
-                    "Authorization": f"Bearer {config['kilo_api_key']}",
-                    "Content-Type": "application/json",
-                }
-                payload = {
-                    "model": model_id,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": prompt},
-                    ],
-                    "max_tokens": max_tokens or 2048,
-                }
-                # Free-tier models rarely support response_format; omit to avoid 400s
-                if json_mode and ":free" in model_id:
-                    pass  # rely on prompt instruction for JSON output
-                elif json_mode:
-                    payload["response_format"] = {"type": "json_object"}
-                # Per-model retry loop: retries transient errors (empty body,
-                # non-JSON body, upstream rate limits) with exponential backoff
-                # before falling through to the next model.
-                data = None
-                last_exc: Exception | None = None
-                for _attempt in range(2):
-                    try:
-                        resp = session.post(url, headers=headers, json=payload, timeout=45)
-                        if resp.status_code == 400 and payload.get("response_format") is not None:
-                            payload.pop("response_format", None)
-                            resp = session.post(url, headers=headers, json=payload, timeout=45)
-                        resp.raise_for_status()
-                        data = _safe_json_response(resp)
-                        if not isinstance(data, dict) or "choices" not in data or not data["choices"]:
-                            err_msg = data.get("error", {}).get("message") if isinstance(data, dict) else str(data)
-                            raise ValueError(f"Missing choices in response: {err_msg or data}")
-                        # Validate content is parseable before exiting retry loop
-                        _msg = data["choices"][0]["message"]
-                        text = _msg.get("content") or _msg.get("reasoning") or ""
-                        if not text.strip():
-                            raise ValueError("Empty message content from model")
-                        if json_mode:
-                            text_clean = text.strip()
-                            if text_clean.startswith("```"):
-                                lines = text_clean.split("\n")
-                                text_clean = "\n".join(lines[1:-1]) if lines[-1].startswith("```") else "\n".join(lines[1:])
-                            json.loads(text_clean.strip())  # validate JSON parseability
-                        last_exc = None
-                        break
-                    except Exception as inner_e:
-                        last_exc = inner_e
-                        inner_str = str(inner_e)
-                        inner_status = _get_http_status(inner_e)
-                        is_timeout = "timed out" in inner_str.lower() or "timeout" in inner_str.lower()
-                        transient = (
-                            inner_status in (429, 500, 502, 503, 504)
-                            or _is_rate_limit_message(inner_str)
-                            or "Empty response body" in inner_str
-                            or "Non-JSON response body" in inner_str
-                            or "Expecting value" in inner_str
-                            or "Missing choices" in inner_str
-                            or "Empty message content" in inner_str
-                            or is_timeout  # retry timeouts once before switching models
-                        )
-                        if transient and _attempt < 1:
-                            wait = (3.0 if is_timeout else 1.5) + _random.uniform(0, 0.5)
-                            _print_llm(
-                                f"#0 transient error on {model_id} (attempt {_attempt + 1}/2): "
-                                f"{inner_e}. Retrying in {wait:.1f}s."
-                            )
-                            logger.warning(
-                                "Kilo Gateway %s transient error (attempt %d/2): %s",
-                                model_id, _attempt + 1, inner_e,
-                            )
-                            time.sleep(wait)
-                            continue
-                        raise
-                if last_exc is not None:
-                    raise last_exc
-                _msg = data["choices"][0]["message"]
-                text = _msg.get("content") or _msg.get("reasoning") or ""
-                if json_mode:
-                    text_clean = text.strip()
-                    if text_clean.startswith("```"):
-                        lines = text_clean.split("\n")
-                        text_clean = "\n".join(lines[1:-1]) if lines[-1].startswith("```") else "\n".join(lines[1:])
-                    res_val = json.loads(text_clean.strip())
-                else:
-                    res_val = text
-                _print_llm(f"#0 OK: {model_label} [Kilo Gateway] (backend={backend})")
-                logger.info("LLM success: %s [provider=Kilo Gateway] (backend=%s)", model_label, backend)
-                _log_llm_call(f"Kilo Gateway ({model_label})", resp, prompt=prompt, output=text)
-                return (res_val, f"Kilo Gateway ({model_label})") if return_provider else res_val
-            except Exception as e:
-                err_str = str(e)
-                status = _get_http_status(e)
-                if status == 401:
-                    _print_llm("#0 Kilo API Key unauthorized/invalid (401); marking dead.")
-                    logger.warning("Kilo Gateway API key 401 unauthorized; marking dead.")
-                    _mark_provider_dead("kilo")
-                    break
-                elif _is_rate_limit_message(err_str) or status == 429:
-                    _print_llm(f"#0 rate-limited on {model_id}; trying next model immediately.")
-                    logger.warning("Kilo Gateway %s rate-limited; trying next model.", model_id)
-                elif status in (403, 500, 502, 503):
-                    _print_llm(f"#0 HTTP {status} on {model_id}; trying next model.")
-                    logger.warning("Kilo Gateway %s HTTP %s; trying next model.", model_id, status)
-                else:
-                    _print_llm(f"#0 failed on {model_id}: {e}. Trying next model.")
-                    logger.warning("Kilo Gateway %s failed: %s. Trying next model.", model_id, e)
-        _print_llm("#0 all Kilo Gateway models failed; marking dead. Trying OpenCode Zen.")
-        _dead_providers["kilo"] = time.time() + 900.0  # 15 min for gateway-wide outage
-
-    # ── #1. OpenCode Zen (Fallback 1 — free tier, fast, reasoning-capable) ───
+    # ── #2. OpenCode Zen (Fallback 2 — free tier, fast, reasoning-capable) ───
     if not is_dead("opencode") and config.get("opencode_api_key"):
         _opencode_models = [
             ("big-pickle", "big-pickle (reasoning/chat)"),
@@ -717,8 +784,8 @@ def call_llm(
         for model_id, model_label in _opencode_models:
             session, backend = _create_curl_cffi_llm_session()
             try:
-                _print_llm(f"#1 trying {model_label} [OpenCode Zen] (backend={backend})")
-                logger.info("LLM #1: %s [provider=OpenCode Zen] (backend=%s)", model_label, backend)
+                _print_llm(f"#2 trying {model_label} [OpenCode Zen] (backend={backend})")
+                logger.info("LLM #2: %s [provider=OpenCode Zen] (backend=%s)", model_label, backend)
                 url = "https://opencode.ai/zen/v1/chat/completions"
                 headers = {
                     "Authorization": f"Bearer {config['opencode_api_key']}",
@@ -741,7 +808,7 @@ def call_llm(
                 _msg = resp.json()["choices"][0]["message"]
                 text = _msg.get("content") or _msg.get("reasoning") or ""
                 res_val = json.loads(text) if json_mode else text
-                _print_llm(f"#1 OK: {model_label} [OpenCode Zen] (backend={backend})")
+                _print_llm(f"#2 OK: {model_label} [OpenCode Zen] (backend={backend})")
                 logger.info("LLM success: %s [provider=OpenCode Zen] (backend=%s)", model_label, backend)
                 _log_llm_call(f"OpenCode Zen ({model_label})", resp, prompt=prompt, output=text)
                 return (res_val, f"OpenCode Zen ({model_label})") if return_provider else res_val
@@ -759,19 +826,19 @@ def call_llm(
                         _print_llm(f"#1 failed on {model_id}: {e}. Trying next model.")
                         logger.warning("OpenCode Zen %s failed: %s. Trying next model.", model_id, e)
                 else:
-                    _print_llm(f"#1 failed on {model_id}: {e}. Trying next model.")
+                    _print_llm(f"#2 failed on {model_id}: {e}. Trying next model.")
                     logger.warning("OpenCode Zen %s failed: %s. Trying next model.", model_id, e)
-        _print_llm("#1 all OpenCode Zen models failed; marking dead. Trying HuggingFace.")
+        _print_llm("#2 all OpenCode Zen models failed; marking dead. Trying HuggingFace.")
         _dead_providers["opencode"] = time.time() + _DEAD_PROVIDER_TTL
 
 
 
-    # ── #2. Groq 70b ──────────────────────────────────────────────────────
+    # ── #3. Groq 70b ──────────────────────────────────────────────────────
     if not is_dead("groq_70b") and config.get("groq_api_key"):
         session, backend = _create_curl_cffi_llm_session()
         try:
-            _print_llm(f"#2 trying llama-3.3-70b-versatile [Groq] (backend={backend})")
-            logger.info("LLM #2: llama-3.3-70b-versatile [provider=Groq]")
+            _print_llm(f"#3 trying llama-3.3-70b-versatile [Groq] (backend={backend})")
+            logger.info("LLM #3: llama-3.3-70b-versatile [provider=Groq]")
             url = "https://api.groq.com/openai/v1/chat/completions"
             headers = {
                 "Authorization": f"Bearer {config['groq_api_key']}",
@@ -790,7 +857,7 @@ def call_llm(
             resp.raise_for_status()
             text = resp.json()["choices"][0]["message"]["content"]
             res_val = json.loads(text) if json_mode else text
-            _print_llm(f"#2 OK: llama-3.3-70b-versatile [Groq] (backend={backend})")
+            _print_llm(f"#3 OK: llama-3.3-70b-versatile [Groq] (backend={backend})")
             logger.info("LLM success: llama-3.3-70b-versatile [Groq] (backend=%s)", backend)
             _log_llm_call("Groq (llama-3.3-70b-versatile)", resp, prompt=prompt, output=text)
             return (res_val, "Groq (llama-3.3-70b-versatile)") if return_provider else res_val
@@ -812,7 +879,7 @@ def call_llm(
                 _print_llm(f"#2 failed: {e}. Trying GitHub Models.")
                 logger.warning("Groq 70b failed: %s. Trying GitHub Models.", e)
 
-    # ── #3. GitHub Models (Fallback 2: OpenAI-compatible, GitHub token) ─────
+    # ── #4. GitHub Models (Fallback 3: OpenAI-compatible, GitHub token) ─────
     _GITHUB_API_BASE = "https://models.inference.ai.azure.com"
     _GITHUB_MODELS = [
         {"id": "gpt-4o-mini", "name": "GPT-4o-mini", "provider": "OpenAI"},
@@ -825,8 +892,8 @@ def call_llm(
             model_id = model_info["id"]
             model_name = model_info["name"]
             try:
-                _print_llm(f"#3 trying {model_name} [{model_info['provider']} via GitHub] (backend={backend})")
-                logger.info("LLM #3: %s [provider=GitHub/%s]", model_name, model_info["provider"])
+                _print_llm(f"#4 trying {model_name} [{model_info['provider']} via GitHub] (backend={backend})")
+                logger.info("LLM #4: %s [provider=GitHub/%s]", model_name, model_info["provider"])
                 url = f"{_GITHUB_API_BASE}/chat/completions"
                 headers = {
                     "Authorization": f"Bearer {config['github_api_key']}",
@@ -845,21 +912,21 @@ def call_llm(
                 resp.raise_for_status()
                 text = resp.json()["choices"][0]["message"]["content"]
                 res_val = json.loads(text) if json_mode else text
-                _print_llm(f"#3 OK: {model_name} [{model_info['provider']} via GitHub] (backend={backend})")
+                _print_llm(f"#4 OK: {model_name} [{model_info['provider']} via GitHub] (backend={backend})")
                 logger.info("LLM success: %s [provider=GitHub/%s] (backend=%s)", model_name, model_info["provider"], backend)
                 _log_llm_call(f"GitHub ({model_name})", resp, prompt=prompt, output=text)
                 return (res_val, f"GitHub ({model_name})") if return_provider else res_val
             except Exception as e:
                 continue
-        _print_llm("#3 all GitHub models failed; marking dead. Trying Nvidia NIM.")
+        _print_llm("#4 all GitHub models failed; marking dead. Trying Nvidia NIM.")
         _dead_providers["github"] = time.time() + _DEAD_PROVIDER_TTL
 
-    # ── #4. Nvidia NIM (Fallback 3: free tier, OpenAI-compatible, 40 RPM) ───
+    # ── #5. Nvidia NIM (Fallback 4: free tier, OpenAI-compatible, 40 RPM) ───
     if not is_dead("nvidia") and config.get("nvidia_api_key"):
         session, backend = _create_curl_cffi_llm_session()
         try:
-            _print_llm(f"#4 trying nemotron-3-super-120b-a12b [Nvidia NIM] (backend={backend})")
-            logger.info("LLM #4: nemotron-3-super-120b-a12b [provider=Nvidia NIM]")
+            _print_llm(f"#5 trying nemotron-3-super-120b-a12b [Nvidia NIM] (backend={backend})")
+            logger.info("LLM #5: nemotron-3-super-120b-a12b [provider=Nvidia NIM]")
             url = "https://integrate.api.nvidia.com/v1/chat/completions"
             headers = {
                 "Authorization": f"Bearer {config['nvidia_api_key']}",
@@ -879,7 +946,7 @@ def call_llm(
             resp.raise_for_status()
             text = resp.json()["choices"][0]["message"]["content"]
             res_val = json.loads(text) if json_mode else text
-            _print_llm(f"#4 OK: nemotron-3-super-120b-a12b [Nvidia NIM] (backend={backend})")
+            _print_llm(f"#5 OK: nemotron-3-super-120b-a12b [Nvidia NIM] (backend={backend})")
             logger.info("LLM success: nemotron-3-super-120b-a12b [Nvidia NIM] (backend=%s)", backend)
             _log_llm_call("Nvidia NIM (nemotron-3-super-120b-a12b)", resp, prompt=prompt, output=text)
             return (res_val, "Nvidia NIM (nemotron-3-super-120b-a12b)") if return_provider else res_val
@@ -901,7 +968,7 @@ def call_llm(
                 _print_llm(f"#4 failed: {e}. Trying Cloudflare.")
                 logger.warning("Nvidia NIM failed: %s. Trying Cloudflare.", e)
 
-    # ── #5. Cloudflare Workers AI (Fallback 4: free tier) ────────────────
+    # ── #6. Cloudflare Workers AI (Fallback 5: free tier) ────────────────
     if not is_dead("cloudflare") and config.get("cf_api_token") and config.get("cf_account_id"):
         session, backend = _create_curl_cffi_llm_session()
         try:
@@ -951,7 +1018,7 @@ def call_llm(
                 _print_llm(f"#5 failed: {e}. Trying Groq 8b.")
                 logger.warning("Cloudflare failed: %s. Trying Groq 8b.", e)
 
-    # ── #6. Groq 8b (Fallback 5: lighter model) ───────────────────────────────
+    # ── #7. Groq 8b (Fallback 6: lighter model) ───────────────────────────────
     if not is_dead("groq_8b") and config.get("groq_api_key"):
         session, backend = _create_curl_cffi_llm_session()
         try:
@@ -997,7 +1064,7 @@ def call_llm(
                 _print_llm(f"#6 failed: {e}. Trying Gemini.")
                 logger.warning("Groq 8b failed: %s. Trying Gemini.", e)
 
-    # ── #7. Gemini (Fallback 6) ─────────────────────────────────────────────
+    # ── #8. Gemini (Fallback 7) ─────────────────────────────────────────────
     if not is_dead("gemini") and config["local"] and config["local"]["llm"].get("api_key"):
         session, backend = _create_curl_cffi_llm_session()
         try:
@@ -1058,7 +1125,7 @@ def call_llm(
                 _print_llm(f"#7 failed on {model_name}: {e}. Trying Bedrock.")
                 logger.warning("Gemini failed: %s. Trying Bedrock.", e)
 
-    # ── #8. NVIDIA Bedrock (Fallback 7) ─────────────────────────────────────
+    # ── #9. NVIDIA Bedrock (Fallback 8) ─────────────────────────────────────
     _BEDROCK_API_BASE = "https://integrate.api.nvidia.com/v1"
     _BEDROCK_MODELS = [
         {"id": "nvidia/nemotron-3-super-120b-a12b", "name": "Nemotron-3-Super-120B", "provider": "Nvidia"},
