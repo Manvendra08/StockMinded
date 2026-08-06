@@ -262,6 +262,11 @@ def _get_ai_config() -> Optional[dict]:
 # In-memory cache: skip dead providers for 600s after failure
 _dead_providers: dict[str, float] = {}
 _DEAD_PROVIDER_TTL = 600.0  # Default: Re-try dead provider after 10 minutes (Kilo uses 1800s)
+# Token ceiling for LLM calls that don't pass an explicit max_tokens. Free gateway
+# reasoning models often consume a few thousand tokens on chain-of-thought before
+# emitting the final answer; 2048 truncated them (finish_reason=length, empty content).
+# This is a ceiling, not a target: models stop at finish_reason=stop when done.
+_DEFAULT_MAX_TOKENS = 4096
 
 # Global rate limiter for SambaNova: max 1 call per 30 seconds to avoid 429
 _sambanova_last_call_ts: float = 0.0
@@ -588,7 +593,7 @@ def call_llm(
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": prompt},
                     ],
-                    "max_tokens": max_tokens or 2048,
+                    "max_tokens": max_tokens or _DEFAULT_MAX_TOKENS,
                 }
                 # Free-tier models rarely support response_format; omit to avoid 400s
                 if json_mode and (":free" in model_id or "/free" in model_id):
@@ -733,7 +738,7 @@ def call_llm(
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": prompt},
                     ],
-                    "max_tokens": max_tokens or 2048,
+                    "max_tokens": max_tokens or _DEFAULT_MAX_TOKENS,
                     "stream": False,
                 }
                 if json_mode:
@@ -798,7 +803,7 @@ def call_llm(
                         {"role": "user", "content": prompt},
                     ],
                     "response_format": {"type": "json_object"} if json_mode else None,
-                    "max_tokens": max_tokens or 2048,
+                    "max_tokens": max_tokens or _DEFAULT_MAX_TOKENS,
                 }
                 if _httpx is not None:
                     resp = _opencode_post(url, headers, payload, 15)
@@ -851,7 +856,7 @@ def call_llm(
                     {"role": "user", "content": prompt},
                 ],
                 "response_format": {"type": "json_object"} if json_mode else None,
-                "max_tokens": max_tokens or 2048,
+                "max_tokens": max_tokens or _DEFAULT_MAX_TOKENS,
             }
             resp = session.post(url, headers=headers, json=payload, timeout=15)
             resp.raise_for_status()
@@ -906,7 +911,7 @@ def call_llm(
                         {"role": "user", "content": prompt},
                     ],
                     "response_format": {"type": "json_object"} if json_mode else None,
-                    "max_tokens": max_tokens or 2048,
+                    "max_tokens": max_tokens or _DEFAULT_MAX_TOKENS,
                 }
                 resp = session.post(url, headers=headers, json=payload, timeout=30)
                 resp.raise_for_status()
@@ -939,7 +944,7 @@ def call_llm(
                     {"role": "user", "content": prompt},
                 ],
                 "response_format": {"type": "json_object"} if json_mode else None,
-                "max_tokens": max_tokens or 2048,
+                "max_tokens": max_tokens or _DEFAULT_MAX_TOKENS,
                 "temperature": 0.6,
             }
             resp = session.post(url, headers=headers, json=payload, timeout=30)
@@ -984,7 +989,7 @@ def call_llm(
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": prompt},
                 ],
-                "max_tokens": max_tokens or 2048,
+                "max_tokens": max_tokens or _DEFAULT_MAX_TOKENS,
             }
             resp = session.post(url, headers=headers, json=payload, timeout=30)
             resp.raise_for_status()
@@ -1036,7 +1041,7 @@ def call_llm(
                     {"role": "user", "content": prompt},
                 ],
                 "response_format": {"type": "json_object"} if json_mode else None,
-                "max_tokens": max_tokens or 2048,
+                "max_tokens": max_tokens or _DEFAULT_MAX_TOKENS,
             }
             resp = session.post(url, headers=headers, json=payload, timeout=15)
             resp.raise_for_status()
@@ -1151,7 +1156,7 @@ def call_llm(
                         {"role": "user", "content": prompt},
                     ],
                     "response_format": {"type": "json_object"} if json_mode else None,
-                    "max_tokens": max_tokens or 2048,
+                    "max_tokens": max_tokens or _DEFAULT_MAX_TOKENS,
                 }
                 resp = session.post(url, headers=headers, json=payload, timeout=30)
                 resp.raise_for_status()
@@ -2647,7 +2652,10 @@ def get_market_news_sentiment(market_context: dict | None = None) -> Optional[di
         f"Headlines (newest first):\n{news_text}"
     )
 
-    sentiment, model_used = call_llm(prompt, return_provider=True)
+    # Sentiment task is token-hungry (25+ headlines + rules + history context).
+    # Free gateway reasoning models burn thousands of tokens on chain-of-thought
+    # before emitting the final JSON; 2048/4096 truncated them (finish_reason=length).
+    sentiment, model_used = call_llm(prompt, return_provider=True, max_tokens=8192)
 
     # 3. Last fallback: Local lexicon
     if not sentiment:
