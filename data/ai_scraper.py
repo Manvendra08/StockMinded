@@ -264,9 +264,10 @@ _dead_providers: dict[str, float] = {}
 _DEAD_PROVIDER_TTL = 600.0  # Default: Re-try dead provider after 10 minutes (Kilo uses 1800s)
 # Token ceiling for LLM calls that don't pass an explicit max_tokens. Free gateway
 # reasoning models often consume a few thousand tokens on chain-of-thought before
-# emitting the final answer; 2048 truncated them (finish_reason=length, empty content).
+# emitting the final answer; 2048/4096 truncated them (finish_reason=length, empty
+# content) even on short prompts (stepfun needed 4465 tokens for a 3-field verdict).
 # This is a ceiling, not a target: models stop at finish_reason=stop when done.
-_DEFAULT_MAX_TOKENS = 4096
+_DEFAULT_MAX_TOKENS = 8192
 
 # Global rate limiter for SambaNova: max 1 call per 30 seconds to avoid 429
 _sambanova_last_call_ts: float = 0.0
@@ -2658,8 +2659,10 @@ def get_market_news_sentiment(market_context: dict | None = None) -> Optional[di
     sentiment, model_used = call_llm(prompt, return_provider=True, max_tokens=8192)
 
     # 3. Last fallback: Local lexicon
-    if not sentiment:
-        logger.info("Brain Chain failed. Using Local Lexicon fallback.")
+    # Require a dict, not just truthy: gateway models sometimes return a JSON array
+    # (list) for a prompt that asks for an object, and callers do .get() on the result.
+    if not isinstance(sentiment, dict):
+        logger.info("Brain Chain failed (non-dict response). Using Local Lexicon fallback.")
         try:
             sentiment = analyze_sentiment_locally(headlines)
             model_used = "Local Lexicon (fallback)"

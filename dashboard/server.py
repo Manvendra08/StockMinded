@@ -3146,7 +3146,9 @@ def _brain_verdict_review(data: dict) -> dict:
             prompt,
             system_prompt="You are a risk manager. Return strict JSON only.",
             json_mode=True,
-            max_tokens=100,
+            # 100 was too small: free gateway reasoning models burn thousands of tokens
+            # on chain-of-thought before emitting the small {approved, reason, action} JSON.
+            max_tokens=8192,
             return_provider=True,
         )
         if decision is None:
@@ -3253,9 +3255,13 @@ def _brain_audit(data: dict, alerts: list[dict]) -> bool:
             prompt,
             system_prompt="You are a trade reviewer for Indian markets. Default to APPROVE unless there is a clear risk contradiction. Reply with strict JSON only.",
             json_mode=True,
-            max_tokens=50,
+            # 50 was too small: gateway reasoning models truncate (finish_reason=length)
+            # and return prose-only, failing the chain. 8192 gives room to finish.
+            max_tokens=8192,
         )
-        approved = True if decision is None else bool(decision.get("approved"))
+        approved = (
+            True if decision is None else bool(decision.get("approved") if isinstance(decision, dict) else False)
+        )
         _brain_audit_cache[cache_key] = approved
         _brain_audit_cache_ts[cache_key] = _time.time()
         _prune_brain_audit_cache()  # M4: keep the cache bounded
