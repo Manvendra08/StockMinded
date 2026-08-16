@@ -10,6 +10,8 @@ data/logs/
 .claude/
 data/cache/
 dashboard/paper_trades.json
+dashboard/paper_trades*.json
+dashboard/paper_trades.backup*
 .gemini/
 .roo/
 .cursor/
